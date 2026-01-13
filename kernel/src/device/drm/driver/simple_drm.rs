@@ -4,18 +4,13 @@ use aster_gpu::GpuDevice;
 
 use crate::{
     device::drm::{
-        DrmDevice, DrmDriver,
-        driver::{DrmDriverFeatures, fake_modeinfo},
-        drm_dev_register,
-        mode_config::{
+        DrmDevice, DrmDriver, driver::{DrmDriverFeatures, DrmDriverOps, fake_modeinfo}, drm_dev_register, gem::memfd::DRM_MEMFD_DRIVER_OPS, mode_config::{
             connector::{ConnectorStatus, DrmConnector, funcs::ConnectorFuncs},
             crtc::{DrmCrtc, funcs::CrtcFuncs},
             encoder::{DrmEncoder, EncoderType, funcs::EncoderFuncs},
             plane::{DrmPlane, PlaneType, funcs::PlaneFuncs},
-        },
-    },
-    drm_register_driver,
-    prelude::*,
+        }
+    }, drm_driver_ops, drm_register_driver, prelude::*
 };
 
 const SIMPLEDRM_NAME: &'static str = "simpledrm";
@@ -104,6 +99,10 @@ impl DrmDriver for SimpleDrmDriver {
 
     fn driver_features(&self) -> DrmDriverFeatures {
         DrmDriverFeatures::ATOMIC | DrmDriverFeatures::GEM | DrmDriverFeatures::MODESET
+    }
+
+    fn driver_ops(&self) -> DrmDriverOps {
+        drm_driver_ops!(DRM_MEMFD_DRIVER_OPS, ..DrmDriverOps::EMPTY)
     }
 }
 

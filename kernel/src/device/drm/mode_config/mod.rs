@@ -3,15 +3,17 @@ use core::sync::atomic::{AtomicU8, AtomicU32, Ordering};
 use hashbrown::HashMap;
 
 use crate::{
-    device::drm::mode_config::{
-        connector::{DrmConnector, property::ConnectorProps}, crtc::DrmCrtc, encoder::DrmEncoder, plane::DrmPlane, property::DrmProperty
-    },
+    device::drm::{gem::DrmGemObject, mode_config::{
+        connector::DrmConnector, crtc::DrmCrtc, encoder::DrmEncoder, framebuffer::DrmFramebuffer,
+        plane::DrmPlane, property::DrmProperty,
+    }},
     prelude::*,
 };
 
 pub(super) mod connector;
 pub(super) mod crtc;
 pub(super) mod encoder;
+pub(super) mod framebuffer;
 pub(super) mod plane;
 pub(super) mod property;
 
@@ -61,6 +63,7 @@ pub(super) struct DrmModeConfig {
     crtcs: HashMap<u32, Arc<DrmCrtc>>,
     encoders: HashMap<u32, Arc<DrmEncoder>>,
     connectors: HashMap<u32, Arc<DrmConnector>>,
+    framebuffers: HashMap<u32, Arc<DrmFramebuffer>>,
 
     next_object_id: AtomicU32,
     objects: HashMap<u32, Arc<dyn DrmModeObject>>,
@@ -92,6 +95,7 @@ impl DrmModeConfig {
             crtcs: HashMap::new(),
             encoders: HashMap::new(),
             connectors: HashMap::new(),
+            framebuffers: HashMap::new(),
 
             preferred_depth: 16,
             prefer_shadow: 0,
@@ -116,7 +120,7 @@ impl DrmModeConfig {
             async_page_flip: false,
         }
     }
-    
+
     /// Initialize standard, driver-independent DRM properties for this device.
     ///
     /// In the Linux DRM design, a driver is responsible for registering a set of
@@ -132,7 +136,7 @@ impl DrmModeConfig {
     /// Object-specific or driver-private properties must NOT be registered here;
     /// they should be added during the corresponding object initialization.
     pub fn init_standard_properties(&mut self) {
-        // TODO: iterate over the predefined set of standard properties from object/property.rs 
+        // TODO: iterate over the predefined set of standard properties from object/property.rs
         // and register them in a generic, data-driven way instead of manual insertion.
     }
 
@@ -141,6 +145,29 @@ impl DrmModeConfig {
     }
     pub fn next_prop_id(&self) -> u32 {
         self.next_prop_id.fetch_add(1, Ordering::SeqCst)
+    }
+
+    pub fn create_framebuffer(
+        &mut self,
+        width: u32,
+        height: u32,
+        pitch: u32,
+        bpp: u32,
+        gem_obj: Arc<DrmGemObject>,
+    ) -> u32 {
+        let id = self.next_object_id();
+        let fb = Arc::new(DrmFramebuffer::new(id, width, height, pitch, bpp, gem_obj));
+        self.framebuffers.insert(id, fb.clone());
+        self.objects.insert(id, fb);
+        id
+    }
+
+    pub fn lookup_framebuffer(&self, fb_id: &u32) -> Option<Arc<DrmFramebuffer>> {
+        self.framebuffers.get(fb_id).cloned()
+    }
+
+    pub fn remove_framebuffer(&mut self, fb_id: &u32) -> Option<Arc<DrmFramebuffer>> {
+        self.framebuffers.remove(fb_id)
     }
 
     pub fn count_planes(&self) -> u32 {
@@ -155,6 +182,10 @@ impl DrmModeConfig {
     pub fn count_connectors(&self) -> u32 {
         self.connectors.iter().count() as u32
     }
+    pub fn count_framebuffers(&self) -> u32 {
+        self.framebuffers.iter().count() as u32
+    }
+
     pub fn planes_id(&self) -> impl Iterator<Item = u32> + '_ {
         self.planes.keys().copied()
     }
@@ -167,7 +198,10 @@ impl DrmModeConfig {
     pub fn connectors_id(&self) -> impl Iterator<Item = u32> + '_ {
         self.connectors.keys().copied()
     }
-    
+    pub fn framebuffer_id(&self) -> impl Iterator<Item = u32> + '_ {
+        self.framebuffers.keys().copied()
+    }
+
     pub fn get_plane(&self, id: &u32) -> Option<Arc<DrmPlane>> {
         self.planes.get(id).cloned()
     }

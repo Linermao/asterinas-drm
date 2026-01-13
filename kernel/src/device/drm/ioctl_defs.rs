@@ -2,15 +2,21 @@ use ostd::Pod;
 
 use crate::{
     device::drm::mode_config::{DrmModeModeInfo, property::DRM_PROP_NAME_LEN},
-    util::ioctl::{InOutData, ioc},
+    util::ioctl::{InData, InOutData, ioc},
 };
 
-pub(super) type DrmIoctlModeGetResources        = ioc!(DRM_IOCTL_MODE_GETRESOURCES,          b'd', 0xa0, InOutData<DrmModeGetResources>);
+pub(super) type DrmIoctlModeGetResources        = ioc!(DRM_IOCTL_MODE_GETRESOURCES,         b'd', 0xa0, InOutData<DrmModeGetResources>);
 pub(super) type DrmIoctlModeGetCrtc             = ioc!(DRM_IOCTL_MODE_GETCRTC,              b'd', 0xa1, InOutData<DrmModeCrtc>);
+pub(super) type DrmIoctlModeSetCrtc             = ioc!(DRM_IOCTL_MODE_SETCRTC,              b'd', 0xa2, InOutData<DrmModeCrtc>);
 pub(super) type DrmIoctlModeGetEncoder          = ioc!(DRM_IOCTL_MODE_GETENCODER,           b'd', 0xa6, InOutData<DrmModeGetEncoder>);
 pub(super) type DrmIoctlModeGetConnector        = ioc!(DRM_IOCTL_MODE_GETCONNECTOR,         b'd', 0xa7, InOutData<DrmModeGetConnector>);
 pub(super) type DrmIoctlModeGetProperty         = ioc!(DRM_IOCTL_MODE_GETPROPERTY,          b'd', 0xaa, InOutData<DrmModeGetProperty>);
 pub(super) type DrmIoctlModeGetPropBlob         = ioc!(DRM_IOCTL_MODE_GETPROPBLOB,          b'd', 0xac, InOutData<DrmModeGetBlob>);
+pub(super) type DrmIoctlModeAddFB               = ioc!(DRM_IOCTL_MODE_ADDFB,                b'd', 0xae, InOutData<DrmModeFBCmd>);
+pub(super) type DrmIoctlModeRmFB                = ioc!(DRM_IOCTL_MODE_RMFB,                 b'd', 0xaf, InData<DrmModeFBCmd>);
+pub(super) type DrmIoctlModeCreateDumb          = ioc!(DRM_IOCTL_MODE_CREATE_DUMB,          b'd', 0xb2, InOutData<DrmModeCreateDumb>);
+pub(super) type DrmIoctlModeMapDumb             = ioc!(DRM_IOCTL_MODE_MAP_DUMB,             b'd', 0xb3, InOutData<DrmModeMapDumb>);
+pub(super) type DrmIoctlModeDestroyDumb         = ioc!(DRM_IOCTL_MODE_DESTROY_DUMB,         b'd', 0xb4, InData<DrmModeDestroyDumb>);
 pub(super) type DrmIoctlModeGetPlaneResources   = ioc!(DRM_IOCTL_MODE_GETPLANERESOURCES,    b'd', 0xb5, InOutData<DrmModeGetPlaneRes>);
 pub(super) type DrmIoctlModeGetPlane            = ioc!(DRM_IOCTL_MODE_GETPLANE,             b'd', 0xb6, InOutData<DrmModeGetPlane>);
 pub(super) type DrmIoctlModeObjectGetProps      = ioc!(DRM_IOCTL_MODE_OBJ_GETPROPERTIES,    b'd', 0xb9, InOutData<DrmModeObjectGetProps>);
@@ -170,6 +176,52 @@ pub(super) struct DrmModeGetBlob {
     pub blob_id: u32,
     pub length: u32,
     pub data: u64,
+}
+
+#[repr(C)]
+#[derive(Debug, Default, Clone, Copy, Pod)]
+pub struct DrmModeFBCmd {
+    pub fb_id: u32,
+    pub width: u32,
+    pub height: u32,
+    pub pitch: u32,
+    pub bpp: u32,
+    pub depth: u32,
+    /* driver specific handle */
+    pub handle: u32,
+}
+
+#[repr(C)]
+#[derive(Debug, Default, Clone, Copy, Pod)]
+pub struct DrmModeCreateDumb {
+    pub height: u32,
+    pub width: u32,
+    pub bpp: u32,
+    pub flags: u32,
+    /* handle, pitch, size will be returned */
+    pub handle: u32,
+    pub pitch: u32,
+    pub size: u64,
+}
+
+#[repr(C)]
+#[derive(Debug, Default, Clone, Copy, Pod)]
+pub struct DrmModeMapDumb {
+    /** Handle for the object being mapped. */
+    pub handle: u32,
+    pub pad: u32,
+    /**
+     * Fake offset to use for subsequent mmap call
+     *
+     * This is a fixed-size type for 32/64 compatibility.
+     */
+    pub offset: u64,
+}
+
+#[repr(C)]
+#[derive(Debug, Default, Clone, Copy, Pod)]
+pub struct DrmModeDestroyDumb {
+    pub handle: u32,
 }
 
 #[repr(C)]

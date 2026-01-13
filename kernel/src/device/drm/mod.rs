@@ -1,5 +1,6 @@
 mod device;
 mod driver;
+mod gem;
 mod file;
 mod ioctl_defs;
 mod mode_config;

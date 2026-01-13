@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
 use align_ext::AlignExt;
+use device_id::{DeviceId, MajorId};
 
 use super::SyscallReturn;
 use crate::{
@@ -111,11 +112,36 @@ fn do_sys_mmap(
                 vm_may_perms.remove(VmPerms::MAY_WRITE);
             }
 
-            options = options
-                .may_perms(vm_may_perms)
-                .mappable(file.mappable()?)
-                .vmo_offset(offset)
-                .handle_page_faults_around();
+            // TODO: special‑case DRM mmap offset handling.
+            //
+            // Right now we detect the DRM device (major 226) in order to extract
+            // the provided `offset` and treat it as a GEM fake mmap handle. In DRM
+            // mmap semantics the userspace must supply the fake offset associated
+            // with a GEM object (produced earlier by a map ioctl) so we know which
+            // object is being mapped. However, this test based on device major is
+            // only a workaround for simple tests.
+            //
+            // Once we have real physical devices and a proper mmap path, the mapping
+            // should be handled by a dedicated offset allocation/lookup layer rather
+            // than by special‑casing the device major. Additionally more context (such
+            // as page permissions and device‑specific parameters) will be needed to
+            // correctly service the mmap request for actual hardware.
+            let rdev = file.inode().metadata().rdev;
+            let device_id = DeviceId::from_encoded_u64(rdev);
+            if rdev != 0
+                && device_id.is_some_and(|d| d.major() == MajorId::new(226)) 
+            {
+                options = options
+                    .may_perms(vm_may_perms)
+                    .mappable(file.mappable_with_offset(offset)?)
+                    .handle_page_faults_around();
+            } else {
+                options = options
+                    .may_perms(vm_may_perms)
+                    .mappable(file.mappable()?)
+                    .vmo_offset(offset)
+                    .handle_page_faults_around();
+            }
         }
 
         options

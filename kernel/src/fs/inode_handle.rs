@@ -338,6 +338,16 @@ impl FileLike for InodeHandle {
             return_errno_with_message!(Errno::ENODEV, "the file is not mappable");
         }
     }
+        
+    fn mappable_with_offset(&self, offset: usize) -> Result<Mappable> {
+        if let Some(ref file_io) = self.file_io {
+            // Otherwise, it is a special file (e.g. device file) and we should
+            // return the file-specific mappable object.
+            file_io.mappable_with_offset(offset)
+        } else {
+            return_errno_with_message!(Errno::ENODEV, "the file is not mappable");
+        }
+    }
 
     fn resize(&self, new_size: usize) -> Result<()> {
         if self.rights.is_empty() {
@@ -469,6 +479,11 @@ pub trait FileIo: Pollable + InodeIo + Send + Sync + 'static {
 
     // See `FileLike::mappable`.
     fn mappable(&self) -> Result<Mappable> {
+        return_errno_with_message!(Errno::EINVAL, "the file is not mappable");
+    }
+
+    // See `FileLike::mappable_with_offset`.
+    fn mappable_with_offset(&self, _offset: usize) -> Result<Mappable> {
         return_errno_with_message!(Errno::EINVAL, "the file is not mappable");
     }
 
