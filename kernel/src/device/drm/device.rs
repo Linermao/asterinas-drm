@@ -3,7 +3,7 @@ use alloc::{format, sync::Arc};
 use device_id::{DeviceId, MajorId, MinorId};
 
 use crate::{
-    device::drm::{DrmDriver, driver::DrmDriverFeatures, file::DrmFile},
+    device::drm::{DrmDriver, driver::DrmDriverFeatures, file::DrmFile, mode_config::DrmModeConfig},
     fs::{
         device::{Device, DeviceType},
         inode_handle::FileIo,
@@ -39,6 +39,8 @@ pub(super) struct DrmDevice<D: DrmDriver> {
     /// These flags describe supported DRM functionality and are used by
     /// userspace (via ioctls) and the DRM core to gate behavior.
     driver_features: DrmDriverFeatures,
+
+    mode_config: Mutex<DrmModeConfig>,
 }
 
 impl<D: DrmDriver> DrmDevice<D> {
@@ -47,7 +49,12 @@ impl<D: DrmDriver> DrmDevice<D> {
             index,
             driver,
             driver_features,
+            mode_config: Mutex::new(DrmModeConfig::default()),
         }
+    }
+
+    pub fn resources(&self) -> &Mutex<DrmModeConfig> {
+        &self.mode_config
     }
 
     pub fn check_feature(&self, features: DrmDriverFeatures) -> bool {
@@ -101,6 +108,14 @@ impl<D: DrmDriver> DrmMinor<D> {
                 weak_self: weak_ref.clone(),
             }
         })
+    }
+        
+    pub fn resources(&self) -> &Mutex<DrmModeConfig> {
+        &self.device.resources()
+    }
+
+    pub fn check_feature(&self, features: DrmDriverFeatures) -> bool {
+        self.device.check_feature(features)
     }
 }
 

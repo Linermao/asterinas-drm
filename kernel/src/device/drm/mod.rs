@@ -1,6 +1,8 @@
 mod device;
 mod driver;
 mod file;
+mod ioctl_defs;
+mod mode_config;
 
 use hashbrown::HashMap;
 
@@ -44,7 +46,7 @@ pub(super) fn init_in_first_kthread() -> Result<()> {
     let mut any_success = false;
 
     // TODO: Do not rely on device.name() for driver matching.
-    // 
+    //
     // Matching GpuDevice and DrmDriver, if matched, create DrmDevice.
     // Introduce a capability- or ID-based matching interface between GpuDevice and
     // DrmDriver to enable precise, extensible, and bus-agnostic driver selection.
@@ -65,10 +67,10 @@ pub(super) fn init_in_first_kthread() -> Result<()> {
 }
 
 fn drm_dev_register<D: DrmDriver>(device: Arc<DrmDevice<D>>) -> Result<()> {
-	if device.check_feature(DrmDriverFeatures::COMPUTE_ACCEL) {
+    if device.check_feature(DrmDriverFeatures::COMPUTE_ACCEL) {
         let drm_minor = DrmMinor::new(device.clone(), DrmMinorType::Accel);
         char::register(drm_minor)?;
-	} else {
+    } else {
         if device.check_feature(DrmDriverFeatures::RENDER) {
             let drm_minor = DrmMinor::new(device.clone(), DrmMinorType::Render);
             char::register(drm_minor)?;

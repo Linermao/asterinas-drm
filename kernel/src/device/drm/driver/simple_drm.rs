@@ -4,7 +4,15 @@ use aster_gpu::GpuDevice;
 
 use crate::{
     device::drm::{
-        DrmDevice, DrmDriver, DrmMinorType, driver::DrmDriverFeatures, drm_dev_register,
+        DrmDevice, DrmDriver,
+        driver::{DrmDriverFeatures, fake_modeinfo},
+        drm_dev_register,
+        mode_config::{
+            connector::{ConnectorStatus, DrmConnector, funcs::ConnectorFuncs},
+            crtc::{DrmCrtc, funcs::CrtcFuncs},
+            encoder::{DrmEncoder, EncoderType, funcs::EncoderFuncs},
+            plane::{DrmPlane, PlaneType, funcs::PlaneFuncs},
+        },
     },
     drm_register_driver,
     prelude::*,
@@ -34,8 +42,36 @@ impl SimpleDrmDevice {
     }
 
     fn init(&self) -> Result<()> {
-        // TODO: Register the DRM object here, including setting up
-        // its properties and associating the relevant object functions.
+        let mut resources = self.device.resources().lock();
+        resources.init_standard_properties();
+
+        let primary_plane = DrmPlane::init(
+            &mut resources,
+            PlaneType::Primary,
+            Box::new(SimplePlaneFuncs),
+        )?;
+        let crtc = DrmCrtc::init_with_planes(
+            &mut resources,
+            None,
+            primary_plane,
+            None,
+            Box::new(SimpleCrtcFuncs),
+        )?;
+        let encoder = DrmEncoder::init_with_crtcs(
+            &mut resources,
+            EncoderType::VIRTUAL,
+            &[crtc],
+            Box::new(SimpleEncoderFuncs),
+        )?;
+
+        let fake_modeinfo = fake_modeinfo();
+        let _connector = DrmConnector::init_with_encoder(
+            &mut resources,
+            ConnectorStatus::Connected,
+            &[fake_modeinfo],
+            &[encoder],
+            Box::new(SimpleConnectorFuncs),
+        )?;
 
         Ok(())
     }
@@ -67,11 +103,29 @@ impl DrmDriver for SimpleDrmDriver {
     }
 
     fn driver_features(&self) -> DrmDriverFeatures {
-        DrmDriverFeatures::ATOMIC 
-        | DrmDriverFeatures::GEM
-        | DrmDriverFeatures::MODESET 
+        DrmDriverFeatures::ATOMIC | DrmDriverFeatures::GEM | DrmDriverFeatures::MODESET
     }
 }
+
+#[derive(Debug)]
+struct SimplePlaneFuncs;
+
+#[derive(Debug)]
+struct SimpleCrtcFuncs;
+
+#[derive(Debug)]
+struct SimpleEncoderFuncs;
+
+#[derive(Debug)]
+struct SimpleConnectorFuncs;
+
+impl PlaneFuncs for SimplePlaneFuncs {}
+
+impl CrtcFuncs for SimpleCrtcFuncs {}
+
+impl EncoderFuncs for SimpleEncoderFuncs {}
+
+impl ConnectorFuncs for SimpleConnectorFuncs {}
 
 #[derive(Debug)]
 struct SimpleGpuDevice;
