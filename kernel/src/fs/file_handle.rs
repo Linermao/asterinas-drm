@@ -69,6 +69,10 @@ pub trait FileLike: Pollable + Send + Sync + Any {
         return_errno_with_message!(Errno::ENODEV, "the file is not mappable");
     }
 
+    fn mappable_with_offset(&self, _offset: usize) -> Result<Mappable> {
+        return_errno_with_message!(Errno::EINVAL, "the file is not mappable");
+    }
+
     fn resize(&self, new_size: usize) -> Result<()> {
         return_errno_with_message!(Errno::EINVAL, "resize is not supported");
     }

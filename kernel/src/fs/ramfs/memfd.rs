@@ -237,6 +237,7 @@ impl Inode for MemfdInode {
     }
 }
 
+#[derive(Debug)]
 pub struct MemfdFile {
     memfd_inode: Arc<dyn Inode>,
     offset: Mutex<usize>,

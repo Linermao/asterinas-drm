@@ -1,6 +1,6 @@
 pub(super) mod simple_drm;
 
-use crate::{device::drm::mode_config::DrmModeModeInfo, prelude::*};
+use crate::{device::drm::{gem::DrmGemObject, mode_config::DrmModeModeInfo}, prelude::*};
 
 bitflags::bitflags! {
     pub struct DrmDriverFeatures: u32 {
@@ -54,6 +54,8 @@ pub(super) trait DrmDriver: Send + Sync + Any + Debug {
     fn handle_command(&self, _cmd: u32, _data: *mut u8) -> Result<()> {
         return_errno!(Errno::EACCES)
     }
+
+    fn driver_ops(&self) -> DrmDriverOps;
 }
 
 /// Defines and registers a DRM driver with the global driver table.
@@ -76,6 +78,65 @@ macro_rules! drm_register_driver {
         pub fn register_driver(driver_table: &mut $crate::device::drm::DriverTable) {
             driver_table.insert($drv_name.to_string(), alloc::sync::Arc::new($name {}));
         }
+    };
+}
+
+/// Optional driver operations for generic DRM capabilities.
+///
+/// This struct defines a set of driver-provided callbacks that the DRM core
+/// may invoke for standard buffer management operations. Drivers that support
+/// these features (e.g., KMS dumb buffers) should supply appropriate
+/// function implementations; drivers that do not can leave the fields `None`.
+///
+/// Linux DRM exposes similar optional hooks (such as `dumb_create` and
+/// `dumb_map_offset`) that are invoked via the corresponding ioctls when
+/// userspace requests simple scanout buffer creation or mmap offsets.
+pub(super) struct DrmDriverOps {
+    /// This creates a new dumb buffer in the driver's backing storage manager (GEM,
+	/// TTM or something else entirely) and returns the resulting buffer handle. This
+	/// handle can then be wrapped up into a framebuffer modeset object.
+    pub dumb_create: Option<fn(width: u32, height: u32, bpp: u32) -> Result<Arc<DrmGemObject>>>,
+}
+
+impl DrmDriverOps {
+    pub const EMPTY: Self = Self { dumb_create: None };
+
+    pub fn merge(self, other: Self) -> Self {
+        Self {
+            dumb_create: if other.dumb_create.is_some() {
+                other.dumb_create
+            } else {
+                self.dumb_create
+            }
+        }
+    }
+}
+
+/// This macro recursively merges a list of `DrmDriverOps` expressions into
+/// one. Each item in the invocation is merged with the next by calling
+/// `.merge(...)` on the head and the result of the recursive call on the
+/// tail, yielding a consolidated `DrmDriverOps`.
+/// 
+/// produces a merged `DrmDriverOps` that combines the supplied ops with
+/// the baseline `DrmDriverOps::EMPTY`.
+///
+/// This pattern uses declarative macro recursion to build up the final ops
+/// set at compile time.
+/// 
+/// Example:
+/// ```rust
+/// fn driver_ops(&self) -> DrmDriverOps {
+///     drm_driver_ops!(DRM_MEMFD_DRIVER_OPS, ..DrmDriverOps::EMPTY)
+/// }
+/// ```
+#[macro_export]
+macro_rules! drm_driver_ops {
+    (..$base:expr) => {
+        $base
+    };
+
+    ($head:expr, $($tail:tt)+) => {
+        $head.merge(drm_driver_ops!($($tail)+))
     };
 }
 

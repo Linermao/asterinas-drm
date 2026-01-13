@@ -1,9 +1,20 @@
-use ostd::mm::VmIo;
+use core::sync::atomic::{AtomicU32, Ordering};
+
+use aster_framebuffer::FRAMEBUFFER;
+use hashbrown::HashMap;
+use ostd::mm::{VmIo, io_util::HasVmReaderWriter};
 
 use crate::{
     current_userspace,
     device::drm::{
-        DrmDriver, DrmMinor, driver::DrmDriverFeatures, ioctl_defs::*, mode_config::{DrmModeModeInfo, property::{PropertyEnum, PropertyKind}},
+        DrmDriver, DrmMinor,
+        driver::DrmDriverFeatures,
+        gem::{DrmGemObject, memfd::DrmMemfdFile},
+        ioctl_defs::*,
+        mode_config::{
+            DrmModeModeInfo,
+            property::{PropertyEnum, PropertyKind},
+        },
     },
     events::IoEvents,
     fs::{
@@ -37,6 +48,14 @@ use crate::{
 #[derive(Debug)]
 pub(super) struct DrmFile<D: DrmDriver> {
     device: Arc<DrmMinor<D>>,
+
+    /// GEM objects are referenced by 32‑bit handles that
+    /// are *per file descriptor*. Each open DRM file maintains its own
+    /// namespace of GEM handles. This atomic counter is used to allocate
+    /// unique handles for newly created GEM objects visible to userspace
+    /// through this file.
+    next_handle: AtomicU32,
+    gem_table: Mutex<HashMap<u32, Arc<DrmGemObject>>>,
 }
 
 impl<D: DrmDriver> Pollable for DrmFile<D> {
@@ -47,9 +66,29 @@ impl<D: DrmDriver> Pollable for DrmFile<D> {
 }
 
 impl<D: DrmDriver> DrmFile<D> {
-    // Additional methods can be added here if needed
     pub fn new(device: Arc<DrmMinor<D>>) -> Self {
-        Self { device }
+        Self { 
+            device,
+
+            next_handle: AtomicU32::new(1),
+            gem_table: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn next_handle(&self) -> u32 {
+        self.next_handle.fetch_add(1, Ordering::SeqCst)
+    }
+
+    fn insert_gem(&self, handle: u32, gem_object: Arc<DrmGemObject>) {
+        self.gem_table.lock().insert(handle, gem_object);
+    }
+
+    fn lookup_gem(&self, handle: &u32) -> Option<Arc<DrmGemObject>> {
+        self.gem_table.lock().get(handle).cloned()
+    }
+
+    fn remove_gem(&self, handle: &u32) -> Option<Arc<DrmGemObject>> {
+        self.gem_table.lock().remove(handle)
     }
 }
 
@@ -82,8 +121,16 @@ impl<D: DrmDriver> FileIo for DrmFile<D> {
         true
     }
 
-    fn mappable(&self) -> Result<Mappable> {
-        todo!()
+    fn mappable_with_offset(&self, offset: usize) -> Result<Mappable> {
+        if let Some(gem_obj) = self.device.lookup_offset(&(offset as u64)) {
+            if let Some(drm_memfd) = gem_obj.downcast_ref::<DrmMemfdFile>() {
+                return drm_memfd.mappable();
+            } else {
+                // TODO: hardware memory mmap
+            }
+        }
+
+        return_errno!(Errno::EINVAL);
     }
 
     fn ioctl(&self, raw_ioctl: RawIoctl) -> Result<i32> {
@@ -102,8 +149,7 @@ impl<D: DrmDriver> FileIo for DrmFile<D> {
                 let count_crtcs = res.count_crtcs();
                 let count_encoders = res.count_encoders();
                 let count_connectors = res.count_connectors();
-                // TODO: count drm_framebuffers
-                let count_fbs = 0;
+                let count_fbs = res.count_framebuffers();
 
                 if user_data.is_first_call() {
                     user_data.count_crtcs = count_crtcs;
@@ -142,6 +188,16 @@ impl<D: DrmDriver> FileIo for DrmFile<D> {
                     } else {
                         return_errno!(Errno::EFAULT);
                     }
+
+                    if user_data.count_fbs >= count_fbs {
+                        for (i, id) in res.framebuffer_id().enumerate() {
+                            let offset =
+                                user_data.encoder_id_ptr as usize + i * core::mem::size_of::<u32>();
+                            current_userspace!().write_val(offset, &id)?;
+                        }
+                    } else {
+                        return_errno!(Errno::EFAULT);
+                    }
                 }
 
                 Ok(0)
@@ -171,6 +227,32 @@ impl<D: DrmDriver> FileIo for DrmFile<D> {
                 (user_data.x, user_data.y) = crtc.xy();
 
                 cmd.write(&user_data)?;
+
+                Ok(0)
+            }
+            cmd @ DrmIoctlModeSetCrtc => {
+                if !self.device.check_feature(DrmDriverFeatures::MODESET) {
+                    return_errno!(Errno::EOPNOTSUPP);
+                }
+
+                let user_data: DrmModeCrtc = cmd.read()?;
+                let fb_id = user_data.fb_id;
+
+                // TODO: Now just legacy achievement, copy the drm_framebuffer
+                // to firmware_framebuffer
+                if let Some(framebuffer) = FRAMEBUFFER.get() {
+                    let iomem = framebuffer.io_mem();
+                    let mut writer = iomem.writer().to_fallible();
+
+                    let mode_config = self.device.resources().lock();
+                    if let Some(drm_framebuffer) = mode_config.lookup_framebuffer(&fb_id) {
+                        drm_framebuffer.read(0, &mut writer)?;
+                    } else {
+                        return_errno!(Errno::ENOENT);
+                    }
+                } else {
+                    return_errno!(Errno::ENOENT);
+                }
 
                 Ok(0)
             }
@@ -364,6 +446,114 @@ impl<D: DrmDriver> FileIo for DrmFile<D> {
                 // This is required to correctly support blob-type properties exposed to userspace (e.g., IN_FORMATS).
                 // Currently this is a stub and does not perform any blob resolution or data transfer.
                 let _user_data: DrmModeGetBlob = cmd.read()?;
+                Ok(0)
+            }
+            cmd @ DrmIoctlModeAddFB => {
+                if !self.device.check_feature(DrmDriverFeatures::MODESET) {
+                    return_errno!(Errno::EOPNOTSUPP);
+                }
+
+                let mut user_data: DrmModeFBCmd = cmd.read()?;
+                let handle = user_data.handle;
+
+                if let Some(gem_obj) = self.lookup_gem(&handle) {
+                    // TODO: format check && flag check
+
+                    let mut mode_config = self.device.resources().lock();
+                    // TODO: the create_framebuffer is provide from
+                    // framebuffer.funcs.create()
+                    let fb_id = mode_config.create_framebuffer(
+                        user_data.width,
+                        user_data.height,
+                        user_data.pitch,
+                        user_data.bpp,
+                        gem_obj,
+                    );
+
+                    user_data.fb_id = fb_id;
+
+                    cmd.write(&user_data)?;
+                } else {
+                    return_errno!(Errno::EINVAL)
+                }
+
+                Ok(0)
+            }
+            cmd @ DrmIoctlModeRmFB => {
+                if !self.device.check_feature(DrmDriverFeatures::MODESET) {
+                    return_errno!(Errno::EOPNOTSUPP);
+                }
+
+                let user_data: DrmModeFBCmd = cmd.read()?;
+                let fb_id = user_data.fb_id;
+
+                let mut mode_config = self.device.resources().lock();
+                let _ = mode_config.remove_framebuffer(&fb_id);
+
+                Ok(0)
+            }
+            cmd @ DrmIoctlModeCreateDumb => {
+                if !self.device.check_feature(DrmDriverFeatures::MODESET) {
+                    return_errno!(Errno::EOPNOTSUPP);
+                }
+
+                let mut user_data: DrmModeCreateDumb = cmd.read()?;
+
+                if let Some(dumb_create) = self.device.driver().driver_ops().dumb_create {
+                    let gem = dumb_create(user_data.width, user_data.height, user_data.bpp)?;
+
+                    let handle = self.next_handle();
+                    user_data.handle = handle;
+                    user_data.pitch = gem.pitch();
+                    user_data.size = gem.size();
+
+                    self.insert_gem(handle, gem);
+
+                    cmd.write(&user_data)?;
+                } else {
+                    return_errno!(Errno::ENOENT);
+                }
+
+                Ok(0)
+            }
+            cmd @ DrmIoctlModeMapDumb => {
+                if !self.device.check_feature(DrmDriverFeatures::MODESET) {
+                    return_errno!(Errno::EOPNOTSUPP);
+                }
+
+                let mut user_data: DrmModeMapDumb = cmd.read()?;
+                let handle = user_data.handle;
+
+                if self.device.driver().driver_ops().dumb_create.is_none() {
+                    return_errno!(Errno::ENOSYS);
+                }
+
+                if let Some(gem_obj) = self.lookup_gem(&handle) {
+                    // TODO: Don't allow imported objects to be mapped
+                    user_data.offset = self.device.create_offset(gem_obj);
+
+                    cmd.write(&user_data)?;
+                } else {
+                    return_errno!(Errno::ENOENT)
+                }
+
+                Ok(0)
+            }
+            cmd @ DrmIoctlModeDestroyDumb => {
+                if self.device.driver().driver_ops().dumb_create.is_none() {
+                    return_errno!(Errno::ENOSYS);
+                }
+
+                let user_data: DrmModeDestroyDumb = cmd.read()?;
+                let handle = user_data.handle;
+
+                if let Some(gem_obj) = self.remove_gem(&handle) {
+                    gem_obj.release()?;
+                    self.device.remove_offset(&gem_obj);
+                } else {
+                    return_errno!(Errno::EINVAL)
+                }
+
                 Ok(0)
             }
             cmd @ DrmIoctlModeGetPlaneResources => {
