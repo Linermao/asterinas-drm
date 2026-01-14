@@ -137,7 +137,7 @@ pub fn sys_futex(
         }
         _ => {
             warn!("futex op = {:?}", futex_op);
-            return_errno_with_message!(Errno::EINVAL, "unsupported futex op");
+            return_errno_with_message!(Errno::ENOSYS, "unsupported futex op");
         }
     }
     .map_err(|err| match err.error() {
