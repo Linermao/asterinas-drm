@@ -1,4 +1,4 @@
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use aster_framebuffer::FRAMEBUFFER;
 use hashbrown::HashMap;
@@ -49,6 +49,22 @@ use crate::{
 pub(super) struct DrmFile<D: DrmDriver> {
     device: Arc<DrmMinor<D>>,
 
+    /// True when the client has asked us to expose stereo 3D mode flags.
+    stereo_allowed: AtomicBool,
+    /// True if client understands CRTC primary planes and cursor planes
+    /// in the plane list. Automatically set when atomic is set.
+    universal_planes: AtomicBool,
+    /// True if client understands atomic properties.
+    atomic: AtomicBool,
+    /// True, if client can handle picture aspect ratios, and has requested
+    /// to pass this information along with the mode.
+    aspect_ratio_allowed: AtomicBool,
+    /// True if client understands writeback connectors
+    writeback_connectors: AtomicBool,
+    /// This client is capable of handling the cursor plane with the
+    /// restrictions imposed on it by the virtualized drivers.
+    supports_virtualized_cursor_plane: AtomicBool,
+
     /// GEM objects are referenced by 32‑bit handles that
     /// are *per file descriptor*. Each open DRM file maintains its own
     /// namespace of GEM handles. This atomic counter is used to allocate
@@ -69,6 +85,13 @@ impl<D: DrmDriver> DrmFile<D> {
     pub fn new(device: Arc<DrmMinor<D>>) -> Self {
         Self { 
             device,
+
+            stereo_allowed: AtomicBool::new(false),
+            universal_planes: AtomicBool::new(false),
+            atomic: AtomicBool::new(false),
+            aspect_ratio_allowed: AtomicBool::new(false),
+            writeback_connectors: AtomicBool::new(false),
+            supports_virtualized_cursor_plane: AtomicBool::new(false),
 
             next_handle: AtomicU32::new(1),
             gem_table: Mutex::new(HashMap::new()),
@@ -137,6 +160,223 @@ impl<D: DrmDriver> FileIo for DrmFile<D> {
         // TODO: Call GpuDevice.handle_command() if it needs device specific ioctl handling.
         // TODO: drm_file permit flags check (master, root, render ...)
         dispatch_ioctl!(match raw_ioctl {
+            cmd @ DrmIoctlVersion => {
+                let mut user_data: DrmVersion = cmd.read()?;
+
+                let driver = self.device.driver();
+
+                let name = driver.name();
+                let name_len = name.len() as u64;
+                let desc = driver.desc();
+                let desc_len = desc.len() as u64;
+                let date = driver.date();
+                let date_len = date.len() as u64;
+
+                if user_data.is_first_call() {
+
+                    user_data.name_len = name_len;
+                    user_data.desc_len = desc_len;
+                    user_data.date_len = date_len;
+                    
+                    cmd.write(&user_data)?;
+                } else {
+                    // TODO: better write cstring method
+                    // the name,desc,date now is u64, maybe should use cstring?
+                    if user_data.name_len >= name_len {
+                        current_userspace!().write_bytes(
+                            user_data.name as usize, 
+                            name.as_bytes()
+                        )?;
+                    } else {
+                        return_errno!(Errno::EINVAL);
+                    }
+
+                    if user_data.desc_len >= desc_len {
+                        current_userspace!().write_bytes(
+                            user_data.desc as usize, 
+                            desc.as_bytes()
+                        )?;
+                    } else {
+                        return_errno!(Errno::EINVAL);
+                    }
+
+                    if user_data.date_len >= date_len {
+                        current_userspace!().write_bytes(
+                            user_data.date as usize, 
+                            date.as_bytes()
+                        )?;
+                    } else {
+                        return_errno!(Errno::EINVAL);
+                    }
+                }
+
+                Ok(0)
+            }
+            cmd @ DrmIoctlGetCap => {
+                let mut user_data: DrmGetCap = cmd.read()?;
+
+                let cap = DrmCapabilities::try_from(user_data.capability)?;
+
+                let value = match cap {
+                    DrmCapabilities::TimestampMonotonic => { 1 }
+                    DrmCapabilities::Prime => { (DrmPrimeValue::IMPORT | DrmPrimeValue::EXPORT).bits() }
+                    DrmCapabilities::SyncObj => { 
+                        self.device.check_feature(DrmDriverFeatures::SYNCOBJ) as u64
+                    }
+                    DrmCapabilities::SyncObjTimeline => {
+                        self.device.check_feature(DrmDriverFeatures::SYNCOBJ_TIMELINE) as u64
+                    }
+                    _ => {
+                        if !self.device.check_feature(DrmDriverFeatures::MODESET) {
+                            return_errno!(Errno::EOPNOTSUPP);
+                        }
+
+                        let mode_config = &self.device.resources().lock();
+
+                        match cap {
+                            DrmCapabilities::DumbBuffer => {
+                                self.device.driver().driver_ops().dumb_create.is_some() as u64
+                            }
+                            DrmCapabilities::VblankHighCrtc => { 1 }
+                            DrmCapabilities::DumbPreferredDepth => { 
+                                mode_config.preferred_depth as u64
+                            }
+                            DrmCapabilities::DumbPreferShadow => { 
+                                mode_config.prefer_shadow as u64
+                            }
+                            DrmCapabilities::AsyncPageFlip => {
+                                mode_config.async_page_flip as u64
+                            }
+                            DrmCapabilities::PageFlipTarget => { 
+                                // TODO: check if each crtc has func: page_flip_target
+                                0 
+                            }
+                            DrmCapabilities::CursorWidth => {
+                                match mode_config.cursor_width {
+                                    0 => 64,
+                                    w => w as u64,
+                                }
+                            }
+                            DrmCapabilities::CursorHeight => {
+                                match mode_config.cursor_height {
+                                    0 => 64,
+                                    h => h as u64,
+                                }
+                            }
+                            DrmCapabilities::Addfb2Modifiers => {
+                                !mode_config.fb_modifiers_not_supported as u64
+                            }
+                            DrmCapabilities::CrtcInVblankEvent => { 1 }
+                            DrmCapabilities::AtomicAsyncPageFlip => {
+                                (self.device.check_feature(DrmDriverFeatures::ATOMIC) 
+                                    &&  mode_config.async_page_flip) as u64
+                            }
+                            _ => { 0 }
+                        }
+                    }
+                };
+                
+                user_data.value = value;
+
+                cmd.write(&user_data)?;
+                Ok(0)
+            }
+            cmd @ DrmIoctlSetClientCap => {
+                if !self.device.check_feature(DrmDriverFeatures::MODESET) {
+                    return_errno!(Errno::EOPNOTSUPP);
+                }
+                
+                let user_data: DrmSetClientCap = cmd.read()?;
+
+                match ClientCaps::try_from(user_data.capability)? {
+                    ClientCaps::Stereo3D => match user_data.value {
+                        0 | 1 => {
+                            self.stereo_allowed
+                                .store(user_data.value == 1, Ordering::Relaxed);
+                        }
+                        _ => return_errno!(Errno::EINVAL),
+                    },
+                    ClientCaps::UniversalPlane => {
+                        match user_data.value {
+                            0 | 1 => {
+                                self.universal_planes
+                                    .store(user_data.value == 1, Ordering::Relaxed);
+                            }
+                            _ => return_errno!(Errno::EINVAL),
+                        };
+                    }
+                    ClientCaps::Atomic => {
+                        if !self.device.check_feature(DrmDriverFeatures::ATOMIC) {
+                            return_errno!(Errno::EOPNOTSUPP);
+                        }
+                        // TODO: The modesetting DDX has a totally broken idea of atomic.
+                        // if (current->comm[0] == 'X' && req->value == 1) {
+                        // 	pr_info("broken atomic modeset userspace detected, disabling atomic\n");
+                        //  return -EOPNOTSUPP;
+                        // }
+
+                        match user_data.value {
+                            0 | 1 | 2 => {
+                                let v = user_data.value;
+
+                                self.atomic.store(v >= 1, Ordering::Relaxed);
+                                self.universal_planes.store(v >= 1, Ordering::Relaxed);
+                                self.aspect_ratio_allowed.store(v == 2, Ordering::Relaxed);
+                            }
+                            _ => return_errno!(Errno::EINVAL),
+                        }
+                    }
+                    ClientCaps::AspectRatio => {
+                        match user_data.value {
+                            0 | 1 => {
+                                self.aspect_ratio_allowed
+                                    .store(user_data.value == 1, Ordering::Relaxed);
+                            }
+                            _ => return_errno!(Errno::EINVAL),
+                        };
+                    }
+                    ClientCaps::WritebackConnectors => {
+                        if !self.atomic.load(Ordering::Relaxed) {
+                            return_errno!(Errno::EINVAL);
+                        }
+
+                        match user_data.value {
+                            0 | 1 => {
+                                self.writeback_connectors
+                                    .store(user_data.value == 1, Ordering::Relaxed);
+                            }
+                            _ => return_errno!(Errno::EINVAL),
+                        };
+                    }
+                    ClientCaps::CursorPlaneHostport => {
+                        if !self.device.check_feature(DrmDriverFeatures::CURSOR_HOTSPOT) {
+                            return_errno!(Errno::EOPNOTSUPP);
+                        }
+
+                        if !self.atomic.load(Ordering::Relaxed) {
+                            return_errno!(Errno::EINVAL);
+                        }
+
+                        match user_data.value {
+                            0 | 1 => {
+                                self.supports_virtualized_cursor_plane
+                                    .store(user_data.value == 1, Ordering::Relaxed);
+                            }
+                            _ => return_errno!(Errno::EINVAL),
+                        };
+                    }
+                }
+
+                Ok(0)
+            }
+            _cmd @ DrmIoctlSetMaster => {
+                // TODO:
+                Ok(0)
+            }
+            _cmd @ DrmIoctlDropMaster => {
+                // TODO:
+                Ok(0)
+            }
             cmd @ DrmIoctlModeGetResources => {
                 if !self.device.check_feature(DrmDriverFeatures::MODESET) {
                     return_errno!(Errno::EOPNOTSUPP);
@@ -253,6 +493,27 @@ impl<D: DrmDriver> FileIo for DrmFile<D> {
                 } else {
                     return_errno!(Errno::ENOENT);
                 }
+
+                Ok(0)
+            }
+            cmd @ DrmIoctlModeCursor => {
+                let _user_data: DrmModeCursor = cmd.read()?;
+
+                // TODO:
+                // not support hardware cursor return ENXIO
+                return_errno!(Errno::ENXIO);
+            }
+            cmd @ DrmIoctlModeCursor2 => {
+                let _user_data: DrmModeCursor = cmd.read()?;
+                
+                // TODO:
+                // not support hardware cursor return ENXIO
+                return_errno!(Errno::ENXIO);
+            }
+            cmd @ DrmIoctlSetGamma => {
+                let _user_data: DrmModeCrtcLut = cmd.read()?;
+
+                // TODO:
 
                 Ok(0)
             }
@@ -435,6 +696,17 @@ impl<D: DrmDriver> FileIo for DrmFile<D> {
 
                 Ok(0)
             }
+            cmd @ DrmIoctlModeSetProperty => {
+                if !self.device.check_feature(DrmDriverFeatures::MODESET) {
+                    return_errno!(Errno::EOPNOTSUPP);
+                }
+                
+                let _user_data: DrmModeConnectorSetProperty = cmd.read()?;
+                
+                // TODO
+
+                Ok(0)
+            }
             cmd @ DrmIoctlModeGetPropBlob => {
                 // TODO: implement property blob lookup and data copy.
                 //
@@ -489,6 +761,31 @@ impl<D: DrmDriver> FileIo for DrmFile<D> {
 
                 let mut mode_config = self.device.resources().lock();
                 let _ = mode_config.remove_framebuffer(&fb_id);
+
+                Ok(0)
+            }
+            cmd @ DrmIoctlModeDirtyFb => {
+                if !self.device.check_feature(DrmDriverFeatures::MODESET) {
+                    return_errno!(Errno::EOPNOTSUPP);
+                }
+
+                let user_data: DrmModeFbDirtyCmd = cmd.read()?;
+                let fb_id = user_data.fb_id;
+
+                // TODO: just legacy achievement
+                if let Some(framebuffer) = FRAMEBUFFER.get() {
+                    let iomem = framebuffer.io_mem();
+                    let mut writer = iomem.writer().to_fallible();
+
+                    let mode_config = self.device.resources().lock();
+                    if let Some(drm_framebuffer) = mode_config.lookup_framebuffer(&fb_id) {
+                        drm_framebuffer.read(0, &mut writer)?;
+                    } else {
+                        return_errno!(Errno::ENOENT);
+                    }
+                } else {
+                    return_errno!(Errno::ENOENT);
+                }
 
                 Ok(0)
             }

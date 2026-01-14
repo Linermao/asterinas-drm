@@ -1,25 +1,110 @@
+use int_to_c_enum::TryFromInt;
 use ostd::Pod;
 
 use crate::{
     device::drm::mode_config::{DrmModeModeInfo, property::DRM_PROP_NAME_LEN},
-    util::ioctl::{InData, InOutData, ioc},
+    util::ioctl::{InData, InOutData, NoData, ioc},
 };
 
+pub(super) type DrmIoctlVersion                 = ioc!(DRM_IOCTL_VERSION,                   b'd', 0x00, InOutData<DrmVersion>);
+pub(super) type DrmIoctlGetCap                  = ioc!(DRM_IOCTL_GET_CAP,                   b'd', 0x0c, InOutData<DrmGetCap>);
+pub(super) type DrmIoctlSetClientCap            = ioc!(DRM_IOCTL_SET_CLIENT_CAP,            b'd', 0x0d, InData<DrmSetClientCap>);
+pub(super) type DrmIoctlSetMaster               = ioc!(DRM_IOCTL_SET_MASTER,                b'd', 0x1e, NoData);
+pub(super) type DrmIoctlDropMaster              = ioc!(DRM_IOCTL_DROP_MASTER,               b'd', 0x1f, NoData);
 pub(super) type DrmIoctlModeGetResources        = ioc!(DRM_IOCTL_MODE_GETRESOURCES,         b'd', 0xa0, InOutData<DrmModeGetResources>);
 pub(super) type DrmIoctlModeGetCrtc             = ioc!(DRM_IOCTL_MODE_GETCRTC,              b'd', 0xa1, InOutData<DrmModeCrtc>);
 pub(super) type DrmIoctlModeSetCrtc             = ioc!(DRM_IOCTL_MODE_SETCRTC,              b'd', 0xa2, InOutData<DrmModeCrtc>);
+pub(super) type DrmIoctlModeCursor              = ioc!(DRM_IOCTL_MODE_CURSOR,               b'd', 0xa3, InOutData<DrmModeCursor>);
+pub(super) type DrmIoctlSetGamma                = ioc!(DRM_IOCTL_SET_GAMMA,                 b'd', 0xa5, InOutData<DrmModeCrtcLut>);
 pub(super) type DrmIoctlModeGetEncoder          = ioc!(DRM_IOCTL_MODE_GETENCODER,           b'd', 0xa6, InOutData<DrmModeGetEncoder>);
 pub(super) type DrmIoctlModeGetConnector        = ioc!(DRM_IOCTL_MODE_GETCONNECTOR,         b'd', 0xa7, InOutData<DrmModeGetConnector>);
 pub(super) type DrmIoctlModeGetProperty         = ioc!(DRM_IOCTL_MODE_GETPROPERTY,          b'd', 0xaa, InOutData<DrmModeGetProperty>);
+pub(super) type DrmIoctlModeSetProperty         = ioc!(DRM_IOCTL_MODE_SETPROPERTY,          b'd', 0xab, InOutData<DrmModeConnectorSetProperty>);
 pub(super) type DrmIoctlModeGetPropBlob         = ioc!(DRM_IOCTL_MODE_GETPROPBLOB,          b'd', 0xac, InOutData<DrmModeGetBlob>);
 pub(super) type DrmIoctlModeAddFB               = ioc!(DRM_IOCTL_MODE_ADDFB,                b'd', 0xae, InOutData<DrmModeFBCmd>);
 pub(super) type DrmIoctlModeRmFB                = ioc!(DRM_IOCTL_MODE_RMFB,                 b'd', 0xaf, InData<DrmModeFBCmd>);
+pub(super) type DrmIoctlModeDirtyFb             = ioc!(DRM_IOCTL_MODE_DIRTYFB,              b'd', 0xb1, InOutData<DrmModeFbDirtyCmd>);
 pub(super) type DrmIoctlModeCreateDumb          = ioc!(DRM_IOCTL_MODE_CREATE_DUMB,          b'd', 0xb2, InOutData<DrmModeCreateDumb>);
 pub(super) type DrmIoctlModeMapDumb             = ioc!(DRM_IOCTL_MODE_MAP_DUMB,             b'd', 0xb3, InOutData<DrmModeMapDumb>);
 pub(super) type DrmIoctlModeDestroyDumb         = ioc!(DRM_IOCTL_MODE_DESTROY_DUMB,         b'd', 0xb4, InData<DrmModeDestroyDumb>);
 pub(super) type DrmIoctlModeGetPlaneResources   = ioc!(DRM_IOCTL_MODE_GETPLANERESOURCES,    b'd', 0xb5, InOutData<DrmModeGetPlaneRes>);
 pub(super) type DrmIoctlModeGetPlane            = ioc!(DRM_IOCTL_MODE_GETPLANE,             b'd', 0xb6, InOutData<DrmModeGetPlane>);
 pub(super) type DrmIoctlModeObjectGetProps      = ioc!(DRM_IOCTL_MODE_OBJ_GETPROPERTIES,    b'd', 0xb9, InOutData<DrmModeObjectGetProps>);
+pub(super) type DrmIoctlModeCursor2             = ioc!(DRM_IOCTL_MODE_CURSOR2,              b'd', 0xbb, InOutData<DrmModeCursor>);
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod)]
+pub struct DrmVersion {
+    pub version_major: i32,
+    pub version_minor: i32,
+    pub version_patchlevel: i32,
+    pub name_len: u64,
+    pub name: u64,
+    pub date_len: u64,
+    pub date: u64,
+    pub desc_len: u64,
+    pub desc: u64,
+}
+
+impl DrmVersion {
+    pub fn is_first_call(&self) -> bool {
+        return self.name == 0 
+            && self.date == 0 
+            && self.desc == 0;
+    }
+}
+
+#[repr(u64)]
+#[derive(Debug, TryFromInt)]
+pub enum DrmCapabilities {
+    DumbBuffer = 0x1,
+    VblankHighCrtc = 0x2,
+    DumbPreferredDepth = 0x3,
+    DumbPreferShadow = 0x4,
+    Prime = 0x5,
+    TimestampMonotonic = 0x6,
+    AsyncPageFlip = 0x7,
+    CursorWidth = 0x8,
+    CursorHeight = 0x9,
+    Addfb2Modifiers = 0x10,
+    PageFlipTarget = 0x11,
+    CrtcInVblankEvent = 0x12,
+    SyncObj = 0x13,
+    SyncObjTimeline = 0x14,
+    AtomicAsyncPageFlip = 0x15,
+}
+
+bitflags::bitflags! {
+    pub struct DrmPrimeValue: u64 {
+        const IMPORT = 0x1;
+        const EXPORT = 0x2;
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Default, Clone, Copy, Pod)]
+pub struct DrmGetCap {
+	pub capability: u64,
+	pub value: u64,
+}
+
+#[repr(u64)]
+#[derive(Debug, TryFromInt)]
+pub(super) enum ClientCaps {
+    Stereo3D = 0x1,
+    UniversalPlane = 0x2,
+    Atomic = 0x3,
+    AspectRatio = 0x4,
+    WritebackConnectors = 0x5,
+    CursorPlaneHostport = 0x6,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod)]
+pub(super) struct DrmSetClientCap {
+    pub capability: u64,
+    pub value: u64,
+}
 
 #[repr(C)]
 #[derive(Debug, Default, Clone, Copy, Pod)]
@@ -67,6 +152,42 @@ pub(super) struct DrmModeCrtc {
     pub gamma_size: u32,
     pub mode_valid: u32,
     pub mode: DrmModeModeInfo,
+}
+
+#[repr(u32)]
+#[derive(Debug, TryFromInt)]
+pub enum DrmModeCursorFlags {
+    Bo = 0x1,
+    Move = 0x2,
+    Flags = 0x3,
+}
+
+#[repr(C)]
+#[derive(Debug, Default, Clone, Copy, Pod)]
+pub struct DrmModeCursor {
+    pub flags: u32,
+	pub crtc_id: u32,
+	pub x: i32,
+	pub y: i32,
+	pub width: u32,
+	pub height: u32,
+	/* driver specific handle */
+	pub handle: u32,
+	pub hot_x: i32,
+	pub hot_y: i32,
+}
+
+
+#[repr(C)]
+#[derive(Debug, Default, Clone, Copy, Pod)]
+pub struct DrmModeCrtcLut {
+	pub crtc_id: u32,
+	pub gamma_size: u32,
+
+	/* pointers to arrays */
+	pub red: u64,
+	pub green: u64,
+	pub blue: u64,
 }
 
 #[repr(C)]
@@ -171,6 +292,14 @@ impl DrmModeGetProperty {
 }
 
 #[repr(C)]
+#[derive(Debug, Default, Clone, Copy, Pod)]
+pub struct DrmModeConnectorSetProperty {
+	value: u64,
+	prop_id: u32, 
+	connector_id: u32,
+}
+
+#[repr(C)]
 #[derive(Debug, Default, Clone, Copy, Hash, Eq, PartialEq, Pod)]
 pub(super) struct DrmModeGetBlob {
     pub blob_id: u32,
@@ -189,6 +318,16 @@ pub struct DrmModeFBCmd {
     pub depth: u32,
     /* driver specific handle */
     pub handle: u32,
+}
+
+#[repr(C)]
+#[derive(Debug, Default, Clone, Copy, Pod)]
+pub struct DrmModeFbDirtyCmd {
+	pub fb_id: u32,
+	pub flags: u32,
+	pub color: u32,
+	pub num_clips: u32,
+	pub clips_ptr: u64,
 }
 
 #[repr(C)]
