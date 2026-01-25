@@ -1,20 +1,23 @@
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use aster_framebuffer::FRAMEBUFFER;
+use aster_gpu::drm::{
+    driver::{DrmDriverFeatures, DumbCreateProvider},
+    gem::DrmGemObject,
+    mode_config::{
+        DrmModeModeInfo,
+        property::{PropertyEnum, PropertyKind},
+    },
+};
 use hashbrown::HashMap;
 use ostd::mm::{VmIo, io_util::HasVmReaderWriter};
 
 use crate::{
     current_userspace,
     device::drm::{
-        DrmDriver, DrmMinor,
-        driver::DrmDriverFeatures,
-        gem::{DrmGemObject, memfd::DrmMemfdFile},
+        device::DrmMinor,
         ioctl_defs::*,
-        mode_config::{
-            DrmModeModeInfo,
-            property::{PropertyEnum, PropertyKind},
-        },
+        memfd::{DrmMemfdFile, dumb_create_impl},
     },
     events::IoEvents,
     fs::{
@@ -46,8 +49,8 @@ use crate::{
 /// file descriptor, while the underlying DRM device and driver state are
 /// shared across all open files.
 #[derive(Debug)]
-pub(super) struct DrmFile<D: DrmDriver> {
-    device: Arc<DrmMinor<D>>,
+pub(super) struct DrmFile {
+    device: Arc<DrmMinor>,
 
     /// True when the client has asked us to expose stereo 3D mode flags.
     stereo_allowed: AtomicBool,
@@ -74,16 +77,16 @@ pub(super) struct DrmFile<D: DrmDriver> {
     gem_table: Mutex<HashMap<u32, Arc<DrmGemObject>>>,
 }
 
-impl<D: DrmDriver> Pollable for DrmFile<D> {
+impl Pollable for DrmFile {
     fn poll(&self, mask: IoEvents, _poller: Option<&mut PollHandle>) -> IoEvents {
         let events = IoEvents::IN | IoEvents::OUT;
         events & mask
     }
 }
 
-impl<D: DrmDriver> DrmFile<D> {
-    pub fn new(device: Arc<DrmMinor<D>>) -> Self {
-        Self { 
+impl DrmFile {
+    pub fn new(device: Arc<DrmMinor>) -> Self {
+        Self {
             device,
 
             stereo_allowed: AtomicBool::new(false),
@@ -115,7 +118,7 @@ impl<D: DrmDriver> DrmFile<D> {
     }
 }
 
-impl<D: DrmDriver> InodeIo for DrmFile<D> {
+impl InodeIo for DrmFile {
     fn read_at(
         &self,
         _offset: usize,
@@ -135,7 +138,7 @@ impl<D: DrmDriver> InodeIo for DrmFile<D> {
     }
 }
 
-impl<D: DrmDriver> FileIo for DrmFile<D> {
+impl FileIo for DrmFile {
     fn check_seekable(&self) -> Result<()> {
         Ok(())
     }
@@ -173,38 +176,31 @@ impl<D: DrmDriver> FileIo for DrmFile<D> {
                 let date_len = date.len() as u64;
 
                 if user_data.is_first_call() {
-
                     user_data.name_len = name_len;
                     user_data.desc_len = desc_len;
                     user_data.date_len = date_len;
-                    
+
                     cmd.write(&user_data)?;
                 } else {
                     // TODO: better write cstring method
                     // the name,desc,date now is u64, maybe should use cstring?
                     if user_data.name_len >= name_len {
-                        current_userspace!().write_bytes(
-                            user_data.name as usize, 
-                            name.as_bytes()
-                        )?;
+                        current_userspace!()
+                            .write_bytes(user_data.name as usize, name.as_bytes())?;
                     } else {
                         return_errno!(Errno::EINVAL);
                     }
 
                     if user_data.desc_len >= desc_len {
-                        current_userspace!().write_bytes(
-                            user_data.desc as usize, 
-                            desc.as_bytes()
-                        )?;
+                        current_userspace!()
+                            .write_bytes(user_data.desc as usize, desc.as_bytes())?;
                     } else {
                         return_errno!(Errno::EINVAL);
                     }
 
                     if user_data.date_len >= date_len {
-                        current_userspace!().write_bytes(
-                            user_data.date as usize, 
-                            date.as_bytes()
-                        )?;
+                        current_userspace!()
+                            .write_bytes(user_data.date as usize, date.as_bytes())?;
                     } else {
                         return_errno!(Errno::EINVAL);
                     }
@@ -218,14 +214,17 @@ impl<D: DrmDriver> FileIo for DrmFile<D> {
                 let cap = DrmCapabilities::try_from(user_data.capability)?;
 
                 let value = match cap {
-                    DrmCapabilities::TimestampMonotonic => { 1 }
-                    DrmCapabilities::Prime => { (DrmPrimeValue::IMPORT | DrmPrimeValue::EXPORT).bits() }
-                    DrmCapabilities::SyncObj => { 
+                    DrmCapabilities::TimestampMonotonic => 1,
+                    DrmCapabilities::Prime => {
+                        (DrmPrimeValue::IMPORT | DrmPrimeValue::EXPORT).bits()
+                    }
+                    DrmCapabilities::SyncObj => {
                         self.device.check_feature(DrmDriverFeatures::SYNCOBJ) as u64
                     }
-                    DrmCapabilities::SyncObjTimeline => {
-                        self.device.check_feature(DrmDriverFeatures::SYNCOBJ_TIMELINE) as u64
-                    }
+                    DrmCapabilities::SyncObjTimeline => self
+                        .device
+                        .check_feature(DrmDriverFeatures::SYNCOBJ_TIMELINE)
+                        as u64,
                     _ => {
                         if !self.device.check_feature(DrmDriverFeatures::MODESET) {
                             return_errno!(Errno::EOPNOTSUPP);
@@ -237,45 +236,38 @@ impl<D: DrmDriver> FileIo for DrmFile<D> {
                             DrmCapabilities::DumbBuffer => {
                                 self.device.driver().driver_ops().dumb_create.is_some() as u64
                             }
-                            DrmCapabilities::VblankHighCrtc => { 1 }
-                            DrmCapabilities::DumbPreferredDepth => { 
+                            DrmCapabilities::VblankHighCrtc => 1,
+                            DrmCapabilities::DumbPreferredDepth => {
                                 mode_config.preferred_depth as u64
                             }
-                            DrmCapabilities::DumbPreferShadow => { 
-                                mode_config.prefer_shadow as u64
-                            }
-                            DrmCapabilities::AsyncPageFlip => {
-                                mode_config.async_page_flip as u64
-                            }
-                            DrmCapabilities::PageFlipTarget => { 
+                            DrmCapabilities::DumbPreferShadow => mode_config.prefer_shadow as u64,
+                            DrmCapabilities::AsyncPageFlip => mode_config.async_page_flip as u64,
+                            DrmCapabilities::PageFlipTarget => {
                                 // TODO: check if each crtc has func: page_flip_target
-                                0 
+                                0
                             }
-                            DrmCapabilities::CursorWidth => {
-                                match mode_config.cursor_width {
-                                    0 => 64,
-                                    w => w as u64,
-                                }
-                            }
-                            DrmCapabilities::CursorHeight => {
-                                match mode_config.cursor_height {
-                                    0 => 64,
-                                    h => h as u64,
-                                }
-                            }
+                            DrmCapabilities::CursorWidth => match mode_config.cursor_width {
+                                0 => 64,
+                                w => w as u64,
+                            },
+                            DrmCapabilities::CursorHeight => match mode_config.cursor_height {
+                                0 => 64,
+                                h => h as u64,
+                            },
                             DrmCapabilities::Addfb2Modifiers => {
                                 !mode_config.fb_modifiers_not_supported as u64
                             }
-                            DrmCapabilities::CrtcInVblankEvent => { 1 }
+                            DrmCapabilities::CrtcInVblankEvent => 1,
                             DrmCapabilities::AtomicAsyncPageFlip => {
-                                (self.device.check_feature(DrmDriverFeatures::ATOMIC) 
-                                    &&  mode_config.async_page_flip) as u64
+                                (self.device.check_feature(DrmDriverFeatures::ATOMIC)
+                                    && mode_config.async_page_flip)
+                                    as u64
                             }
-                            _ => { 0 }
+                            _ => 0,
                         }
                     }
                 };
-                
+
                 user_data.value = value;
 
                 cmd.write(&user_data)?;
@@ -285,7 +277,7 @@ impl<D: DrmDriver> FileIo for DrmFile<D> {
                 if !self.device.check_feature(DrmDriverFeatures::MODESET) {
                     return_errno!(Errno::EOPNOTSUPP);
                 }
-                
+
                 let user_data: DrmSetClientCap = cmd.read()?;
 
                 match ClientCaps::try_from(user_data.capability)? {
@@ -486,7 +478,8 @@ impl<D: DrmDriver> FileIo for DrmFile<D> {
 
                     let mode_config = self.device.resources().lock();
                     if let Some(drm_framebuffer) = mode_config.lookup_framebuffer(&fb_id) {
-                        drm_framebuffer.read(0, &mut writer)?;
+                        // TODO: handle the error
+                        let _ = drm_framebuffer.read(0, &mut writer);
                     } else {
                         return_errno!(Errno::ENOENT);
                     }
@@ -505,7 +498,7 @@ impl<D: DrmDriver> FileIo for DrmFile<D> {
             }
             cmd @ DrmIoctlModeCursor2 => {
                 let _user_data: DrmModeCursor = cmd.read()?;
-                
+
                 // TODO:
                 // not support hardware cursor return ENXIO
                 return_errno!(Errno::ENXIO);
@@ -700,9 +693,9 @@ impl<D: DrmDriver> FileIo for DrmFile<D> {
                 if !self.device.check_feature(DrmDriverFeatures::MODESET) {
                     return_errno!(Errno::EOPNOTSUPP);
                 }
-                
+
                 let _user_data: DrmModeConnectorSetProperty = cmd.read()?;
-                
+
                 // TODO
 
                 Ok(0)
@@ -779,7 +772,8 @@ impl<D: DrmDriver> FileIo for DrmFile<D> {
 
                     let mode_config = self.device.resources().lock();
                     if let Some(drm_framebuffer) = mode_config.lookup_framebuffer(&fb_id) {
-                        drm_framebuffer.read(0, &mut writer)?;
+                        // TODO: handle the error
+                        let _ = drm_framebuffer.read(0, &mut writer);
                     } else {
                         return_errno!(Errno::ENOENT);
                     }
@@ -797,16 +791,24 @@ impl<D: DrmDriver> FileIo for DrmFile<D> {
                 let mut user_data: DrmModeCreateDumb = cmd.read()?;
 
                 if let Some(dumb_create) = self.device.driver().driver_ops().dumb_create {
-                    let gem = dumb_create(user_data.width, user_data.height, user_data.bpp)?;
+                    // TODO: handle the error
+                    if let Ok(gem) = match dumb_create {
+                        DumbCreateProvider::Memfd => {
+                            dumb_create_impl(user_data.width, user_data.height, user_data.bpp)
+                        }
+                        DumbCreateProvider::Custom(dumb_create_impl) => {
+                            dumb_create_impl(user_data.width, user_data.height, user_data.bpp)
+                        }
+                    } {
+                        let handle = self.next_handle();
+                        user_data.handle = handle;
+                        user_data.pitch = gem.pitch();
+                        user_data.size = gem.size();
 
-                    let handle = self.next_handle();
-                    user_data.handle = handle;
-                    user_data.pitch = gem.pitch();
-                    user_data.size = gem.size();
+                        self.insert_gem(handle, gem);
 
-                    self.insert_gem(handle, gem);
-
-                    cmd.write(&user_data)?;
+                        cmd.write(&user_data)?;
+                    }
                 } else {
                     return_errno!(Errno::ENOENT);
                 }
@@ -845,7 +847,8 @@ impl<D: DrmDriver> FileIo for DrmFile<D> {
                 let handle = user_data.handle;
 
                 if let Some(gem_obj) = self.remove_gem(&handle) {
-                    gem_obj.release()?;
+                    // TODO: handle the error
+                    let _ = gem_obj.release();
                     self.device.remove_offset(&gem_obj);
                 } else {
                     return_errno!(Errno::EINVAL)
@@ -968,11 +971,18 @@ impl<D: DrmDriver> FileIo for DrmFile<D> {
                 Ok(0)
             }
             _ => {
-                log::debug!(
-                    "the ioctl command {:#x} is unknown for drm devices",
-                    raw_ioctl.cmd()
-                );
-                return_errno_with_message!(Errno::ENOTTY, "the ioctl command is unknown");
+                let driver = self.device.driver();
+                match driver.handle_command(raw_ioctl.cmd(), raw_ioctl.arg()) {
+                    Ok(()) => Ok(0),
+                    Err(()) => {
+                        // TODO: handle error
+                        log::debug!(
+                            "the ioctl command {:#x} is unknown for drm devices",
+                            raw_ioctl.cmd()
+                        );
+                        return_errno_with_message!(Errno::ENOTTY, "the ioctl command is unknown");
+                    }
+                }
             }
         })
     }

@@ -1,44 +1,21 @@
 mod device;
-mod driver;
-mod gem;
 mod file;
 mod ioctl_defs;
-mod mode_config;
+mod memfd;
 
-use hashbrown::HashMap;
+use aster_gpu::drm::{device::DrmDevice, driver::DrmDriverFeatures};
 
 use crate::{
     device::{
-        drm::{
-            device::{DrmDevice, DrmMinor, DrmMinorType},
-            driver::{DrmDriver, DrmDriverFeatures, simple_drm},
-        },
+        drm::device::{DrmMinor, DrmMinorType},
         registry::char,
     },
     prelude::*,
 };
 
-type DriverTable = HashMap<String, Arc<dyn DrmDriver>>;
-
-fn build_driver_table() -> DriverTable {
-    let mut table = DriverTable::new();
-
-    // Register all available DRM drivers into the global driver table.
-    // Each driver advertises its matching criteria and probe callbacks,
-    // allowing the DRM core to select and bind a suitable driver when a
-    // compatible GpuDevice is discovered.
-    simple_drm::register_driver(&mut table);
-    // virtio_drm::register_driver(&mut table);
-
-    table
-}
-
 pub(super) fn init_in_first_kthread() -> Result<()> {
-    simple_drm::init();
-
-    let driver_table = build_driver_table();
-
     let gpus = aster_gpu::registered_devices();
+    let driver_table = aster_gpu::registered_drivers();
 
     if gpus.is_empty() {
         return_errno_with_message!(Errno::ENODEV, "no GPU devices registered");
@@ -52,10 +29,16 @@ pub(super) fn init_in_first_kthread() -> Result<()> {
     // Introduce a capability- or ID-based matching interface between GpuDevice and
     // DrmDriver to enable precise, extensible, and bus-agnostic driver selection.
     for (index, device) in gpus.iter().enumerate() {
-        if let Some(driver) = driver_table.get(device.name()) {
-            if driver.create_device(index as u32).is_ok() {
-                any_success = true;
-                // println!("[kernel] gpu device: {:?} probe correctly!", device.name());
+        if let Some(driver) = driver_table.get(device.driver_name()) {
+            match driver.create_device(index as u32) {
+                Ok(device) => {
+                    any_success = true;
+                    drm_dev_register(device)?;
+                    // println!("[kernel] gpu device: {:?} probe correctly!", device.name());
+                }
+                Err(_error) => {
+                    // TODO: handle the error
+                }
             }
         }
     }
@@ -67,7 +50,7 @@ pub(super) fn init_in_first_kthread() -> Result<()> {
     }
 }
 
-fn drm_dev_register<D: DrmDriver>(device: Arc<DrmDevice<D>>) -> Result<()> {
+fn drm_dev_register(device: Arc<DrmDevice>) -> Result<()> {
     if device.check_feature(DrmDriverFeatures::COMPUTE_ACCEL) {
         let drm_minor = DrmMinor::new(device.clone(), DrmMinorType::Accel);
         char::register(drm_minor)?;

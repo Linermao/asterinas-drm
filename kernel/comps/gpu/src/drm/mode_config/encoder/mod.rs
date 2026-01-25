@@ -1,11 +1,10 @@
-use alloc::sync::Arc;
+use alloc::{boxed::Box, sync::Arc};
 use core::sync::atomic::Ordering;
 
 use hashbrown::HashMap;
 
-use crate::{
-    device::drm::mode_config::{DrmModeConfig, DrmModeObject, crtc::DrmCrtc, encoder::funcs::EncoderFuncs},
-    prelude::*,
+use crate::drm::mode_config::{
+    DrmModeConfig, DrmModeObject, crtc::DrmCrtc, encoder::funcs::EncoderFuncs,
 };
 
 pub mod funcs;
@@ -54,7 +53,7 @@ impl DrmEncoder {
         type_: EncoderType,
         crtcs: &[Arc<DrmCrtc>],
         funcs: Box<dyn EncoderFuncs>,
-    ) -> Result<Arc<Self>> {
+    ) -> Result<Arc<Self>, ()> {
         let id = res.next_object_id();
         let mut encoder = Self {
             id,

@@ -13,6 +13,7 @@ aster-cmdline.workspace = true
 aster-console.workspace = true
 aster-framebuffer.workspace = true
 aster-gpu.workspace = true
+aster-sysfb.workspace = true
 aster-i8042.workspace = true
 aster-input.workspace = true
 aster-logger.workspace = true
@@ -52,10 +53,7 @@ osdk-frame-allocator.workspace = true
 osdk-heap-allocator.workspace = true
 ostd.workspace = true
 paste.workspace = true
-rand = { workspace = true, features = [
-    "small_rng",
-    "std_rng",
-] }
+rand = { workspace = true, features = ["small_rng", "std_rng"] }
 spin.workspace = true
 takeable.workspace = true
 time.workspace = true

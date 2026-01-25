@@ -1,23 +1,19 @@
-pub(super) mod memfd;
-
 use alloc::sync::Arc;
 use core::{any::Any, fmt::Debug};
 
 use ostd::mm::{VmReader, VmWriter};
 
-use crate::prelude::*;
-
 /// Trait representing a pluggable GEM buffer backend.
-/// 
+///
 /// A type implementing `DrmGemBackend` can be used as the storage layer
 /// for a `DrmGemObject`. Drivers choose which backend to use; for
 /// example, a simple shmem‑like backend or a more complex
 /// hardware‑specific allocator.
-pub(super) trait DrmGemBackend: Debug + Any + Sync + Send {
-    fn read(&self, offset: usize, writer: &mut VmWriter) -> Result<usize>;
-    fn write(&self, offset: usize, reader: &mut VmReader) -> Result<usize>;
+pub trait DrmGemBackend: Debug + Any + Sync + Send {
+    fn read(&self, offset: usize, writer: &mut VmWriter) -> Result<usize, ()>;
+    fn write(&self, offset: usize, reader: &mut VmReader) -> Result<usize, ()>;
 
-    fn release(&self) -> Result<()>;
+    fn release(&self) -> Result<(), ()>;
 }
 
 impl dyn DrmGemBackend {
@@ -35,7 +31,7 @@ impl dyn DrmGemBackend {
 /// backing directly. Drivers can plug in any backend implementing the
 /// trait to satisfy GEM buffer requirements.
 #[derive(Debug)]
-pub(super) struct DrmGemObject {
+pub struct DrmGemObject {
     size: u64,
     pitch: u32,
     backend: Arc<dyn DrmGemBackend>,
@@ -43,10 +39,14 @@ pub(super) struct DrmGemObject {
 
 impl DrmGemObject {
     pub fn new(size: u64, pitch: u32, backend: Arc<dyn DrmGemBackend>) -> Self {
-        Self { size, pitch, backend }
+        Self {
+            size,
+            pitch,
+            backend,
+        }
     }
 
-    pub fn release(&self) -> Result<()> {
+    pub fn release(&self) -> Result<(), ()> {
         self.backend.release()
     }
 
@@ -58,11 +58,11 @@ impl DrmGemObject {
         self.pitch
     }
 
-    pub fn read(&self, offset: usize, writer: &mut VmWriter) -> Result<usize> {
+    pub fn read(&self, offset: usize, writer: &mut VmWriter) -> Result<usize, ()> {
         self.backend.read(offset, writer)
     }
 
-    pub fn write(&self, offset: usize, reader: &mut VmReader) -> Result<usize> {
+    pub fn write(&self, offset: usize, reader: &mut VmReader) -> Result<usize, ()> {
         self.backend.write(offset, reader)
     }
 

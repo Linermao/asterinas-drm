@@ -1,10 +1,8 @@
+use aster_gpu::drm::mode_config::{DrmModeModeInfo, property::DRM_PROP_NAME_LEN};
 use int_to_c_enum::TryFromInt;
 use ostd::Pod;
 
-use crate::{
-    device::drm::mode_config::{DrmModeModeInfo, property::DRM_PROP_NAME_LEN},
-    util::ioctl::{InData, InOutData, NoData, ioc},
-};
+use crate::util::ioctl::{InData, InOutData, NoData, ioc};
 
 pub(super) type DrmIoctlVersion                 = ioc!(DRM_IOCTL_VERSION,                   b'd', 0x00, InOutData<DrmVersion>);
 pub(super) type DrmIoctlGetCap                  = ioc!(DRM_IOCTL_GET_CAP,                   b'd', 0x0c, InOutData<DrmGetCap>);
@@ -49,9 +47,7 @@ pub struct DrmVersion {
 
 impl DrmVersion {
     pub fn is_first_call(&self) -> bool {
-        return self.name == 0 
-            && self.date == 0 
-            && self.desc == 0;
+        return self.name == 0 && self.date == 0 && self.desc == 0;
     }
 }
 
@@ -85,8 +81,8 @@ bitflags::bitflags! {
 #[repr(C)]
 #[derive(Debug, Default, Clone, Copy, Pod)]
 pub struct DrmGetCap {
-	pub capability: u64,
-	pub value: u64,
+    pub capability: u64,
+    pub value: u64,
 }
 
 #[repr(u64)]
@@ -167,28 +163,27 @@ pub enum DrmModeCursorFlags {
 #[derive(Debug, Default, Clone, Copy, Pod)]
 pub struct DrmModeCursor {
     pub flags: u32,
-	pub crtc_id: u32,
-	pub x: i32,
-	pub y: i32,
-	pub width: u32,
-	pub height: u32,
-	/* driver specific handle */
-	pub handle: u32,
-	pub hot_x: i32,
-	pub hot_y: i32,
+    pub crtc_id: u32,
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+    /* driver specific handle */
+    pub handle: u32,
+    pub hot_x: i32,
+    pub hot_y: i32,
 }
-
 
 #[repr(C)]
 #[derive(Debug, Default, Clone, Copy, Pod)]
 pub struct DrmModeCrtcLut {
-	pub crtc_id: u32,
-	pub gamma_size: u32,
+    pub crtc_id: u32,
+    pub gamma_size: u32,
 
-	/* pointers to arrays */
-	pub red: u64,
-	pub green: u64,
-	pub blue: u64,
+    /* pointers to arrays */
+    pub red: u64,
+    pub green: u64,
+    pub blue: u64,
 }
 
 #[repr(C)]
@@ -295,9 +290,9 @@ impl DrmModeGetProperty {
 #[repr(C)]
 #[derive(Debug, Default, Clone, Copy, Pod)]
 pub struct DrmModeConnectorSetProperty {
-	value: u64,
-	prop_id: u32, 
-	connector_id: u32,
+    value: u64,
+    prop_id: u32,
+    connector_id: u32,
 }
 
 #[repr(C)]
@@ -324,11 +319,11 @@ pub struct DrmModeFBCmd {
 #[repr(C)]
 #[derive(Debug, Default, Clone, Copy, Pod)]
 pub struct DrmModeFbDirtyCmd {
-	pub fb_id: u32,
-	pub flags: u32,
-	pub color: u32,
-	pub num_clips: u32,
-	pub clips_ptr: u64,
+    pub fb_id: u32,
+    pub flags: u32,
+    pub color: u32,
+    pub num_clips: u32,
+    pub clips_ptr: u64,
 }
 
 #[repr(C)]
@@ -424,15 +419,15 @@ impl DrmModeObjectGetProps {
 #[repr(C)]
 #[derive(Debug, Default, Clone, Copy, Pod)]
 pub(super) struct DrmModeListLessees {
-	/// Number of lessees.
-	/// On input, provides length of the array.
-	/// On output, provides total number. No
-	/// more than the input number will be written
-	/// back, so two calls can be used to get
-	/// the size and then the data.
-	count_lessees: u32,
-	pad: u32,
+    /// Number of lessees.
+    /// On input, provides length of the array.
+    /// On output, provides total number. No
+    /// more than the input number will be written
+    /// back, so two calls can be used to get
+    /// the size and then the data.
+    count_lessees: u32,
+    pad: u32,
 
-	/// Pointer to __u64 array of lessee ids
-	lessees_ptr: u64,
+    /// Pointer to __u64 array of lessee ids
+    lessees_ptr: u64,
 }

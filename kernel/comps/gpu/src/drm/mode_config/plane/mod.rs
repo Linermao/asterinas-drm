@@ -1,11 +1,8 @@
-use alloc::sync::Arc;
+use alloc::{boxed::Box, sync::Arc};
 
 use hashbrown::HashMap;
 
-use crate::{
-    device::drm::mode_config::{DrmModeConfig, DrmModeObject, plane::funcs::PlaneFuncs},
-    prelude::*,
-};
+use crate::drm::mode_config::{DrmModeConfig, DrmModeObject, plane::funcs::PlaneFuncs};
 
 pub mod funcs;
 pub mod property;
@@ -29,7 +26,11 @@ pub struct DrmPlane {
 }
 
 impl DrmPlane {
-    pub fn init(res: &mut DrmModeConfig, type_: PlaneType, funcs: Box<dyn PlaneFuncs>) -> Result<Arc<Self>> {
+    pub fn init(
+        res: &mut DrmModeConfig,
+        type_: PlaneType,
+        funcs: Box<dyn PlaneFuncs>,
+    ) -> Result<Arc<Self>, ()> {
         let id = res.next_object_id();
         let plane = Self {
             id,

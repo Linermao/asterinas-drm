@@ -3,10 +3,7 @@ use alloc::sync::Arc;
 use hashbrown::HashMap;
 use ostd::mm::{VmReader, VmWriter};
 
-use crate::{
-    device::drm::{gem::DrmGemObject, mode_config::DrmModeObject},
-    prelude::*,
-};
+use crate::drm::{gem::DrmGemObject, mode_config::DrmModeObject};
 
 pub mod funcs;
 pub mod property;
@@ -44,11 +41,11 @@ impl DrmFramebuffer {
         }
     }
 
-    pub fn read(&self, offset: usize, writer: &mut VmWriter) -> Result<usize> {
+    pub fn read(&self, offset: usize, writer: &mut VmWriter) -> Result<usize, ()> {
         self.gem_obj.read(offset, writer)
     }
 
-    pub fn write(&self, offset: usize, reader: &mut VmReader) -> Result<usize> {
+    pub fn write(&self, offset: usize, reader: &mut VmReader) -> Result<usize, ()> {
         self.gem_obj.write(offset, reader)
     }
 }

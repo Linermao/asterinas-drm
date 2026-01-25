@@ -143,7 +143,9 @@ dependencies = [
 name = "aster-gpu"
 version = "0.1.0"
 dependencies = [
+ "bitflags 1.3.2",
  "component",
+ "hashbrown 0.14.5",
  "log",
  "ostd",
  "spin",
@@ -193,6 +195,7 @@ dependencies = [
  "aster-rights",
  "aster-rights-proc",
  "aster-softirq",
+ "aster-sysfb",
  "aster-systree",
  "aster-time",
  "aster-util",
@@ -320,6 +323,19 @@ dependencies = [
  "aster-util",
  "component",
  "intrusive-collections",
+ "ostd",
+ "spin",
+]
+
+[[package]]
+name = "aster-sysfb"
+version = "0.1.0"
+dependencies = [
+ "aster-gpu",
+ "bitflags 1.3.2",
+ "component",
+ "hashbrown 0.14.5",
+ "log",
  "ostd",
  "spin",
 ]

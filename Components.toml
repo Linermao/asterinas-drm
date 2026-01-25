@@ -16,6 +16,7 @@ i8042 = { name = "aster-i8042" }
 pci = { name = "aster-pci" }
 cmdline = { name = "aster-cmdline" }
 gpu = { name = "aster-gpu" }
+sysfb = { name = "aster-sysfb" }
 
 [whitelist]
 [whitelist.nix.main]

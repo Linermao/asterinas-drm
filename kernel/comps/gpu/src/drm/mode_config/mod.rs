@@ -1,27 +1,33 @@
-use core::sync::atomic::{AtomicU8, AtomicU32, Ordering};
-
-use hashbrown::HashMap;
-
-use crate::{
-    device::drm::{gem::DrmGemObject, mode_config::{
-        connector::DrmConnector, crtc::DrmCrtc, encoder::DrmEncoder, framebuffer::DrmFramebuffer,
-        plane::DrmPlane, property::DrmProperty,
-    }},
-    prelude::*,
+use alloc::{boxed::Box, sync::Arc};
+use core::{
+    any::Any,
+    fmt::Debug,
+    sync::atomic::{AtomicU8, AtomicU32, Ordering},
 };
 
-pub(super) mod connector;
-pub(super) mod crtc;
-pub(super) mod encoder;
-pub(super) mod framebuffer;
-pub(super) mod plane;
-pub(super) mod property;
+use hashbrown::HashMap;
+use ostd::Pod;
+
+use crate::drm::{
+    gem::DrmGemObject,
+    mode_config::{
+        connector::DrmConnector, crtc::DrmCrtc, encoder::DrmEncoder, framebuffer::DrmFramebuffer,
+        plane::DrmPlane, property::DrmProperty,
+    },
+};
+
+pub mod connector;
+pub mod crtc;
+pub mod encoder;
+pub mod framebuffer;
+pub mod plane;
+pub mod property;
 
 const DRM_DISPLAY_MODE_LEN: usize = 32;
 
 #[repr(C)]
 #[derive(Debug, Default, Clone, Copy, Hash, Eq, PartialEq, Pod)]
-pub(super) struct DrmModeModeInfo {
+pub struct DrmModeModeInfo {
     pub clock: u32,
     pub hdisplay: u16,
     pub hsync_start: u16,
@@ -43,7 +49,7 @@ pub(super) struct DrmModeModeInfo {
 }
 
 /// DrmModeObject
-pub(super) trait DrmModeObject: Debug + Any + Sync + Send {
+pub trait DrmModeObject: Debug + Any + Sync + Send {
     fn id(&self) -> u32;
 
     fn properties(&self) -> &HashMap<u32, u64>;
@@ -58,7 +64,7 @@ pub(super) trait DrmModeObject: Debug + Any + Sync + Send {
 }
 
 #[derive(Debug, Default)]
-pub(super) struct DrmModeConfig {
+pub struct DrmModeConfig {
     planes: HashMap<u32, Arc<DrmPlane>>,
     crtcs: HashMap<u32, Arc<DrmCrtc>>,
     encoders: HashMap<u32, Arc<DrmEncoder>>,

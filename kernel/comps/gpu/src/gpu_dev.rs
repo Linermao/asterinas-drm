@@ -3,11 +3,6 @@
 use alloc::{sync::Arc, vec::Vec};
 use core::{any::Any, fmt::Debug};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DeviceError {
-    Errno(i32),
-}
-
 /// A low-level abstraction representing a GPU-capable device that has been
 /// discovered by the system, but is not yet bound to any DRM driver.
 ///
@@ -28,27 +23,11 @@ pub enum DeviceError {
 /// - `GpuDevice` does NOT represent a DRM device node.
 /// - `GpuDevice` does NOT handle char device registration or file operations.
 /// - A single `GpuDevice` may result in multiple DRM nodes (primary/render/control).
-/// 
-/// Example:
-/// ```rust
-/// #[derive(Debug)]
-/// struct SimpleGpuDevice;
-/// 
-/// impl GpuDevice for SimpleGpuDevice {
-///     fn name(&self) -> &str {
-///         SIMPLEDRM_NAME
-///     }
-/// }
-/// 
-/// pub fn init() {
-///     let device = Arc::new(SimpleGpuDevice {});
-///     aster_gpu::register_device(device).expect("failed to register simple_drm GpuDevice");
-/// }
-/// ```
 pub trait GpuDevice: Send + Sync + Any + Debug {
-    /// Human-readable device name, used for debugging, logging,
+    /// TODO: Human-readable device name, used for debugging, logging,
     /// and optional driver matching.
-    fn name(&self) -> &str;
+    /// TODO: how to matching drm driver?
+    fn driver_name(&self) -> &str;
     // more settings e.g. device_id, capability, resources
 }
 
@@ -71,6 +50,7 @@ impl GpuDevices {
 
     pub fn register_device(&mut self, device: Arc<dyn GpuDevice>) -> Result<(), super::Error> {
         // TODO: Simple duplicate policy: add a stable device id and dedup by id.
+        // TODO: remove simpledrm device if any true gpu device registered
         self.devices.push(device);
         Ok(())
     }

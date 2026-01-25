@@ -1,16 +1,14 @@
-use alloc::sync::Arc;
+use alloc::{boxed::Box, sync::Arc};
 
 use hashbrown::{HashMap, HashSet};
 
-use crate::{
-    device::drm::mode_config::{
-        DrmModeConfig, DrmModeModeInfo, DrmModeObject, connector::funcs::ConnectorFuncs, encoder::DrmEncoder
-    },
-    prelude::*,
+use crate::drm::mode_config::{
+    DrmModeConfig, DrmModeModeInfo, DrmModeObject, connector::funcs::ConnectorFuncs,
+    encoder::DrmEncoder,
 };
 
-pub mod property;
 pub mod funcs;
+pub mod property;
 
 #[repr(u32)]
 #[derive(Debug, Clone, Copy)]
@@ -103,7 +101,7 @@ impl DrmConnector {
         mode: &[DrmModeModeInfo],
         encoder: &[Arc<DrmEncoder>],
         funcs: Box<dyn ConnectorFuncs>,
-    ) -> Result<Arc<Self>> {
+    ) -> Result<Arc<Self>, ()> {
         let id = res.next_object_id();
         let mut conn = Self {
             id,

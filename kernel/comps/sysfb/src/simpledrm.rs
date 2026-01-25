@@ -1,16 +1,19 @@
-use alloc::sync::Arc;
+use alloc::{boxed::Box, sync::Arc};
 
-use aster_gpu::GpuDevice;
-
-use crate::{
-    device::drm::{
-        DrmDevice, DrmDriver, driver::{DrmDriverFeatures, DrmDriverOps, fake_modeinfo}, drm_dev_register, gem::memfd::DRM_MEMFD_DRIVER_OPS, mode_config::{
+use aster_gpu::{
+    GpuDevice,
+    drm::{
+        device::DrmDevice,
+        driver::{DrmDriver, DrmDriverFeatures, DrmDriverOps, DumbCreateProvider},
+        mode_config::{
+            DrmModeModeInfo,
             connector::{ConnectorStatus, DrmConnector, funcs::ConnectorFuncs},
             crtc::{DrmCrtc, funcs::CrtcFuncs},
             encoder::{DrmEncoder, EncoderType, funcs::EncoderFuncs},
             plane::{DrmPlane, PlaneType, funcs::PlaneFuncs},
-        }
-    }, drm_driver_ops, drm_register_driver, prelude::*
+        },
+    },
+    drm_register_driver,
 };
 
 const SIMPLEDRM_NAME: &'static str = "simpledrm";
@@ -18,8 +21,8 @@ const SIMPLEDRM_DESC: &'static str = "DRM driver for simple-framebuffer platform
 const SIMPLEDRM_DATE: &'static str = "2025-01-02";
 
 #[derive(Debug)]
-struct SimpleDrmDevice {
-    device: Arc<DrmDevice<SimpleDrmDriver>>,
+pub struct SimpleDrmDevice {
+    device: Arc<DrmDevice>,
 }
 
 impl SimpleDrmDevice {
@@ -36,7 +39,7 @@ impl SimpleDrmDevice {
         Self { device }
     }
 
-    fn init(&self) -> Result<()> {
+    fn init(&self) -> Result<(), ()> {
         let mut resources = self.device.resources().lock();
         resources.init_standard_properties();
 
@@ -87,14 +90,10 @@ impl DrmDriver for SimpleDrmDriver {
         SIMPLEDRM_DATE
     }
 
-    fn create_device(&self, index: u32) -> Result<()> {
+    fn create_device(&self, index: u32) -> Result<Arc<DrmDevice>, ()> {
         let sdev = SimpleDrmDevice::new(index);
         sdev.init()?;
-
-        // register drm device
-        drm_dev_register(sdev.device.clone())?;
-
-        Ok(())
+        Ok(sdev.device.clone())
     }
 
     fn driver_features(&self) -> DrmDriverFeatures {
@@ -102,7 +101,9 @@ impl DrmDriver for SimpleDrmDriver {
     }
 
     fn driver_ops(&self) -> DrmDriverOps {
-        drm_driver_ops!(DRM_MEMFD_DRIVER_OPS, ..DrmDriverOps::EMPTY)
+        DrmDriverOps {
+            dumb_create: Some(DumbCreateProvider::Memfd),
+        }
     }
 }
 
@@ -130,12 +131,58 @@ impl ConnectorFuncs for SimpleConnectorFuncs {}
 struct SimpleGpuDevice;
 
 impl GpuDevice for SimpleGpuDevice {
-    fn name(&self) -> &str {
+    fn driver_name(&self) -> &str {
         SIMPLEDRM_NAME
     }
 }
 
 pub fn init() {
     let device = Arc::new(SimpleGpuDevice {});
+    let driver = Arc::new(SimpleDrmDriver {});
+    aster_gpu::register_driver(SIMPLEDRM_NAME, driver)
+        .expect("failed to register simple_drm DrmDriver");
     aster_gpu::register_device(device).expect("failed to register simple_drm GpuDevice");
+}
+
+// Create a fake display mode for testing and bring-up purposes.
+//
+// This mode is not obtained from real hardware (e.g. EDID or firmware).
+// It provides a minimal, hard-coded timing description that allows the
+// DRM pipeline to be exercised during early development, testing, or
+// virtualized environments (such as simpledrm, QEMU, or headless setups).
+//
+// The values are chosen to represent a common 1280x800@60Hz mode and are
+// sufficient for validating mode-setting, atomic state transitions, and
+// userspace interaction. Real drivers must replace this with modes derived
+// from hardware capabilities or display discovery mechanisms.
+fn fake_modeinfo() -> DrmModeModeInfo {
+    let mut name = [0u8; 32];
+    let bytes = "1280x800".as_bytes();
+    let len = bytes.len().min(32);
+    name[..len].copy_from_slice(&bytes[..len]);
+
+    DrmModeModeInfo {
+        clock: 65000, // kHz (65 MHz)
+
+        hdisplay: 1280,
+        hsync_start: 1048,
+        hsync_end: 1184,
+        htotal: 1344,
+
+        hskew: 0,
+
+        vdisplay: 800,
+        vsync_start: 771,
+        vsync_end: 777,
+        vtotal: 806,
+
+        vscan: 0,
+
+        vrefresh: 60,
+
+        flags: 0x5,  // DRM_MODE_FLAG_PHSYNC | DRM_MODE_FLAG_PVSYNC
+        type_: 0x40, // DRM_MODE_TYPE_DRIVER (0x40) or DRIVER | PREFERRED (0x60)
+
+        name,
+    }
 }

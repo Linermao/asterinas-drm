@@ -5,20 +5,51 @@
 
 extern crate alloc;
 
+pub mod drm;
 mod gpu_dev;
 
-use alloc::{sync::Arc, vec::Vec};
+use alloc::{string::String, sync::Arc, vec::Vec};
 
 use component::{ComponentInitError, init_component};
-pub use gpu_dev::{DeviceError, GpuDevice};
+pub use gpu_dev::GpuDevice;
+use hashbrown::HashMap;
 use ostd::sync::Mutex;
 use spin::Once;
+
+use crate::{
+    drm::{DrmDrivers, driver::DrmDriver},
+    gpu_dev::GpuDevices,
+};
 
 /// Error type for GPU device registry operations.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Error {
     AlreadyRegistered,
     NotFound,
+}
+
+/// Registers a DRM driver.
+pub fn register_driver(name: &str, driver: Arc<dyn DrmDriver>) -> Result<(), Error> {
+    let component = COMPONENT
+        .get()
+        .expect("aster-gpu component not initialized");
+    component.drm_drivers.lock().register_driver(name, driver)
+}
+
+/// Unregisters a DRM driver.
+pub fn unregister_driver(name: &str) -> Result<Arc<dyn DrmDriver>, Error> {
+    let component = COMPONENT
+        .get()
+        .expect("aster-gpu component not initialized");
+    component.drm_drivers.lock().unregister_driver(name)
+}
+
+/// Returns a snapshot of all registered GPU devices.
+pub fn registered_drivers() -> HashMap<String, Arc<dyn DrmDriver>> {
+    let component = COMPONENT
+        .get()
+        .expect("aster-gpu component not initialized");
+    component.drm_drivers.lock().snapshot()
 }
 
 /// Registers a GPU device.
@@ -56,13 +87,15 @@ fn component_init() -> Result<(), ComponentInitError> {
 
 #[derive(Debug)]
 struct Component {
-    gpu_devices: Mutex<gpu_dev::GpuDevices>,
+    gpu_devices: Mutex<GpuDevices>,
+    drm_drivers: Mutex<DrmDrivers>,
 }
 
 impl Component {
     fn init() -> Result<Self, ComponentInitError> {
         Ok(Self {
-            gpu_devices: Mutex::new(gpu_dev::GpuDevices::new()),
+            gpu_devices: Mutex::new(GpuDevices::new()),
+            drm_drivers: Mutex::new(DrmDrivers::new()),
         })
     }
 }

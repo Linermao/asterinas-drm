@@ -1,6 +1,7 @@
-pub(super) mod simple_drm;
+use alloc::sync::Arc;
+use core::{any::Any, fmt::Debug};
 
-use crate::{device::drm::{gem::DrmGemObject, mode_config::DrmModeModeInfo}, prelude::*};
+use crate::drm::{device::DrmDevice, gem::DrmGemObject};
 
 bitflags::bitflags! {
     pub struct DrmDriverFeatures: u32 {
@@ -32,7 +33,7 @@ bitflags::bitflags! {
 ///
 /// A single `DrmDriver` instance may manage multiple DRM devices (e.g. multiple
 /// GPUs of the same type), each identified by a unique index.
-pub(super) trait DrmDriver: Send + Sync + Any + Debug {
+pub trait DrmDriver: Send + Sync + Any + Debug {
     /// Device name, description and date (for debugging / identification).
     fn name(&self) -> &str;
     fn desc(&self) -> &str;
@@ -42,7 +43,7 @@ pub(super) trait DrmDriver: Send + Sync + Any + Debug {
     ///
     /// This is typically called by the DRM core during probing after a
     /// compatible GPU device has been matched to this driver.
-    fn create_device(&self, index: u32) -> Result<()>;
+    fn create_device(&self, index: u32) -> Result<Arc<DrmDevice>, ()>;
 
     /// Returns the feature flags supported by devices driven by this driver.
     ///
@@ -51,8 +52,8 @@ pub(super) trait DrmDriver: Send + Sync + Any + Debug {
     fn driver_features(&self) -> DrmDriverFeatures;
 
     /// Handle device-specific command / ioctl.
-    fn handle_command(&self, _cmd: u32, _data: *mut u8) -> Result<()> {
-        return_errno!(Errno::EACCES)
+    fn handle_command(&self, _cmd: u32, _data: usize) -> Result<(), ()> {
+        Ok(())
     }
 
     fn driver_ops(&self) -> DrmDriverOps;
@@ -75,9 +76,9 @@ macro_rules! drm_register_driver {
         #[derive(Debug)]
         pub struct $name {}
 
-        pub fn register_driver(driver_table: &mut $crate::device::drm::DriverTable) {
-            driver_table.insert($drv_name.to_string(), alloc::sync::Arc::new($name {}));
-        }
+        // pub fn register_driver(driver_table: &mut $crate::drm::DriverTable) {
+        //     driver_table.insert($drv_name.to_string(), alloc::sync::Arc::new($name {}));
+        // }
     };
 }
 
@@ -91,11 +92,11 @@ macro_rules! drm_register_driver {
 /// Linux DRM exposes similar optional hooks (such as `dumb_create` and
 /// `dumb_map_offset`) that are invoked via the corresponding ioctls when
 /// userspace requests simple scanout buffer creation or mmap offsets.
-pub(super) struct DrmDriverOps {
+pub struct DrmDriverOps {
     /// This creates a new dumb buffer in the driver's backing storage manager (GEM,
-	/// TTM or something else entirely) and returns the resulting buffer handle. This
-	/// handle can then be wrapped up into a framebuffer modeset object.
-    pub dumb_create: Option<fn(width: u32, height: u32, bpp: u32) -> Result<Arc<DrmGemObject>>>,
+    /// TTM or something else entirely) and returns the resulting buffer handle. This
+    /// handle can then be wrapped up into a framebuffer modeset object.
+    pub dumb_create: Option<DumbCreateProvider>,
 }
 
 impl DrmDriverOps {
@@ -107,22 +108,27 @@ impl DrmDriverOps {
                 other.dumb_create
             } else {
                 self.dumb_create
-            }
+            },
         }
     }
+}
+
+pub enum DumbCreateProvider {
+    Memfd,
+    Custom(fn(width: u32, height: u32, bpp: u32) -> Result<Arc<DrmGemObject>, ()>),
 }
 
 /// This macro recursively merges a list of `DrmDriverOps` expressions into
 /// one. Each item in the invocation is merged with the next by calling
 /// `.merge(...)` on the head and the result of the recursive call on the
 /// tail, yielding a consolidated `DrmDriverOps`.
-/// 
+///
 /// produces a merged `DrmDriverOps` that combines the supplied ops with
 /// the baseline `DrmDriverOps::EMPTY`.
 ///
 /// This pattern uses declarative macro recursion to build up the final ops
 /// set at compile time.
-/// 
+///
 /// Example:
 /// ```rust
 /// fn driver_ops(&self) -> DrmDriverOps {
@@ -138,47 +144,4 @@ macro_rules! drm_driver_ops {
     ($head:expr, $($tail:tt)+) => {
         $head.merge(drm_driver_ops!($($tail)+))
     };
-}
-
-// Create a fake display mode for testing and bring-up purposes.
-//
-// This mode is not obtained from real hardware (e.g. EDID or firmware).
-// It provides a minimal, hard-coded timing description that allows the
-// DRM pipeline to be exercised during early development, testing, or
-// virtualized environments (such as simpledrm, QEMU, or headless setups).
-//
-// The values are chosen to represent a common 1280x800@60Hz mode and are
-// sufficient for validating mode-setting, atomic state transitions, and
-// userspace interaction. Real drivers must replace this with modes derived
-// from hardware capabilities or display discovery mechanisms.
-fn fake_modeinfo() -> DrmModeModeInfo {
-    let mut name = [0u8; 32];
-    let bytes = "1280x800".as_bytes();
-    let len = bytes.len().min(32);
-    name[..len].copy_from_slice(&bytes[..len]);
-
-    DrmModeModeInfo {
-        clock: 65000, // kHz (65 MHz)
-
-        hdisplay: 1280,
-        hsync_start: 1048,
-        hsync_end: 1184,
-        htotal: 1344,
-
-        hskew: 0,
-
-        vdisplay: 800,
-        vsync_start: 771,
-        vsync_end: 777,
-        vtotal: 806,
-
-        vscan: 0,
-
-        vrefresh: 60,
-
-        flags: 0x5,  // DRM_MODE_FLAG_PHSYNC | DRM_MODE_FLAG_PVSYNC
-        type_: 0x40, // DRM_MODE_TYPE_DRIVER (0x40) or DRIVER | PREFERRED (0x60)
-
-        name,
-    }
 }
