@@ -126,7 +126,7 @@ impl Vmar {
 ///
 /// Reference: <https://elixir.bootlin.com/linux/v6.16.5/source/include/linux/mm_types_task.h#L26-L32>
 #[repr(u32)]
-#[derive(Clone, Copy, Debug, TryFromInt)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, TryFromInt)]
 pub enum RssType {
     File = 0,
     Anon = 1,
@@ -259,7 +259,7 @@ impl VmarInner {
                 vm_space,
                 RmapEntry {
                     vaddr: vm_mapping.map_to_addr(),
-                    offset: vm_mapping.vmo().unwrap().offset(),
+                    offset: vm_mapping.offset_for_rmap().unwrap(),
                     size: vm_mapping.map_size(),
                 },
             );
@@ -311,7 +311,7 @@ impl VmarInner {
                 vm_space,
                 RmapEntry {
                     vaddr: vm_mapping.map_to_addr(),
-                    offset: vm_mapping.vmo().unwrap().offset(),
+                    offset: vm_mapping.offset_for_rmap().unwrap(),
                     size: vm_mapping.map_size(),
                 },
             );
@@ -324,7 +324,7 @@ impl VmarInner {
         let vm_mapping = self.vm_mappings.remove(key)?;
         self.total_vm -= vm_mapping.map_size();
 
-        let rmap_to_remove = RmapToRemove::new(vm_mapping.vmo().map(MappedVmo::vmo).cloned());
+        let rmap_to_remove = RmapToRemove::new(vm_mapping.vmo_for_rmap().cloned());
 
         Some((vm_mapping, rmap_to_remove))
     }
