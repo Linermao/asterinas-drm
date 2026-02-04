@@ -1,6 +1,9 @@
 use alloc::{format, sync::Arc};
 
-use aster_gpu::drm::gem::{DrmGemBackend, DrmGemObject};
+use aster_gpu::drm::{
+    DrmError,
+    gem::{DrmGemBackend, DrmGemObject},
+};
 use ostd::mm::{VmReader, VmWriter};
 
 use crate::fs::{
@@ -37,26 +40,35 @@ impl DrmMemfdFile {
     }
 }
 
+// TODO: How to convert Error to DrmError? Is this nesseary?
 impl DrmGemBackend for DrmMemfdFile {
-    fn read(&self, offset: usize, writer: &mut VmWriter) -> Result<usize, ()> {
-        self.0.read_at(offset, writer).map_err(|_| ())
+    fn read(&self, offset: usize, writer: &mut VmWriter) -> Result<usize, DrmError> {
+        self.0
+            .read_at(offset, writer)
+            .map_err(|_| DrmError::Invalid)
     }
 
-    fn write(&self, offset: usize, reader: &mut VmReader) -> Result<usize, ()> {
-        self.0.write_at(offset, reader).map_err(|_| ())
+    fn write(&self, offset: usize, reader: &mut VmReader) -> Result<usize, DrmError> {
+        self.0
+            .write_at(offset, reader)
+            .map_err(|_| DrmError::Invalid)
     }
 
-    fn release(&self) -> Result<(), ()> {
-        self.0.resize(0).map_err(|_| ())
+    fn release(&self) -> Result<(), DrmError> {
+        self.0.resize(0).map_err(|_| DrmError::Invalid)
     }
 }
 
-pub fn dumb_create_impl(width: u32, height: u32, bpp: u32) -> Result<Arc<DrmGemObject>, ()> {
+pub fn dumb_create_impl(
+    width: u32,
+    height: u32,
+    bpp: u32,
+) -> crate::prelude::Result<Arc<DrmGemObject>> {
     let pitch = width * (bpp / 8);
     let size = pitch * height;
 
     // TODO: handle the error
-    let backend = DrmMemfdFile::new("some", size as usize).unwrap();
+    let backend = DrmMemfdFile::new("some", size as usize)?;
     let gem_object = DrmGemObject::new(size as u64, pitch, backend);
     Ok(Arc::new(gem_object))
 }

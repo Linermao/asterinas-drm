@@ -29,7 +29,6 @@ pub(super) type DrmIoctlModeGetPlaneResources   = ioc!(DRM_IOCTL_MODE_GETPLANERE
 pub(super) type DrmIoctlModeGetPlane            = ioc!(DRM_IOCTL_MODE_GETPLANE,             b'd', 0xb6, InOutData<DrmModeGetPlane>);
 pub(super) type DrmIoctlModeObjectGetProps      = ioc!(DRM_IOCTL_MODE_OBJ_GETPROPERTIES,    b'd', 0xb9, InOutData<DrmModeObjectGetProps>);
 pub(super) type DrmIoctlModeCursor2             = ioc!(DRM_IOCTL_MODE_CURSOR2,              b'd', 0xbb, InOutData<DrmModeCursor>);
-pub(super) type DrmIoctlModeListLessees         = ioc!(DRM_IOCTL_MODE_LIST_LESSEES,         b'd', 0xc7, InOutData<DrmModeListLessees>);
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod)]
@@ -414,20 +413,4 @@ impl DrmModeObjectGetProps {
     pub fn is_first_call(&self) -> bool {
         return self.props_ptr == 0 && self.prop_values_ptr == 0;
     }
-}
-
-#[repr(C)]
-#[derive(Debug, Default, Clone, Copy, Pod)]
-pub(super) struct DrmModeListLessees {
-    /// Number of lessees.
-    /// On input, provides length of the array.
-    /// On output, provides total number. No
-    /// more than the input number will be written
-    /// back, so two calls can be used to get
-    /// the size and then the data.
-    count_lessees: u32,
-    pad: u32,
-
-    /// Pointer to __u64 array of lessee ids
-    lessees_ptr: u64,
 }

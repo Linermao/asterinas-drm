@@ -12,15 +12,6 @@ use crate::drm::{
 
 /// Represents a DRM device instance bound to a specific DRM driver.
 ///
-/// `DrmDevice` models the core DRM object that owns global device state and
-/// driver association. It is created during driver probing and serves as the
-/// shared backend for one or more `DrmMinor` nodes.
-///
-/// A single `DrmDevice` may give rise to multiple minors (primary, render,
-/// control), all of which reference this structure and share the same driver
-/// instance. Per-minor differences (such as permissions and ioctl exposure)
-/// are handled at the `DrmMinor` and file level, not here.
-///
 /// This structure is not directly exposed to userspace; it exists to:
 /// - Bind a DRM driver to a concrete device instance
 /// - Act as the common anchor point for all associated minors
@@ -51,12 +42,17 @@ pub struct DrmDevice {
 }
 
 impl DrmDevice {
-    pub fn new(index: u32, driver: Arc<dyn DrmDriver>, driver_features: DrmDriverFeatures) -> Self {
+    pub fn new(
+        index: u32,
+        driver: Arc<dyn DrmDriver>,
+        driver_features: DrmDriverFeatures,
+        mode_config: DrmModeConfig,
+    ) -> Self {
         Self {
             index,
             driver,
             driver_features,
-            mode_config: Mutex::new(DrmModeConfig::default()),
+            mode_config: Mutex::new(mode_config),
 
             // TODO: We currently seed `next_offset` with 0x100000 as a simple starting
             //

@@ -44,7 +44,7 @@ pub fn unregister_driver(name: &str) -> Result<Arc<dyn DrmDriver>, Error> {
     component.drm_drivers.lock().unregister_driver(name)
 }
 
-/// Returns a snapshot of all registered GPU devices.
+/// Returns a snapshot of all registered GPU drivers.
 pub fn registered_drivers() -> HashMap<String, Arc<dyn DrmDriver>> {
     let component = COMPONENT
         .get()

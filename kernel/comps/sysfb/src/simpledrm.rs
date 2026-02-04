@@ -3,17 +3,20 @@ use alloc::{boxed::Box, sync::Arc};
 use aster_gpu::{
     GpuDevice,
     drm::{
+        DrmError,
         device::DrmDevice,
         driver::{DrmDriver, DrmDriverFeatures, DrmDriverOps, DumbCreateProvider},
+        gem::DrmGemObject,
         mode_config::{
-            DrmModeModeInfo,
+            DrmModeConfig, DrmModeModeInfo,
             connector::{ConnectorStatus, DrmConnector, funcs::ConnectorFuncs},
             crtc::{DrmCrtc, funcs::CrtcFuncs},
             encoder::{DrmEncoder, EncoderType, funcs::EncoderFuncs},
+            framebuffer::{DrmFramebuffer, funcs::FramebufferFuncs},
+            funcs::ModeConfigFuncs,
             plane::{DrmPlane, PlaneType, funcs::PlaneFuncs},
         },
     },
-    drm_register_driver,
 };
 
 const SIMPLEDRM_NAME: &'static str = "simpledrm";
@@ -26,37 +29,38 @@ pub struct SimpleDrmDevice {
 }
 
 impl SimpleDrmDevice {
-    fn new(index: u32) -> Self {
-        let driver = Arc::new(SimpleDrmDriver {});
-        // TODO: initialize device-specific features
-        // In Linux, a drm_device's features are not necessarily identical to
-        // its driver's features. Here we start from the driver-wide features
-        // and adjust per-device settings (e.g., enable/disable render node
-        // or other capabilities for this specific device instance).
-        let driver_features = driver.driver_features();
-        let device = Arc::new(DrmDevice::new(index, driver, driver_features));
+    fn new(index: u32) -> Result<Self, DrmError> {
+        // TODO: get the hardware format to set this properties
+        let min_width = 1;
+        let max_width = 8192;
+        let min_height = 1;
+        let max_height = 8192;
+        let preferred_depth = 16;
 
-        Self { device }
-    }
+        let mut mode_config = DrmModeConfig::new(
+            min_width,
+            max_width,
+            min_height,
+            max_height,
+            preferred_depth,
+            Box::new(SimpleModeConfigFuncs {}),
+        );
 
-    fn init(&self) -> Result<(), ()> {
-        let mut resources = self.device.resources().lock();
-        resources.init_standard_properties();
-
+        // Drm Objects initial
         let primary_plane = DrmPlane::init(
-            &mut resources,
+            &mut mode_config,
             PlaneType::Primary,
             Box::new(SimplePlaneFuncs),
         )?;
         let crtc = DrmCrtc::init_with_planes(
-            &mut resources,
+            &mut mode_config,
             None,
             primary_plane,
             None,
             Box::new(SimpleCrtcFuncs),
         )?;
         let encoder = DrmEncoder::init_with_crtcs(
-            &mut resources,
+            &mut mode_config,
             EncoderType::VIRTUAL,
             &[crtc],
             Box::new(SimpleEncoderFuncs),
@@ -64,18 +68,30 @@ impl SimpleDrmDevice {
 
         let fake_modeinfo = fake_modeinfo();
         let _connector = DrmConnector::init_with_encoder(
-            &mut resources,
+            &mut mode_config,
             ConnectorStatus::Connected,
             &[fake_modeinfo],
             &[encoder],
             Box::new(SimpleConnectorFuncs),
         )?;
 
-        Ok(())
+        mode_config.init_standard_properties();
+
+        let driver = Arc::new(SimpleDrmDriver {});
+        // TODO: initialize device-specific features
+        // In Linux, a drm_device's features are not necessarily identical to
+        // its driver's features. Here we start from the driver-wide features
+        // and adjust per-device settings (e.g., enable/disable render node
+        // or other capabilities for this specific device instance).
+        let driver_features = driver.driver_features();
+        let device = Arc::new(DrmDevice::new(index, driver, driver_features, mode_config));
+
+        Ok(Self { device })
     }
 }
 
-drm_register_driver!(SimpleDrmDriver, SIMPLEDRM_NAME);
+#[derive(Debug)]
+struct SimpleDrmDriver {}
 
 impl DrmDriver for SimpleDrmDriver {
     fn name(&self) -> &str {
@@ -90,20 +106,46 @@ impl DrmDriver for SimpleDrmDriver {
         SIMPLEDRM_DATE
     }
 
-    fn create_device(&self, index: u32) -> Result<Arc<DrmDevice>, ()> {
-        let sdev = SimpleDrmDevice::new(index);
-        sdev.init()?;
+    fn create_device(
+        &self,
+        index: u32,
+        _gpu_device: Arc<dyn GpuDevice>,
+    ) -> Result<Arc<DrmDevice>, DrmError> {
+        let sdev = SimpleDrmDevice::new(index)?;
         Ok(sdev.device.clone())
     }
 
     fn driver_features(&self) -> DrmDriverFeatures {
-        DrmDriverFeatures::ATOMIC | DrmDriverFeatures::GEM | DrmDriverFeatures::MODESET
+        DrmDriverFeatures::GEM | DrmDriverFeatures::MODESET
     }
 
     fn driver_ops(&self) -> DrmDriverOps {
         DrmDriverOps {
             dumb_create: Some(DumbCreateProvider::Memfd),
         }
+    }
+}
+
+#[derive(Debug)]
+struct SimpleModeConfigFuncs;
+
+impl ModeConfigFuncs for SimpleModeConfigFuncs {
+    fn create_framebuffer(
+        &self,
+        width: u32,
+        height: u32,
+        pitch: u32,
+        bpp: u32,
+        gem_obj: Arc<DrmGemObject>,
+    ) -> Result<DrmFramebuffer, DrmError> {
+        Ok(DrmFramebuffer::new(
+            width,
+            height,
+            pitch,
+            bpp,
+            gem_obj,
+            Box::new(SimpleFramebufferFuncs {}),
+        ))
     }
 }
 
@@ -119,6 +161,9 @@ struct SimpleEncoderFuncs;
 #[derive(Debug)]
 struct SimpleConnectorFuncs;
 
+#[derive(Debug)]
+struct SimpleFramebufferFuncs;
+
 impl PlaneFuncs for SimplePlaneFuncs {}
 
 impl CrtcFuncs for SimpleCrtcFuncs {}
@@ -126,6 +171,8 @@ impl CrtcFuncs for SimpleCrtcFuncs {}
 impl EncoderFuncs for SimpleEncoderFuncs {}
 
 impl ConnectorFuncs for SimpleConnectorFuncs {}
+
+impl FramebufferFuncs for SimpleFramebufferFuncs {}
 
 #[derive(Debug)]
 struct SimpleGpuDevice;
@@ -136,12 +183,15 @@ impl GpuDevice for SimpleGpuDevice {
     }
 }
 
-pub fn init() {
+pub fn register_device() {
     let device = Arc::new(SimpleGpuDevice {});
+    aster_gpu::register_device(device).expect("failed to register simple_drm GpuDevice");
+}
+
+pub fn register_driver() {
     let driver = Arc::new(SimpleDrmDriver {});
     aster_gpu::register_driver(SIMPLEDRM_NAME, driver)
         .expect("failed to register simple_drm DrmDriver");
-    aster_gpu::register_device(device).expect("failed to register simple_drm GpuDevice");
 }
 
 // Create a fake display mode for testing and bring-up purposes.

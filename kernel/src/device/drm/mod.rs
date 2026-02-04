@@ -1,13 +1,13 @@
-mod device;
 mod file;
 mod ioctl_defs;
 mod memfd;
+mod minor;
 
 use aster_gpu::drm::{device::DrmDevice, driver::DrmDriverFeatures};
 
 use crate::{
     device::{
-        drm::device::{DrmMinor, DrmMinorType},
+        drm::minor::{DrmMinor, DrmMinorType},
         registry::char,
     },
     prelude::*,
@@ -28,9 +28,9 @@ pub(super) fn init_in_first_kthread() -> Result<()> {
     // Matching GpuDevice and DrmDriver, if matched, create DrmDevice.
     // Introduce a capability- or ID-based matching interface between GpuDevice and
     // DrmDriver to enable precise, extensible, and bus-agnostic driver selection.
-    for (index, device) in gpus.iter().enumerate() {
-        if let Some(driver) = driver_table.get(device.driver_name()) {
-            match driver.create_device(index as u32) {
+    for (index, gpu_device) in gpus.iter().enumerate() {
+        if let Some(driver) = driver_table.get(gpu_device.driver_name()) {
+            match driver.create_device(index as u32, gpu_device.clone()) {
                 Ok(device) => {
                     any_success = true;
                     drm_dev_register(device)?;

@@ -8,8 +8,9 @@ use core::sync::atomic::Ordering;
 
 use hashbrown::HashMap;
 
-use crate::drm::mode_config::{
-    DrmModeConfig, DrmModeObject, crtc::funcs::CrtcFuncs, plane::DrmPlane,
+use crate::drm::{
+    DrmError,
+    mode_config::{DrmModeConfig, DrmModeObject, crtc::funcs::CrtcFuncs, plane::DrmPlane},
 };
 
 pub mod funcs;
@@ -38,10 +39,6 @@ pub struct DrmCrtc {
 }
 
 impl DrmCrtc {
-    pub fn id(&self) -> u32 {
-        self.id
-    }
-
     pub fn index(&self) -> u8 {
         self.index
     }
@@ -66,7 +63,7 @@ impl DrmCrtc {
         primary_plane: Arc<DrmPlane>,
         cursor_plane: Option<Arc<DrmPlane>>,
         funcs: Box<dyn CrtcFuncs>,
-    ) -> Result<Arc<Self>, ()> {
+    ) -> Result<Arc<Self>, DrmError> {
         let id = res.next_object_id();
         let name = match name {
             Some(name) => name.to_string(),

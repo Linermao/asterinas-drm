@@ -363,6 +363,16 @@ impl From<aster_util::printer::VmPrinterError> for Error {
     }
 }
 
+impl From<aster_gpu::drm::DrmError> for Error {
+    fn from(value: aster_gpu::drm::DrmError) -> Self {
+        match value {
+            aster_gpu::drm::DrmError::Invalid => Error::new(Errno::EINVAL),
+            aster_gpu::drm::DrmError::Busy => Error::new(Errno::EBUSY),
+            _ => Error::new(Errno::EINVAL),
+        }
+    }
+}
+
 #[macro_export]
 macro_rules! return_errno {
     ($errno: expr) => {

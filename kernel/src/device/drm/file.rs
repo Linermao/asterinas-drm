@@ -2,10 +2,11 @@ use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use aster_framebuffer::FRAMEBUFFER;
 use aster_gpu::drm::{
+    DrmError,
     driver::{DrmDriverFeatures, DumbCreateProvider},
     gem::DrmGemObject,
     mode_config::{
-        DrmModeModeInfo,
+        DrmModeModeInfo, DrmModeObject,
         property::{PropertyEnum, PropertyKind},
     },
 };
@@ -15,9 +16,9 @@ use ostd::mm::{VmIo, io_util::HasVmReaderWriter};
 use crate::{
     current_userspace,
     device::drm::{
-        device::DrmMinor,
         ioctl_defs::*,
         memfd::{DrmMemfdFile, dumb_create_impl},
+        minor::DrmMinor,
     },
     events::IoEvents,
     fs::{
@@ -733,7 +734,7 @@ impl FileIo for DrmFile {
                         user_data.pitch,
                         user_data.bpp,
                         gem_obj,
-                    );
+                    )?;
 
                     user_data.fb_id = fb_id;
 
@@ -792,23 +793,22 @@ impl FileIo for DrmFile {
 
                 if let Some(dumb_create) = self.device.driver().driver_ops().dumb_create {
                     // TODO: handle the error
-                    if let Ok(gem) = match dumb_create {
+                    let gem = match dumb_create {
                         DumbCreateProvider::Memfd => {
-                            dumb_create_impl(user_data.width, user_data.height, user_data.bpp)
+                            dumb_create_impl(user_data.width, user_data.height, user_data.bpp)?
                         }
                         DumbCreateProvider::Custom(dumb_create_impl) => {
-                            dumb_create_impl(user_data.width, user_data.height, user_data.bpp)
+                            dumb_create_impl(user_data.width, user_data.height, user_data.bpp)?
                         }
-                    } {
-                        let handle = self.next_handle();
-                        user_data.handle = handle;
-                        user_data.pitch = gem.pitch();
-                        user_data.size = gem.size();
+                    };
+                    let handle = self.next_handle();
+                    user_data.handle = handle;
+                    user_data.pitch = gem.pitch();
+                    user_data.size = gem.size();
 
-                        self.insert_gem(handle, gem);
+                    self.insert_gem(handle, gem);
 
-                        cmd.write(&user_data)?;
-                    }
+                    cmd.write(&user_data)?;
                 } else {
                     return_errno!(Errno::ENOENT);
                 }
@@ -959,28 +959,25 @@ impl FileIo for DrmFile {
 
                 Ok(0)
             }
-            cmd @ DrmIoctlModeListLessees => {
-                if !self.device.check_feature(DrmDriverFeatures::MODESET) {
-                    return_errno!(Errno::EOPNOTSUPP);
-                }
-
-                let _user_data: DrmModeListLessees = cmd.read()?;
-
-                // TODO:
-
-                Ok(0)
-            }
             _ => {
                 let driver = self.device.driver();
                 match driver.handle_command(raw_ioctl.cmd(), raw_ioctl.arg()) {
                     Ok(()) => Ok(0),
-                    Err(()) => {
+                    Err(err) => {
                         // TODO: handle error
-                        log::debug!(
-                            "the ioctl command {:#x} is unknown for drm devices",
-                            raw_ioctl.cmd()
-                        );
-                        return_errno_with_message!(Errno::ENOTTY, "the ioctl command is unknown");
+                        match err {
+                            DrmError::NotSupported | DrmError::NotFound => {
+                                log::debug!(
+                                    "the ioctl command {:#x} is unknown for drm devices",
+                                    raw_ioctl.cmd()
+                                );
+                                return_errno_with_message!(
+                                    Errno::ENOTTY,
+                                    "the ioctl command is unknown"
+                                );
+                            }
+                            _ => Err(err.into()),
+                        }
                     }
                 }
             }

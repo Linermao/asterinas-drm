@@ -12,6 +12,22 @@ pub mod driver;
 pub mod gem;
 pub mod mode_config;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DrmError {
+    /// Generic invalid argument or state
+    Invalid,
+    /// Object not found (CRTC / FB / GEM handle / connector, etc.)
+    NotFound,
+    /// Operation not supported by this driver / device
+    NotSupported,
+    /// Resource temporarily unavailable (busy, in use)
+    Busy,
+    /// Permission or access violation
+    PermissionDenied,
+    /// Memory allocation or mapping failure
+    NoMemory,
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct DrmDrivers {
     drivers: HashMap<String, Arc<dyn DrmDriver>>,

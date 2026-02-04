@@ -5,12 +5,16 @@
 
 mod simpledrm;
 
+use aster_framebuffer::FRAMEBUFFER;
 use component::{ComponentInitError, init_component};
 
 extern crate alloc;
 
 #[init_component]
 fn sysfb_component_init() -> Result<(), ComponentInitError> {
-    simpledrm::init();
+    if FRAMEBUFFER.get().is_some() {
+        simpledrm::register_device();
+    }
+    simpledrm::register_driver();
     Ok(())
 }

@@ -24,9 +24,8 @@ use core::{any::Any, fmt::Debug};
 /// - `GpuDevice` does NOT handle char device registration or file operations.
 /// - A single `GpuDevice` may result in multiple DRM nodes (primary/render/control).
 pub trait GpuDevice: Send + Sync + Any + Debug {
-    /// TODO: Human-readable device name, used for debugging, logging,
+    /// Human-readable device name, used for debugging, logging,
     /// and optional driver matching.
-    /// TODO: how to matching drm driver?
     fn driver_name(&self) -> &str;
     // more settings e.g. device_id, capability, resources
 }

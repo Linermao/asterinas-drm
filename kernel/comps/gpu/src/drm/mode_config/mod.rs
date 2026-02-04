@@ -9,10 +9,11 @@ use hashbrown::HashMap;
 use ostd::Pod;
 
 use crate::drm::{
+    DrmError,
     gem::DrmGemObject,
     mode_config::{
         connector::DrmConnector, crtc::DrmCrtc, encoder::DrmEncoder, framebuffer::DrmFramebuffer,
-        plane::DrmPlane, property::DrmProperty,
+        funcs::ModeConfigFuncs, plane::DrmPlane, property::DrmProperty,
     },
 };
 
@@ -20,6 +21,7 @@ pub mod connector;
 pub mod crtc;
 pub mod encoder;
 pub mod framebuffer;
+pub mod funcs;
 pub mod plane;
 pub mod property;
 
@@ -63,7 +65,7 @@ pub trait DrmModeObject: Debug + Any + Sync + Send {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct DrmModeConfig {
     planes: HashMap<u32, Arc<DrmPlane>>,
     crtcs: HashMap<u32, Arc<DrmCrtc>>,
@@ -78,6 +80,8 @@ pub struct DrmModeConfig {
 
     crtc_index: AtomicU8,
     encoder_index: AtomicU8,
+
+    funcs: Box<dyn ModeConfigFuncs>,
 
     pub preferred_depth: u32,
     pub prefer_shadow: u32,
@@ -95,7 +99,14 @@ pub struct DrmModeConfig {
 }
 
 impl DrmModeConfig {
-    pub fn default() -> Self {
+    pub fn new(
+        min_width: u32,
+        max_width: u32,
+        min_height: u32,
+        max_height: u32,
+        preferred_depth: u32,
+        funcs: Box<dyn ModeConfigFuncs>,
+    ) -> Self {
         Self {
             planes: HashMap::new(),
             crtcs: HashMap::new(),
@@ -103,7 +114,7 @@ impl DrmModeConfig {
             connectors: HashMap::new(),
             framebuffers: HashMap::new(),
 
-            preferred_depth: 16,
+            preferred_depth,
             prefer_shadow: 0,
 
             next_object_id: AtomicU32::new(0),
@@ -114,10 +125,12 @@ impl DrmModeConfig {
             crtc_index: AtomicU8::new(0),
             encoder_index: AtomicU8::new(0),
 
-            min_width: 1,
-            max_width: 8192,
-            min_height: 1,
-            max_height: 8192,
+            funcs,
+
+            min_width,
+            max_width,
+            min_height,
+            max_height,
 
             cursor_width: 32,
             cursor_height: 32,
@@ -160,12 +173,20 @@ impl DrmModeConfig {
         pitch: u32,
         bpp: u32,
         gem_obj: Arc<DrmGemObject>,
-    ) -> u32 {
+    ) -> Result<u32, DrmError> {
+        let mut fb = self
+            .funcs
+            .create_framebuffer(width, height, pitch, bpp, gem_obj)?;
+
+        // TODO: better way?
         let id = self.next_object_id();
-        let fb = Arc::new(DrmFramebuffer::new(id, width, height, pitch, bpp, gem_obj));
+        fb.init_object(id);
+
+        let fb = Arc::new(fb);
+
         self.framebuffers.insert(id, fb.clone());
         self.objects.insert(id, fb);
-        id
+        Ok(id)
     }
 
     pub fn lookup_framebuffer(&self, fb_id: &u32) -> Option<Arc<DrmFramebuffer>> {

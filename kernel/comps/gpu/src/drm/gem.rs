@@ -3,6 +3,8 @@ use core::{any::Any, fmt::Debug};
 
 use ostd::mm::{VmReader, VmWriter};
 
+use crate::drm::DrmError;
+
 /// Trait representing a pluggable GEM buffer backend.
 ///
 /// A type implementing `DrmGemBackend` can be used as the storage layer
@@ -10,10 +12,10 @@ use ostd::mm::{VmReader, VmWriter};
 /// example, a simple shmem‑like backend or a more complex
 /// hardware‑specific allocator.
 pub trait DrmGemBackend: Debug + Any + Sync + Send {
-    fn read(&self, offset: usize, writer: &mut VmWriter) -> Result<usize, ()>;
-    fn write(&self, offset: usize, reader: &mut VmReader) -> Result<usize, ()>;
+    fn read(&self, offset: usize, writer: &mut VmWriter) -> Result<usize, DrmError>;
+    fn write(&self, offset: usize, reader: &mut VmReader) -> Result<usize, DrmError>;
 
-    fn release(&self) -> Result<(), ()>;
+    fn release(&self) -> Result<(), DrmError>;
 }
 
 impl dyn DrmGemBackend {
@@ -46,7 +48,7 @@ impl DrmGemObject {
         }
     }
 
-    pub fn release(&self) -> Result<(), ()> {
+    pub fn release(&self) -> Result<(), DrmError> {
         self.backend.release()
     }
 
@@ -58,11 +60,11 @@ impl DrmGemObject {
         self.pitch
     }
 
-    pub fn read(&self, offset: usize, writer: &mut VmWriter) -> Result<usize, ()> {
+    pub fn read(&self, offset: usize, writer: &mut VmWriter) -> Result<usize, DrmError> {
         self.backend.read(offset, writer)
     }
 
-    pub fn write(&self, offset: usize, reader: &mut VmReader) -> Result<usize, ()> {
+    pub fn write(&self, offset: usize, reader: &mut VmReader) -> Result<usize, DrmError> {
         self.backend.write(offset, reader)
     }
 

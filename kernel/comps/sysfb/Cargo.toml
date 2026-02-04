@@ -6,6 +6,7 @@ edition.workspace = true
 [dependencies]
 component.workspace = true
 aster-gpu.workspace = true
+aster-framebuffer.workspace = true
 log.workspace = true
 ostd.workspace = true
 spin.workspace = true

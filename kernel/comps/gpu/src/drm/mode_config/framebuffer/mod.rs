@@ -1,9 +1,13 @@
-use alloc::sync::Arc;
+use alloc::{boxed::Box, sync::Arc};
 
 use hashbrown::HashMap;
 use ostd::mm::{VmReader, VmWriter};
 
-use crate::drm::{gem::DrmGemObject, mode_config::DrmModeObject};
+use crate::drm::{
+    DrmError,
+    gem::DrmGemObject,
+    mode_config::{DrmModeObject, framebuffer::funcs::FramebufferFuncs},
+};
 
 pub mod funcs;
 pub mod property;
@@ -18,19 +22,20 @@ pub struct DrmFramebuffer {
     gem_obj: Arc<DrmGemObject>,
 
     properties: HashMap<u32, u64>,
+    funcs: Box<dyn FramebufferFuncs>,
 }
 
 impl DrmFramebuffer {
     pub fn new(
-        id: u32,
         width: u32,
         height: u32,
         pitch: u32,
         bpp: u32,
         gem_obj: Arc<DrmGemObject>,
+        funcs: Box<dyn FramebufferFuncs>,
     ) -> Self {
         Self {
-            id,
+            id: 0,
             width,
             height,
             pitch,
@@ -38,14 +43,19 @@ impl DrmFramebuffer {
             gem_obj,
 
             properties: HashMap::new(),
+            funcs,
         }
     }
 
-    pub fn read(&self, offset: usize, writer: &mut VmWriter) -> Result<usize, ()> {
+    pub fn init_object(&mut self, id: u32) {
+        self.id = id
+    }
+
+    pub fn read(&self, offset: usize, writer: &mut VmWriter) -> Result<usize, DrmError> {
         self.gem_obj.read(offset, writer)
     }
 
-    pub fn write(&self, offset: usize, reader: &mut VmReader) -> Result<usize, ()> {
+    pub fn write(&self, offset: usize, reader: &mut VmReader) -> Result<usize, DrmError> {
         self.gem_obj.write(offset, reader)
     }
 }

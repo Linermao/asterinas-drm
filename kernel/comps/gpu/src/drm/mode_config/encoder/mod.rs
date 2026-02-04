@@ -3,8 +3,9 @@ use core::sync::atomic::Ordering;
 
 use hashbrown::HashMap;
 
-use crate::drm::mode_config::{
-    DrmModeConfig, DrmModeObject, crtc::DrmCrtc, encoder::funcs::EncoderFuncs,
+use crate::drm::{
+    DrmError,
+    mode_config::{DrmModeConfig, DrmModeObject, crtc::DrmCrtc, encoder::funcs::EncoderFuncs},
 };
 
 pub mod funcs;
@@ -40,10 +41,6 @@ pub struct DrmEncoder {
 }
 
 impl DrmEncoder {
-    pub fn id(&self) -> u32 {
-        self.id
-    }
-
     pub fn index(&self) -> u8 {
         self.index
     }
@@ -53,7 +50,7 @@ impl DrmEncoder {
         type_: EncoderType,
         crtcs: &[Arc<DrmCrtc>],
         funcs: Box<dyn EncoderFuncs>,
-    ) -> Result<Arc<Self>, ()> {
+    ) -> Result<Arc<Self>, DrmError> {
         let id = res.next_object_id();
         let mut encoder = Self {
             id,

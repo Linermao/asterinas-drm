@@ -2,7 +2,10 @@ use alloc::{boxed::Box, sync::Arc};
 
 use hashbrown::HashMap;
 
-use crate::drm::mode_config::{DrmModeConfig, DrmModeObject, plane::funcs::PlaneFuncs};
+use crate::drm::{
+    DrmError,
+    mode_config::{DrmModeConfig, DrmModeObject, plane::funcs::PlaneFuncs},
+};
 
 pub mod funcs;
 pub mod property;
@@ -30,7 +33,7 @@ impl DrmPlane {
         res: &mut DrmModeConfig,
         type_: PlaneType,
         funcs: Box<dyn PlaneFuncs>,
-    ) -> Result<Arc<Self>, ()> {
+    ) -> Result<Arc<Self>, DrmError> {
         let id = res.next_object_id();
         let plane = Self {
             id,
@@ -47,9 +50,6 @@ impl DrmPlane {
         Ok(plane)
     }
 
-    pub fn id(&self) -> u32 {
-        self.id
-    }
     pub fn type_(&self) -> PlaneType {
         self.type_
     }

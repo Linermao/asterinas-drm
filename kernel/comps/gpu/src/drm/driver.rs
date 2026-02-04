@@ -1,7 +1,10 @@
 use alloc::sync::Arc;
 use core::{any::Any, fmt::Debug};
 
-use crate::drm::{device::DrmDevice, gem::DrmGemObject};
+use crate::{
+    GpuDevice,
+    drm::{DrmError, device::DrmDevice, gem::DrmGemObject},
+};
 
 bitflags::bitflags! {
     pub struct DrmDriverFeatures: u32 {
@@ -43,7 +46,11 @@ pub trait DrmDriver: Send + Sync + Any + Debug {
     ///
     /// This is typically called by the DRM core during probing after a
     /// compatible GPU device has been matched to this driver.
-    fn create_device(&self, index: u32) -> Result<Arc<DrmDevice>, ()>;
+    fn create_device(
+        &self,
+        index: u32,
+        gpu_device: Arc<dyn GpuDevice>,
+    ) -> Result<Arc<DrmDevice>, DrmError>;
 
     /// Returns the feature flags supported by devices driven by this driver.
     ///
@@ -52,38 +59,14 @@ pub trait DrmDriver: Send + Sync + Any + Debug {
     fn driver_features(&self) -> DrmDriverFeatures;
 
     /// Handle device-specific command / ioctl.
-    fn handle_command(&self, _cmd: u32, _data: usize) -> Result<(), ()> {
-        Ok(())
+    fn handle_command(&self, _cmd: u32, _data: usize) -> Result<(), DrmError> {
+        Err(DrmError::NotSupported)
     }
 
+    /// Optional driver operations for generic DRM capabilities.
     fn driver_ops(&self) -> DrmDriverOps;
 }
 
-/// Defines and registers a DRM driver with the global driver table.
-///
-/// This macro generates:
-/// - A concrete, zero-sized DRM driver type.
-/// - A `register_driver()` helper function that inserts the driver instance
-///   into the DRM driver table under a given name.
-///
-/// TODO: Do not rely on device.name() for driver matching.
-#[macro_export]
-macro_rules! drm_register_driver {
-    (
-        $name:ident,
-        $drv_name:expr
-    ) => {
-        #[derive(Debug)]
-        pub struct $name {}
-
-        // pub fn register_driver(driver_table: &mut $crate::drm::DriverTable) {
-        //     driver_table.insert($drv_name.to_string(), alloc::sync::Arc::new($name {}));
-        // }
-    };
-}
-
-/// Optional driver operations for generic DRM capabilities.
-///
 /// This struct defines a set of driver-provided callbacks that the DRM core
 /// may invoke for standard buffer management operations. Drivers that support
 /// these features (e.g., KMS dumb buffers) should supply appropriate
@@ -93,8 +76,8 @@ macro_rules! drm_register_driver {
 /// `dumb_map_offset`) that are invoked via the corresponding ioctls when
 /// userspace requests simple scanout buffer creation or mmap offsets.
 pub struct DrmDriverOps {
-    /// This creates a new dumb buffer in the driver's backing storage manager (GEM,
-    /// TTM or something else entirely) and returns the resulting buffer handle. This
+    /// This creates a new dumb buffer in the driver's backing storage
+    /// manager and returns the resulting buffer handle. This
     /// handle can then be wrapped up into a framebuffer modeset object.
     pub dumb_create: Option<DumbCreateProvider>,
 }
@@ -115,7 +98,7 @@ impl DrmDriverOps {
 
 pub enum DumbCreateProvider {
     Memfd,
-    Custom(fn(width: u32, height: u32, bpp: u32) -> Result<Arc<DrmGemObject>, ()>),
+    Custom(fn(width: u32, height: u32, bpp: u32) -> Result<Arc<DrmGemObject>, DrmError>),
 }
 
 /// This macro recursively merges a list of `DrmDriverOps` expressions into
