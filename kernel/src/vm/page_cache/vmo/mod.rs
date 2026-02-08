@@ -35,8 +35,10 @@ use crate::{
 };
 
 mod options;
+mod rmap;
 
 pub use options::VmoOptions;
+pub use rmap::{Rmap, RmapEntry};
 
 /// Page-indexed memory object used by the page cache and mapping code.
 ///
@@ -131,6 +133,8 @@ pub struct Vmo {
     // not have the knowledge to determine if they belong to memfd. We may want to enhance
     // `VmoOptions` to make VMOs aware of whether its writable mappings should be tracked.
     pub(super) writable_mapping_status: WritableMappingStatus,
+    /// Reverse mappings.
+    rmap: Mutex<Rmap>,
 }
 
 impl Debug for Vmo {
@@ -380,6 +384,11 @@ impl Vmo {
     /// Returns whether this VMO has a backend.
     fn has_backend(&self) -> bool {
         self.backend.is_some()
+    }
+
+    /// Returns reverse mappings of the VMO.
+    pub fn rmap(&self) -> &Mutex<Rmap> {
+        &self.rmap
     }
 }
 

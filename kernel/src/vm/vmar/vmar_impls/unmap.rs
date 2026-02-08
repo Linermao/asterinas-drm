@@ -16,6 +16,14 @@ impl Vmar {
     /// After being cleared, this VMAR will become an empty VMAR.
     pub(super) fn clear(&self) {
         let mut inner = self.inner.write();
+        for vm_mapping in inner.vm_mappings.iter() {
+            if let Some(vmo) = vm_mapping.vmo() {
+                vmo.vmo()
+                    .rmap()
+                    .lock()
+                    .remove(&self.vm_space, vm_mapping.map_to_addr());
+            }
+        }
         inner.vm_mappings.clear();
 
         // Keep `inner` locked to avoid race conditions.

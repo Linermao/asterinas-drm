@@ -96,7 +96,7 @@ mod tests;
 mod vmo;
 
 pub use cache_page::{CachePage, CachePageExt, CachePageMeta, LockedCachePage};
-pub use vmo::{Vmo, VmoCommitError, VmoFlags, VmoOptions, WritableMappingStatus};
+pub use vmo::{Rmap, RmapEntry, Vmo, VmoCommitError, VmoFlags, VmoOptions, WritableMappingStatus};
 
 /// The page cache for a file-like object.
 ///
