@@ -10,6 +10,7 @@ use crate::drm::{
 };
 
 pub mod funcs;
+pub mod helper;
 pub mod property;
 
 #[derive(Debug)]

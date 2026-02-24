@@ -5,6 +5,7 @@ use aster_gpu::drm::{
     DrmError,
     driver::{DrmDriverFeatures, DumbCreateProvider},
     gem::DrmGemObject,
+    ioctl::*,
     mode_config::{
         DrmModeModeInfo, DrmModeObject,
         property::{PropertyEnum, PropertyKind},

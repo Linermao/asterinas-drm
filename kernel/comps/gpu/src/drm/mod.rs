@@ -10,7 +10,9 @@ use crate::drm::driver::DrmDriver;
 pub mod device;
 pub mod driver;
 pub mod gem;
+pub mod ioctl;
 pub mod mode_config;
+pub mod vblank;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DrmError {

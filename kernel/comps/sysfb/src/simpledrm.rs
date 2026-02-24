@@ -138,14 +138,8 @@ impl ModeConfigFuncs for SimpleModeConfigFuncs {
         bpp: u32,
         gem_obj: Arc<DrmGemObject>,
     ) -> Result<DrmFramebuffer, DrmError> {
-        Ok(DrmFramebuffer::new(
-            width,
-            height,
-            pitch,
-            bpp,
-            gem_obj,
-            Box::new(SimpleFramebufferFuncs {}),
-        ))
+        // gem_gb_create_with_funcs()
+        todo!()
     }
 }
 
@@ -166,7 +160,15 @@ struct SimpleFramebufferFuncs;
 
 impl PlaneFuncs for SimplePlaneFuncs {}
 
-impl CrtcFuncs for SimpleCrtcFuncs {}
+impl CrtcFuncs for SimpleCrtcFuncs {
+    fn page_flip(&self, fb: Arc<DrmFramebuffer>) -> Result<(), DrmError> {
+        todo!()
+    }
+
+    fn page_flip_target(&self, fb: Arc<DrmFramebuffer>) -> Result<(), DrmError> {
+        todo!()
+    }
+}
 
 impl EncoderFuncs for SimpleEncoderFuncs {}
 
