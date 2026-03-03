@@ -8,16 +8,22 @@ use aster_gpu::{
         driver::{DrmDriver, DrmDriverFeatures, DrmDriverOps, DumbCreateProvider},
         gem::DrmGemObject,
         mode_config::{
-            DrmModeConfig, DrmModeModeInfo,
-            connector::{ConnectorStatus, DrmConnector, funcs::ConnectorFuncs},
-            crtc::{DrmCrtc, funcs::CrtcFuncs},
+            DrmModeConfig,
+            connector::{
+                ConnectorStatus, DrmConnector,
+                funcs::{ConnectorFuncs, drm_helper_probe_single_connector_modes},
+            },
+            crtc::{DrmCrtc, funcs::CrtcFuncs, helper::drm_atomic_helper_page_flip},
             encoder::{DrmEncoder, EncoderType, funcs::EncoderFuncs},
-            framebuffer::{DrmFramebuffer, funcs::FramebufferFuncs},
-            funcs::ModeConfigFuncs,
+            framebuffer::{DrmFramebuffer, helper::drm_gem_fb_create_with_dirty},
+            funcs::{ModeConfigFuncs, drm_atomic_helper_commit},
             plane::{DrmPlane, PlaneType, funcs::PlaneFuncs},
         },
+        vblank::DrmPendingVblankEvent,
     },
 };
+
+use crate::helper::{drm_sysfb_connector_helper_get_modes, drm_sysfb_gem_create};
 
 const SIMPLEDRM_NAME: &'static str = "simpledrm";
 const SIMPLEDRM_DESC: &'static str = "DRM driver for simple-framebuffer platform devices";
@@ -66,11 +72,8 @@ impl SimpleDrmDevice {
             Box::new(SimpleEncoderFuncs),
         )?;
 
-        let fake_modeinfo = fake_modeinfo();
         let _connector = DrmConnector::init_with_encoder(
             &mut mode_config,
-            ConnectorStatus::Connected,
-            &[fake_modeinfo],
             &[encoder],
             Box::new(SimpleConnectorFuncs),
         )?;
@@ -121,7 +124,7 @@ impl DrmDriver for SimpleDrmDriver {
 
     fn driver_ops(&self) -> DrmDriverOps {
         DrmDriverOps {
-            dumb_create: Some(DumbCreateProvider::Memfd),
+            dumb_create: Some(DumbCreateProvider::MemfdBackend(drm_sysfb_gem_create)),
         }
     }
 }
@@ -138,7 +141,14 @@ impl ModeConfigFuncs for SimpleModeConfigFuncs {
         bpp: u32,
         gem_obj: Arc<DrmGemObject>,
     ) -> Result<DrmFramebuffer, DrmError> {
-        // gem_gb_create_with_funcs()
+        drm_gem_fb_create_with_dirty(width, height, pitch, bpp, gem_obj)
+    }
+
+    fn atomic_commit(&self, nonblock: bool) -> Result<(), DrmError> {
+        drm_atomic_helper_commit(nonblock)
+    }
+
+    fn atomic_commit_tail(&self) -> Result<(), DrmError> {
         todo!()
     }
 }
@@ -155,26 +165,51 @@ struct SimpleEncoderFuncs;
 #[derive(Debug)]
 struct SimpleConnectorFuncs;
 
-#[derive(Debug)]
-struct SimpleFramebufferFuncs;
-
 impl PlaneFuncs for SimplePlaneFuncs {}
 
 impl CrtcFuncs for SimpleCrtcFuncs {
-    fn page_flip(&self, fb: Arc<DrmFramebuffer>) -> Result<(), DrmError> {
+    fn page_flip(
+        &self,
+        device: Arc<DrmDevice>,
+        crtc: Arc<DrmCrtc>,
+        fb: Arc<DrmFramebuffer>,
+        event: Option<DrmPendingVblankEvent>,
+        flags: u32,
+        target: Option<u32>,
+    ) -> Result<(), DrmError> {
+        drm_atomic_helper_page_flip(device, crtc, fb, event, flags, target)
+    }
+
+    fn enable_vblank(&self, _crtc: Arc<DrmCrtc>) -> Result<(), DrmError> {
         todo!()
     }
 
-    fn page_flip_target(&self, fb: Arc<DrmFramebuffer>) -> Result<(), DrmError> {
+    fn disable_vblank(&self, _crtc: Arc<DrmCrtc>) -> Result<(), DrmError> {
         todo!()
     }
 }
 
 impl EncoderFuncs for SimpleEncoderFuncs {}
 
-impl ConnectorFuncs for SimpleConnectorFuncs {}
+impl ConnectorFuncs for SimpleConnectorFuncs {
+    fn fill_modes(
+        &self,
+        max_x: u32,
+        max_y: u32,
+        connector: Arc<DrmConnector>,
+    ) -> Result<(), DrmError> {
+        drm_helper_probe_single_connector_modes(max_x, max_y, connector)
+    }
 
-impl FramebufferFuncs for SimpleFramebufferFuncs {}
+    fn detect(&self, _force: bool, connector: Arc<DrmConnector>) -> Result<(), DrmError> {
+        // TODO: dirty method
+        connector.update_status(ConnectorStatus::Connected)
+    }
+
+    fn get_modes(&self, connector: Arc<DrmConnector>) -> Result<(), DrmError> {
+        drm_sysfb_connector_helper_get_modes(connector)
+    }
+}
 
 #[derive(Debug)]
 struct SimpleGpuDevice;
@@ -194,47 +229,4 @@ pub fn register_driver() {
     let driver = Arc::new(SimpleDrmDriver {});
     aster_gpu::register_driver(SIMPLEDRM_NAME, driver)
         .expect("failed to register simple_drm DrmDriver");
-}
-
-// Create a fake display mode for testing and bring-up purposes.
-//
-// This mode is not obtained from real hardware (e.g. EDID or firmware).
-// It provides a minimal, hard-coded timing description that allows the
-// DRM pipeline to be exercised during early development, testing, or
-// virtualized environments (such as simpledrm, QEMU, or headless setups).
-//
-// The values are chosen to represent a common 1280x800@60Hz mode and are
-// sufficient for validating mode-setting, atomic state transitions, and
-// userspace interaction. Real drivers must replace this with modes derived
-// from hardware capabilities or display discovery mechanisms.
-fn fake_modeinfo() -> DrmModeModeInfo {
-    let mut name = [0u8; 32];
-    let bytes = "1280x800".as_bytes();
-    let len = bytes.len().min(32);
-    name[..len].copy_from_slice(&bytes[..len]);
-
-    DrmModeModeInfo {
-        clock: 65000, // kHz (65 MHz)
-
-        hdisplay: 1280,
-        hsync_start: 1048,
-        hsync_end: 1184,
-        htotal: 1344,
-
-        hskew: 0,
-
-        vdisplay: 800,
-        vsync_start: 771,
-        vsync_end: 777,
-        vtotal: 806,
-
-        vscan: 0,
-
-        vrefresh: 60,
-
-        flags: 0x5,  // DRM_MODE_FLAG_PHSYNC | DRM_MODE_FLAG_PVSYNC
-        type_: 0x40, // DRM_MODE_TYPE_DRIVER (0x40) or DRIVER | PREFERRED (0x60)
-
-        name,
-    }
 }

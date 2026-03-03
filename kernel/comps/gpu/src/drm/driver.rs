@@ -3,7 +3,12 @@ use core::{any::Any, fmt::Debug};
 
 use crate::{
     GpuDevice,
-    drm::{DrmError, device::DrmDevice, gem::DrmGemObject},
+    drm::{
+        DrmError,
+        device::DrmDevice,
+        gem::{DrmGemBackend, DrmGemObject},
+        ioctl::DrmModeCreateDumb,
+    },
 };
 
 bitflags::bitflags! {
@@ -96,9 +101,16 @@ impl DrmDriverOps {
     }
 }
 
+pub type MemfdBackendCreateFunc = fn(&str, u64) -> Result<Arc<dyn DrmGemBackend>, DrmError>;
+
 pub enum DumbCreateProvider {
-    Memfd,
-    Custom(fn(width: u32, height: u32, bpp: u32) -> Result<Arc<DrmGemObject>, DrmError>),
+    MemfdBackend(
+        fn(
+            args: &mut DrmModeCreateDumb,
+            memfd_backend_create: MemfdBackendCreateFunc,
+        ) -> Result<Arc<DrmGemObject>, DrmError>,
+    ),
+    Custom(fn(args: &mut DrmModeCreateDumb) -> Result<Arc<DrmGemObject>, DrmError>),
 }
 
 /// This macro recursively merges a list of `DrmDriverOps` expressions into

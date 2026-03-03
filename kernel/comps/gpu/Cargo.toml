@@ -11,6 +11,7 @@ spin.workspace = true
 hashbrown.workspace = true
 bitflags.workspace = true
 int-to-c-enum.workspace = true
+aster-time.workspace = true
 
 [lints]
 workspace = true

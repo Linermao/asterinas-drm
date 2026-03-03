@@ -1,9 +1,6 @@
 use alloc::{format, sync::Arc};
 
-use aster_gpu::drm::{
-    DrmError,
-    gem::{DrmGemBackend, DrmGemObject},
-};
+use aster_gpu::drm::{DrmError, gem::DrmGemBackend};
 use ostd::mm::{VmReader, VmWriter};
 
 use crate::fs::{
@@ -32,6 +29,7 @@ impl DrmMemfdFile {
         let name = format!("/gem:{}", name);
         let memfd = MemfdFile::new(&name, MemfdFlags::MFD_ALLOW_SEALING)?;
         memfd.fallocate(FallocMode::Allocate, 0, size)?;
+
         Ok(Arc::new(DrmMemfdFile(memfd)))
     }
 
@@ -59,16 +57,13 @@ impl DrmGemBackend for DrmMemfdFile {
     }
 }
 
-pub fn dumb_create_impl(
-    width: u32,
-    height: u32,
-    bpp: u32,
-) -> crate::prelude::Result<Arc<DrmGemObject>> {
-    let pitch = width * (bpp / 8);
-    let size = pitch * height;
+pub fn memfd_object_create(name: &str, size: u64) -> Result<Arc<dyn DrmGemBackend>, DrmError> {
+    let size_usize = usize::try_from(size).map_err(|_| DrmError::Invalid)?;
 
-    // TODO: handle the error
-    let backend = DrmMemfdFile::new("some", size as usize)?;
-    let gem_object = DrmGemObject::new(size as u64, pitch, backend);
-    Ok(Arc::new(gem_object))
+    const MAX_GEM_SIZE: usize = 256 * 1024 * 1024; // 256MB
+    if size_usize > MAX_GEM_SIZE {
+        return Err(DrmError::Invalid);
+    }
+
+    DrmMemfdFile::new(name, size_usize).map_err(|_| DrmError::Invalid)
 }

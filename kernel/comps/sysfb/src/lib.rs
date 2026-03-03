@@ -3,6 +3,7 @@
 #![no_std]
 #![deny(unsafe_code)]
 
+mod helper;
 mod simpledrm;
 
 use aster_framebuffer::FRAMEBUFFER;

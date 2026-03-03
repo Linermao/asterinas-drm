@@ -18,7 +18,7 @@ use crate::{
     current_userspace,
     device::drm::{
         ioctl_defs::*,
-        memfd::{DrmMemfdFile, dumb_create_impl},
+        memfd::{DrmMemfdFile, memfd_object_create},
         minor::DrmMinor,
     },
     events::IoEvents,
@@ -545,6 +545,7 @@ impl FileIo for DrmFile {
                 Ok(0)
             }
             cmd @ DrmIoctlModeGetConnector => {
+                println!("[kernel] DrmIoctlModeGetConnector");
                 if !self.device.check_feature(DrmDriverFeatures::MODESET) {
                     return_errno!(Errno::EOPNOTSUPP);
                 }
@@ -564,13 +565,23 @@ impl FileIo for DrmFile {
                 let count_encoders = conn.count_encoders();
 
                 if user_data.is_first_call() {
+                    let mode_config = self.device.resources().lock();
+                    let max_x = mode_config.max_width;
+                    let max_y = mode_config.max_height;
+                    drop(mode_config);
+                    conn.funcs.fill_modes(max_x, max_y, conn.clone())?;
+
+                    // update new infomation
+                    let count_modes = conn.count_modes();
+                    let count_encoders = conn.count_encoders();
                     user_data.count_modes = count_modes;
+                    user_data.connection = conn.status() as u32;
+
                     user_data.count_props = count_props;
                     user_data.count_encoders = count_encoders;
 
                     user_data.connector_type = conn.type_() as u32;
                     user_data.connector_type_id = conn.type_id_();
-                    user_data.connection = conn.status() as u32;
 
                     user_data.mm_width = conn.mm_width();
                     user_data.mm_height = conn.mm_height();
@@ -580,7 +591,7 @@ impl FileIo for DrmFile {
                     cmd.write(&user_data)?;
                 } else {
                     if user_data.count_modes >= count_modes {
-                        for (i, mode) in conn.modes().enumerate() {
+                        for (i, mode) in conn.modes().iter().enumerate() {
                             let offset = user_data.modes_ptr as usize
                                 + i * core::mem::size_of::<DrmModeModeInfo>();
                             current_userspace!().write_val(offset, mode)?;
@@ -795,17 +806,15 @@ impl FileIo for DrmFile {
                 if let Some(dumb_create) = self.device.driver().driver_ops().dumb_create {
                     // TODO: handle the error
                     let gem = match dumb_create {
-                        DumbCreateProvider::Memfd => {
-                            dumb_create_impl(user_data.width, user_data.height, user_data.bpp)?
+                        DumbCreateProvider::MemfdBackend(dumb_create_impl) => {
+                            dumb_create_impl(&mut user_data, memfd_object_create)?
                         }
                         DumbCreateProvider::Custom(dumb_create_impl) => {
-                            dumb_create_impl(user_data.width, user_data.height, user_data.bpp)?
+                            dumb_create_impl(&mut user_data)?
                         }
                     };
                     let handle = self.next_handle();
                     user_data.handle = handle;
-                    user_data.pitch = gem.pitch();
-                    user_data.size = gem.size();
 
                     self.insert_gem(handle, gem);
 

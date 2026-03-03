@@ -7,13 +7,16 @@ use alloc::{
 use core::sync::atomic::Ordering;
 
 use hashbrown::HashMap;
+use ostd::sync::Mutex;
 
 use crate::drm::{
     DrmError,
     mode_config::{DrmModeConfig, DrmModeObject, crtc::funcs::CrtcFuncs, plane::DrmPlane},
+    vblank::DrmVblankState,
 };
 
 pub mod funcs;
+pub mod helper;
 pub mod property;
 
 #[derive(Debug)]
@@ -35,7 +38,11 @@ pub struct DrmCrtc {
     x: u32,
     y: u32,
 
-    funcs: Box<dyn CrtcFuncs>,
+    /// Vblank state (always initialized, but may be disabled)
+    /// Even if vblank is not actively used, the state exists
+    vblank: Arc<Mutex<DrmVblankState>>,
+
+    pub funcs: Box<dyn CrtcFuncs>,
 }
 
 impl DrmCrtc {
@@ -55,6 +62,13 @@ impl DrmCrtc {
 
     pub fn gamma_size(&self) -> u32 {
         self.gamma_size
+    }
+
+    /// Get vblank state
+    ///
+    /// Returns Arc<Mutex<>> which allows access even through Arc<DrmCrtc>
+    pub fn vblank_state(&self) -> Arc<Mutex<DrmVblankState>> {
+        self.vblank.clone()
     }
 
     pub fn init_with_planes(
@@ -81,6 +95,7 @@ impl DrmCrtc {
             enabled: false,
             x: 0,
             y: 0,
+            vblank: Arc::new(Mutex::new(DrmVblankState::new())),
             funcs,
         };
 

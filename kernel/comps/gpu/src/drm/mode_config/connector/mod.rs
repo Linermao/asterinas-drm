@@ -1,6 +1,7 @@
-use alloc::{boxed::Box, sync::Arc};
+use alloc::{boxed::Box, sync::Arc, vec::Vec};
 
 use hashbrown::{HashMap, HashSet};
+use ostd::sync::Mutex;
 
 use crate::drm::{
     DrmError,
@@ -84,24 +85,22 @@ impl DrmDisplayInfo {
 pub struct DrmConnector {
     id: u32,
     encoder: Option<u32>,
-    modes: HashSet<DrmModeModeInfo>,
+    modes: Mutex<HashSet<DrmModeModeInfo>>,
     properties: HashMap<u32, u64>,
     possible_encoders_id: HashSet<u32>,
     possible_encoders_mask: u32,
 
     type_: DrmModeConnType,
     type_id: u32,
-    status: ConnectorStatus,
+    status: Mutex<ConnectorStatus>,
 
     display_info: DrmDisplayInfo,
-    funcs: Box<dyn ConnectorFuncs>,
+    pub funcs: Box<dyn ConnectorFuncs>,
 }
 
 impl DrmConnector {
     pub fn init_with_encoder(
         res: &mut DrmModeConfig,
-        status: ConnectorStatus,
-        mode: &[DrmModeModeInfo],
         encoder: &[Arc<DrmEncoder>],
         funcs: Box<dyn ConnectorFuncs>,
     ) -> Result<Arc<Self>, DrmError> {
@@ -109,7 +108,7 @@ impl DrmConnector {
         let mut conn = Self {
             id,
             encoder: None,
-            modes: HashSet::new(),
+            modes: Mutex::new(HashSet::new()),
             properties: HashMap::new(),
             possible_encoders_id: HashSet::new(),
             possible_encoders_mask: 0,
@@ -117,7 +116,7 @@ impl DrmConnector {
             type_: DrmModeConnType::Unknown,
             // TODO: auto allocat, not repeat
             type_id: 1,
-            status,
+            status: Mutex::new(ConnectorStatus::Unknownconnection),
 
             // TODO: use true data
             display_info: DrmDisplayInfo {
@@ -127,10 +126,6 @@ impl DrmConnector {
             },
             funcs,
         };
-
-        mode.iter().for_each(|m| {
-            conn.modes.insert(*m);
-        });
 
         encoder.iter().for_each(|e| {
             conn.possible_encoders_id.insert(e.id());
@@ -157,7 +152,13 @@ impl DrmConnector {
     }
 
     pub fn status(&self) -> ConnectorStatus {
-        self.status
+        self.status.lock().clone()
+    }
+
+    pub fn update_status(&self, status: ConnectorStatus) -> Result<(), DrmError> {
+        let mut old_status = self.status.lock();
+        *old_status = status;
+        Ok(())
     }
 
     pub fn mm_width(&self) -> u32 {
@@ -176,8 +177,16 @@ impl DrmConnector {
         self.encoder
     }
 
-    pub fn modes(&self) -> impl Iterator<Item = &DrmModeModeInfo> {
-        self.modes.iter()
+    pub fn modes(&self) -> Vec<DrmModeModeInfo> {
+        self.modes.lock().iter().cloned().collect()
+    }
+
+    pub fn update_modes(&self, modes: &[DrmModeModeInfo]) -> Result<(), DrmError> {
+        let mut old_modes = self.modes.lock();
+        old_modes.clear();
+        old_modes.extend(modes.iter().cloned());
+
+        Ok(())
     }
 
     pub fn properties(&self) -> impl Iterator<Item = (&u32, &u64)> {
@@ -189,7 +198,7 @@ impl DrmConnector {
     }
 
     pub fn count_modes(&self) -> u32 {
-        self.modes.iter().count() as u32
+        self.modes.lock().iter().count() as u32
     }
 
     pub fn count_props(&self) -> u32 {

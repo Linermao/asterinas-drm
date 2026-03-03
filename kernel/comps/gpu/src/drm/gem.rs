@@ -52,14 +52,6 @@ impl DrmGemObject {
         self.backend.release()
     }
 
-    pub fn size(&self) -> u64 {
-        self.size
-    }
-
-    pub fn pitch(&self) -> u32 {
-        self.pitch
-    }
-
     pub fn read(&self, offset: usize, writer: &mut VmWriter) -> Result<usize, DrmError> {
         self.backend.read(offset, writer)
     }
