@@ -1,5 +1,6 @@
 use alloc::{boxed::Box, sync::Arc};
 
+use aster_framebuffer::FRAMEBUFFER;
 use aster_gpu::{
     GpuDevice,
     drm::{
@@ -7,6 +8,7 @@ use aster_gpu::{
         device::DrmDevice,
         driver::{DrmDriver, DrmDriverFeatures, DrmDriverOps, DumbCreateProvider},
         gem::DrmGemObject,
+        ioctl::DrmModeCrtc,
         mode_config::{
             DrmModeConfig,
             connector::{
@@ -22,6 +24,7 @@ use aster_gpu::{
         vblank::DrmPendingVblankEvent,
     },
 };
+use ostd::mm::io_util::HasVmReaderWriter;
 
 use crate::helper::{drm_sysfb_connector_helper_get_modes, drm_sysfb_gem_create};
 
@@ -178,6 +181,25 @@ impl CrtcFuncs for SimpleCrtcFuncs {
         target: Option<u32>,
     ) -> Result<(), DrmError> {
         drm_atomic_helper_page_flip(device, crtc, fb, event, flags, target)
+    }
+
+    fn set_config(
+        &self,
+        _crtc: Arc<DrmCrtc>,
+        fb: Arc<DrmFramebuffer>,
+        _crtc_req: &DrmModeCrtc,
+    ) -> Result<(), DrmError> {
+        // TODO: Now just legacy achievement, copy the drm_framebuffer
+        // to firmware_framebuffer
+        if let Some(framebuffer) = FRAMEBUFFER.get() {
+            let iomem = framebuffer.io_mem();
+            let mut writer = iomem.writer().to_fallible();
+            fb.read(0, &mut writer)?;
+        } else {
+            return Err(DrmError::NotFound);
+        }
+
+        Ok(())
     }
 
     fn enable_vblank(&self, _crtc: Arc<DrmCrtc>) -> Result<(), DrmError> {

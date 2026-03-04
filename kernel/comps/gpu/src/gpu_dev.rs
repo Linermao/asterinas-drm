@@ -30,6 +30,12 @@ pub trait GpuDevice: Send + Sync + Any + Debug {
     // more settings e.g. device_id, capability, resources
 }
 
+impl dyn GpuDevice {
+    pub fn downcast_ref<T: GpuDevice>(&self) -> Option<&T> {
+        (self as &dyn Any).downcast_ref::<T>()
+    }
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct GpuDevices {
     devices: Vec<Arc<dyn GpuDevice>>,

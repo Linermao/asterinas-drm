@@ -4,6 +4,7 @@ use core::{any::Any, fmt::Debug};
 use crate::drm::{
     DrmError,
     device::DrmDevice,
+    ioctl::DrmModeCrtc,
     mode_config::{crtc::DrmCrtc, framebuffer::DrmFramebuffer},
     vblank::DrmPendingVblankEvent,
 };
@@ -18,6 +19,13 @@ pub trait CrtcFuncs: Debug + Any + Sync + Send {
         event: Option<DrmPendingVblankEvent>,
         flags: u32,
         target: Option<u32>,
+    ) -> Result<(), DrmError>;
+
+    fn set_config(
+        &self,
+        crtc: Arc<DrmCrtc>,
+        fb: Arc<DrmFramebuffer>,
+        crtc_req: &DrmModeCrtc,
     ) -> Result<(), DrmError>;
 
     /// Enable hardware vblank interrupt

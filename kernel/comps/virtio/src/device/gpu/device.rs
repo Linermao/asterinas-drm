@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use alloc::{boxed::Box, sync::Arc, vec::Vec};
-use alloc::vec;
+use alloc::{boxed::Box, sync::Arc, vec, vec::Vec};
 use core::{cmp::min, hint::spin_loop, mem::size_of};
 
 use aster_gpu::GpuDevice;
@@ -22,7 +21,7 @@ use super::{
     VirtioGpuGetEdid, VirtioGpuRespCapsetInfo, VirtioGpuRespDisplayInfo, VirtioGpuRespEdid,
 };
 use crate::{
-    device::VirtioDeviceError,
+    device::{VirtioDeviceError, gpu::drm::VirtioGpuDrmDrvier},
     id_alloc::SyncIdAlloc,
     queue::{QueueError, VirtQueue},
     transport::{ConfigManager, VirtioTransport},
@@ -63,8 +62,10 @@ pub struct VirtioGpuDevice {
 
 impl VirtioGpuDevice {
     pub(crate) fn negotiate_features(device_features: u64) -> u64 {
-        let supported_features =
-            GpuFeatures::VIRGL | GpuFeatures::EDID | GpuFeatures::RESOURCE_UUID | GpuFeatures::RESOURCE_BLOB;
+        let supported_features = GpuFeatures::VIRGL
+            | GpuFeatures::EDID
+            | GpuFeatures::RESOURCE_UUID
+            | GpuFeatures::RESOURCE_BLOB;
         (GpuFeatures::from_bits_truncate(device_features) & supported_features).bits()
     }
 
@@ -142,7 +143,18 @@ impl VirtioGpuDevice {
 
         // Register this bus-level GPU device to the common GPU subsystem.
         if let Err(err) = aster_gpu::register_device(device.clone()) {
-            warn!("failed to register virtio-gpu device into gpu subsystem: {:?}", err);
+            warn!(
+                "failed to register virtio-gpu device into gpu subsystem: {:?}",
+                err
+            );
+        }
+
+        // Register this bus-level GPU device to the common GPU subsystem.
+        if let Err(err) = aster_gpu::register_driver(DEVICE_NAME, Arc::new(VirtioGpuDrmDrvier)) {
+            warn!(
+                "failed to register virtio-gpu device into gpu subsystem: {:?}",
+                err
+            );
         }
 
         let config = device.config_manager.read_config();
@@ -210,7 +222,9 @@ impl VirtioGpuDevice {
 
                     let active_scanouts = display_infos
                         .iter()
-                        .filter(|mode| mode.enabled != 0 && mode.rect.width != 0 && mode.rect.height != 0)
+                        .filter(|mode| {
+                            mode.enabled != 0 && mode.rect.width != 0 && mode.rect.height != 0
+                        })
                         .count();
                     info!("virtio-gpu display info fetched, active scanouts={active_scanouts}");
                 }

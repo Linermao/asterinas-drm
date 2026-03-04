@@ -469,25 +469,28 @@ impl FileIo for DrmFile {
                     return_errno!(Errno::EOPNOTSUPP);
                 }
 
-                let user_data: DrmModeCrtc = cmd.read()?;
-                let fb_id = user_data.fb_id;
+                let crtc_req: DrmModeCrtc = cmd.read()?;
+                let crtc_id = crtc_req.crtc_id;
+                let fb_id = crtc_req.fb_id;
 
-                // TODO: Now just legacy achievement, copy the drm_framebuffer
-                // to firmware_framebuffer
-                if let Some(framebuffer) = FRAMEBUFFER.get() {
-                    let iomem = framebuffer.io_mem();
-                    let mut writer = iomem.writer().to_fallible();
-
-                    let mode_config = self.device.resources().lock();
-                    if let Some(drm_framebuffer) = mode_config.lookup_framebuffer(&fb_id) {
-                        // TODO: handle the error
-                        let _ = drm_framebuffer.read(0, &mut writer);
-                    } else {
+                let mode_config = self.device.resources().lock();
+                let crtc = match mode_config.get_crtc(&crtc_id) {
+                    Some(c) => c,
+                    None => {
+                        println!("[kernel] crtc: {:?}", crtc_id);
+                        return_errno!(Errno::ENOENT)
+                    }
+                };
+                let drm_framebuffer = match mode_config.lookup_framebuffer(&fb_id) {
+                    Some(fb) => fb,
+                    None => {
+                        println!("[kernel] fb: {:?}", fb_id);
                         return_errno!(Errno::ENOENT);
                     }
-                } else {
-                    return_errno!(Errno::ENOENT);
-                }
+                };
+
+                crtc.funcs
+                    .set_config(crtc.clone(), drm_framebuffer, &crtc_req)?;
 
                 Ok(0)
             }

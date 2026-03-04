@@ -1,7 +1,10 @@
 use alloc::sync::Arc;
 use core::{any::Any, fmt::Debug};
 
-use crate::drm::{DrmError, mode_config::connector::DrmConnector};
+use crate::{
+    GpuDevice,
+    drm::{DrmError, mode_config::connector::DrmConnector},
+};
 
 // TODO
 pub trait ConnectorFuncs: Debug + Any + Sync + Send {

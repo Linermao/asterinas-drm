@@ -50,6 +50,12 @@ pub struct DrmModeModeInfo {
     pub name: [u8; DRM_DISPLAY_MODE_LEN],
 }
 
+impl DrmModeModeInfo {
+    pub fn new() -> Self {
+        todo!()
+    }
+}
+
 /// DrmModeObject
 pub trait DrmModeObject: Debug + Any + Sync + Send {
     fn id(&self) -> u32;
