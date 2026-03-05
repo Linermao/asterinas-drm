@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
 use alloc::{boxed::Box, sync::Arc, vec, vec::Vec};
-use core::{cmp::min, hint::spin_loop, mem::size_of};
+use core::{cmp::min, hint::spin_loop, mem::size_of, sync::atomic::{AtomicU32, Ordering}};
 
 use aster_gpu::GpuDevice;
 use aster_util::mem_obj_slice::Slice;
@@ -13,12 +13,16 @@ use ostd::{
     mm::{HasSize, PAGE_SIZE, VmIo, dma::DmaStream},
     sync::SpinLock,
 };
-
-use super::{
-    CMD_GET_CAPSET_INFO, CMD_GET_DISPLAY_INFO, CMD_GET_EDID, DEVICE_NAME, GpuFeatures,
-    QUEUE_CONTROL, QUEUE_CURSOR, RESP_OK_CAPSET_INFO, RESP_OK_DISPLAY_INFO, RESP_OK_EDID,
-    RESP_OK_NODATA, VirtioGpuConfig, VirtioGpuCtrlHdr, VirtioGpuDisplayOne, VirtioGpuGetCapsetInfo,
-    VirtioGpuGetEdid, VirtioGpuRespCapsetInfo, VirtioGpuRespDisplayInfo, VirtioGpuRespEdid,
+use ostd::prelude::println;
+use super::{CMD_GET_CAPSET_INFO, CMD_GET_DISPLAY_INFO, CMD_GET_EDID,
+    CMD_RESOURCE_ATTACH_BACKING, CMD_RESOURCE_CREATE_2D, CMD_RESOURCE_UNREF, CMD_RESOURCE_DETACH_BACKING, CMD_RESOURCE_FLUSH,
+    CMD_TRANSFER_TO_HOST_2D, CMD_SET_SCANOUT, DEVICE_NAME, GpuFeatures, QUEUE_CONTROL,
+    QUEUE_CURSOR, RESP_OK_CAPSET_INFO, RESP_OK_DISPLAY_INFO, RESP_OK_EDID, RESP_OK_NODATA,
+    VirtioGpuConfig, VirtioGpuCtrlHdr, VirtioGpuDisplayOne, VirtioGpuFormat, VirtioGpuGetCapsetInfo,
+    VirtioGpuGetEdid, VirtioGpuMemEntry, VirtioGpuRect, VirtioGpuResourceAttachBacking,
+    VirtioGpuResourceUnref, VirtioGpuResourceDetachBacking,
+    VirtioGpuResourceCreate2d, VirtioGpuRespCapsetInfo, VirtioGpuRespDisplayInfo,
+    VirtioGpuRespEdid, VirtioGpuResourceFlush, VirtioGpuTransferToHost2d, VirtioGpuSetScanout,
 };
 use crate::{
     device::{VirtioDeviceError, gpu::drm::VirtioGpuDrmDrvier},
@@ -28,7 +32,37 @@ use crate::{
 };
 
 const CTRL_QUEUE_SIZE: u16 = 64;
-const CTRL_REQ_STRIDE: usize = size_of::<VirtioGpuGetCapsetInfo>();
+const CTRL_REQ_STRIDE: usize = {
+    let mut max = size_of::<VirtioGpuCtrlHdr>();
+    if size_of::<VirtioGpuGetCapsetInfo>() > max {
+        max = size_of::<VirtioGpuGetCapsetInfo>();
+    }
+    if size_of::<VirtioGpuGetEdid>() > max {
+        max = size_of::<VirtioGpuGetEdid>();
+    }
+    if size_of::<VirtioGpuResourceCreate2d>() > max {
+        max = size_of::<VirtioGpuResourceCreate2d>();
+    }
+    if size_of::<VirtioGpuResourceUnref>() > max {
+        max = size_of::<VirtioGpuResourceUnref>();
+    }
+    if size_of::<VirtioGpuResourceAttachBacking>() > max {
+        max = size_of::<VirtioGpuResourceAttachBacking>();
+    }
+    if size_of::<VirtioGpuResourceDetachBacking>() > max {
+        max = size_of::<VirtioGpuResourceDetachBacking>();
+    }
+    if size_of::<VirtioGpuResourceFlush>() > max {
+        max = size_of::<VirtioGpuResourceFlush>();
+    }
+    if size_of::<VirtioGpuTransferToHost2d>() > max {
+        max = size_of::<VirtioGpuTransferToHost2d>();
+    }
+    if size_of::<VirtioGpuSetScanout>() > max {
+        max = size_of::<VirtioGpuSetScanout>();
+    }
+    max
+};
 const CTRL_RESP_STRIDE: usize = size_of::<VirtioGpuRespEdid>();
 const VIRTIO_RING_F_INDIRECT_DESC: u64 = 1 << 28;
 
@@ -51,6 +85,7 @@ pub struct VirtioGpuDevice {
     ctrl_requests: Arc<DmaStream>,
     ctrl_responses: Arc<DmaStream>,
     id_allocator: SyncIdAlloc,
+    next_resource_id: AtomicU32,
     caps: VirtioGpuCaps,
     num_scanouts: SpinLock<u32>,
     display_infos: SpinLock<Vec<VirtioGpuDisplayOne>>,
@@ -120,6 +155,7 @@ impl VirtioGpuDevice {
             ctrl_requests,
             ctrl_responses,
             id_allocator: SyncIdAlloc::with_capacity(CTRL_QUEUE_SIZE as usize),
+            next_resource_id: AtomicU32::new(1),
             caps,
             num_scanouts: SpinLock::new(0),
             display_infos: SpinLock::new(Vec::new()),
@@ -248,6 +284,10 @@ impl GpuDevice for VirtioGpuDevice {
 }
 
 impl VirtioGpuDevice {
+    pub fn alloc_resource_id(&self) -> u32 {
+        self.next_resource_id.fetch_add(1, Ordering::Relaxed)
+    }
+
     pub fn get_display_info(&self) -> Result<VirtioGpuRespDisplayInfo, VirtioGpuCommandError> {
         let req = VirtioGpuCtrlHdr {
             type_: CMD_GET_DISPLAY_INFO,
@@ -287,6 +327,240 @@ impl VirtioGpuDevice {
             padding: 0,
         };
         self.submit_control_command::<VirtioGpuGetEdid, VirtioGpuRespEdid>(&req, RESP_OK_EDID)
+    }
+
+    pub fn resource_create_2d(
+        &self,
+        resource_id: u32,
+        width: u32,
+        height: u32,
+    ) -> Result<(), VirtioGpuCommandError> {
+        let req = VirtioGpuResourceCreate2d {
+            hdr: VirtioGpuCtrlHdr {
+                type_: CMD_RESOURCE_CREATE_2D,
+                ..Default::default()
+            },
+            resource_id,
+            format: VirtioGpuFormat::B8G8R8X8Unorm as u32,
+            width,
+            height,
+        };
+        let _: VirtioGpuCtrlHdr =
+            self.submit_control_command::<VirtioGpuResourceCreate2d, VirtioGpuCtrlHdr>(
+                &req,
+                RESP_OK_NODATA,
+            )?;
+        Ok(())
+    }
+
+    pub fn resource_attach_backing(
+        &self,
+        resource_id: u32,
+        addr: u64,
+        length: u32,
+    ) -> Result<(), VirtioGpuCommandError> {
+        let req = VirtioGpuResourceAttachBacking {
+            hdr: VirtioGpuCtrlHdr {
+                type_: CMD_RESOURCE_ATTACH_BACKING,
+                ..Default::default()
+            },
+            resource_id,
+            nr_entries: 1,
+            entries: [VirtioGpuMemEntry {
+                addr,
+                length,
+                padding: 0,
+            }],
+        };
+        let _: VirtioGpuCtrlHdr = self
+            .submit_control_command::<VirtioGpuResourceAttachBacking, VirtioGpuCtrlHdr>(
+                &req,
+                RESP_OK_NODATA,
+            )?;
+        Ok(())
+    }
+
+    pub fn resource_unref(&self, resource_id: u32) -> Result<(), VirtioGpuCommandError> {
+        let req = VirtioGpuResourceUnref {
+            hdr: VirtioGpuCtrlHdr {
+                type_: CMD_RESOURCE_UNREF,
+                ..Default::default()
+            },
+            resource_id,
+            padding: 0,
+        };
+        let _: VirtioGpuCtrlHdr = self
+            .submit_control_command::<VirtioGpuResourceUnref, VirtioGpuCtrlHdr>(
+                &req,
+                RESP_OK_NODATA,
+            )?;
+        Ok(())
+    }
+
+    pub fn resource_detach_backing(
+        &self,
+        resource_id: u32,
+    ) -> Result<(), VirtioGpuCommandError> {
+        let req = VirtioGpuResourceDetachBacking {
+            hdr: VirtioGpuCtrlHdr {
+                type_: CMD_RESOURCE_DETACH_BACKING,
+                ..Default::default()
+            },
+            resource_id,
+            padding: 0,
+        };
+        let _: VirtioGpuCtrlHdr = self
+            .submit_control_command::<VirtioGpuResourceDetachBacking, VirtioGpuCtrlHdr>(
+                &req,
+                RESP_OK_NODATA,
+            )?;
+        Ok(())
+    }
+
+    pub fn resource_attach_backing_sg(
+        &self,
+        resource_id: u32,
+        entries: &[VirtioGpuMemEntry],
+    ) -> Result<(), VirtioGpuCommandError> {
+        if entries.is_empty() {
+            return Err(VirtioGpuCommandError::InvalidParameter);
+        }
+
+        let nr_entries =
+            u32::try_from(entries.len()).map_err(|_| VirtioGpuCommandError::InvalidParameter)?;
+
+        let hdr = VirtioGpuResourceAttachBackingHdr {
+            hdr: VirtioGpuCtrlHdr {
+                type_: CMD_RESOURCE_ATTACH_BACKING,
+                ..Default::default()
+            },
+            resource_id,
+            nr_entries,
+        };
+
+        let req_len = size_of::<VirtioGpuResourceAttachBackingHdr>()
+            + entries.len() * size_of::<VirtioGpuMemEntry>();
+        let req_frames = req_len.div_ceil(PAGE_SIZE);
+        let req_dma = Arc::new(DmaStream::alloc(req_frames, false).unwrap());
+        let req_slice = Slice::new(req_dma, 0..req_len);
+
+        req_slice.write_val(0, &hdr).unwrap();
+        let mut off = size_of::<VirtioGpuResourceAttachBackingHdr>();
+        for entry in entries {
+            req_slice.write_val(off, entry).unwrap();
+            off += size_of::<VirtioGpuMemEntry>();
+        }
+        req_slice.sync_to_device().unwrap();
+
+        let resp_len = size_of::<VirtioGpuCtrlHdr>();
+        let resp_frames = resp_len.div_ceil(PAGE_SIZE);
+        let resp_dma = Arc::new(DmaStream::alloc(resp_frames, false).unwrap());
+        let resp_slice = Slice::new(resp_dma, 0..resp_len);
+        resp_slice
+            .write_val(0, &VirtioGpuCtrlHdr::default())
+            .unwrap();
+        resp_slice.sync_to_device().unwrap();
+
+        let token = loop {
+            let mut queue = self.control_queue.disable_irq().lock();
+            if queue.available_desc() >= 2 {
+                let token = queue
+                    .add_dma_buf(&[&req_slice], &[&resp_slice])
+                    .map_err(VirtioGpuCommandError::Queue)?;
+                if queue.should_notify() {
+                    queue.notify();
+                }
+                break token;
+            }
+            drop(queue);
+            spin_loop();
+        };
+
+        loop {
+            let mut queue = self.control_queue.disable_irq().lock();
+            if !queue.can_pop() {
+                drop(queue);
+                spin_loop();
+                continue;
+            }
+            queue
+                .pop_used_with_token(token)
+                .map_err(VirtioGpuCommandError::Queue)?;
+            break;
+        }
+
+        resp_slice.sync_from_device().unwrap();
+        let resp_hdr: VirtioGpuCtrlHdr = resp_slice.read_val(0).unwrap();
+        if resp_hdr.type_ != RESP_OK_NODATA {
+            return Err(VirtioGpuCommandError::UnexpectedResponse(resp_hdr.type_));
+        }
+
+        Ok(())
+    }
+
+    pub fn resource_flush(&self, resource_id: u32, rect: VirtioGpuRect) -> Result<(), VirtioGpuCommandError> {
+        let req = VirtioGpuResourceFlush {
+            hdr: VirtioGpuCtrlHdr {
+                type_: CMD_RESOURCE_FLUSH,
+                ..Default::default()
+            },
+            rect,
+            resource_id,
+            _padding: 0,
+        };
+        let _: VirtioGpuCtrlHdr = self
+            .submit_control_command::<VirtioGpuResourceFlush, VirtioGpuCtrlHdr>(
+                &req,
+                RESP_OK_NODATA,
+            )?;
+        Ok(())
+    }
+
+    pub fn transfer_to_host_2d(
+        &self,
+        resource_id: u32,
+        rect: VirtioGpuRect,
+        offset: u64,
+    ) -> Result<(), VirtioGpuCommandError> {
+        let req = VirtioGpuTransferToHost2d {
+            hdr: VirtioGpuCtrlHdr {
+                type_: CMD_TRANSFER_TO_HOST_2D,
+                ..Default::default()
+            },
+            rect,
+            offset,
+            resource_id,
+            _padding: 0,
+        };
+        let _: VirtioGpuCtrlHdr = self
+            .submit_control_command::<VirtioGpuTransferToHost2d, VirtioGpuCtrlHdr>(
+                &req,
+                RESP_OK_NODATA,
+            )?;
+        Ok(())
+    }
+
+    pub fn set_scanout(
+        &self,
+        scanout_id: u32,
+        resource_id: u32,
+        rect: VirtioGpuRect,
+    ) -> Result<(), VirtioGpuCommandError> {
+        let req = VirtioGpuSetScanout {
+            hdr: VirtioGpuCtrlHdr {
+                type_: CMD_SET_SCANOUT,
+                ..Default::default()
+            },
+            rect,
+            scanout_id,
+            resource_id,
+        };
+        let _: VirtioGpuCtrlHdr =
+            self.submit_control_command::<VirtioGpuSetScanout, VirtioGpuCtrlHdr>(
+                &req,
+                RESP_OK_NODATA,
+            )?;
+        Ok(())
     }
 
     pub fn num_queues(&self) -> usize {
@@ -337,7 +611,7 @@ impl VirtioGpuDevice {
         self.capset_infos.lock().clone()
     }
 
-    fn submit_control_command<Req, Resp>(
+    pub(crate) fn submit_control_command<Req, Resp>(
         &self,
         req: &Req,
         expected_resp_type: u32,
@@ -347,9 +621,19 @@ impl VirtioGpuDevice {
         Resp: Pod + Default,
     {
         if size_of::<Req>() > CTRL_REQ_STRIDE {
+            println!(
+                "[virtio-gpu] error: control command request size {} exceeds the stride {}",
+                size_of::<Req>(),
+                CTRL_REQ_STRIDE
+            );
             return Err(VirtioGpuCommandError::RequestTooLarge(size_of::<Req>()));
         }
         if size_of::<Resp>() > CTRL_RESP_STRIDE {
+            println!(
+                "[virtio-gpu] error: control command response size {} exceeds the stride {}",
+                size_of::<Resp>(),
+                CTRL_RESP_STRIDE
+            );
             return Err(VirtioGpuCommandError::ResponseTooLarge(size_of::<Resp>()));
         }
 
@@ -425,7 +709,16 @@ impl VirtioGpuDevice {
 #[derive(Debug)]
 pub enum VirtioGpuCommandError {
     Queue(QueueError),
+    InvalidParameter,
     RequestTooLarge(usize),
     ResponseTooLarge(usize),
     UnexpectedResponse(u32),
+}
+
+#[derive(Debug, Clone, Copy, Default, Pod)]
+#[repr(C)]
+struct VirtioGpuResourceAttachBackingHdr {
+    hdr: VirtioGpuCtrlHdr,
+    resource_id: u32,
+    nr_entries: u32,
 }

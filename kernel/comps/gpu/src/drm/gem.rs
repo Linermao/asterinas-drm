@@ -12,7 +12,13 @@ use crate::drm::DrmError;
 /// example, a simple shmem‑like backend or a more complex
 /// hardware‑specific allocator.
 pub trait DrmGemBackend: Debug + Any + Sync + Send {
+    /// Read data from the buffer into the provided writer.  The writer is
+    /// assumed to be fallible, which is the common case for kernel-side
+    /// operations; callers with an `Infallible` writer can convert it using
+    /// [`VmWriter::to_fallible`].
     fn read(&self, offset: usize, writer: &mut VmWriter) -> Result<usize, DrmError>;
+
+    /// Write data into the buffer from the provided reader.
     fn write(&self, offset: usize, reader: &mut VmReader) -> Result<usize, DrmError>;
 
     fn release(&self) -> Result<(), DrmError>;

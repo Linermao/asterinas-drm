@@ -325,7 +325,7 @@ pub struct DrmModeMapDumb {
     pub offset: u64,
 }
 
-#[repr(C)]
+#[repr(C, packed)]
 #[derive(Debug, Clone, Copy, Pod)]
 pub struct DrmModeDestroyDumb {
     pub handle: u32,
