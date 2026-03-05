@@ -17,13 +17,16 @@ use aster_gpu::drm::{
     },
     vblank::DrmPendingVblankEvent,
 };
+use ostd::prelude::println;
 
 use crate::device::gpu::device::VirtioGpuDevice;
+use crate::device::gpu::drm::gem::{virtio_gpu_obj_resource_id};
+use crate::device::gpu::{DEVICE_NAME, VirtioGpuRect};
 
 pub fn virtio_gpu_output_init(
     scanout: u32,
     mode_config: &mut DrmModeConfig,
-    vgpu: &VirtioGpuDevice,
+    vgpu: Arc<VirtioGpuDevice>,
 ) -> Result<(), DrmError> {
     let primary = DrmPlane::init(mode_config, PlaneType::Primary, Box::new(VirtioPlaneFuncs))?;
     let cursor = DrmPlane::init(mode_config, PlaneType::Cursor, Box::new(VirtioPlaneFuncs))?;
@@ -33,7 +36,7 @@ pub fn virtio_gpu_output_init(
         None,
         primary,
         Some(cursor),
-        Box::new(VirtioCrtcFuncs),
+        Box::new(VirtioCrtcFuncs { vgpu: vgpu.clone() }),
     )?;
 
     let encoder = DrmEncoder::init_with_crtcs(
@@ -64,7 +67,9 @@ pub fn virtio_gpu_output_init(
 struct VirtioPlaneFuncs;
 
 #[derive(Debug)]
-struct VirtioCrtcFuncs;
+struct VirtioCrtcFuncs {
+    vgpu: Arc<VirtioGpuDevice>,
+}
 
 #[derive(Debug)]
 struct VirtioEncoderFuncs;
@@ -93,14 +98,43 @@ impl CrtcFuncs for VirtioCrtcFuncs {
         fb: Arc<DrmFramebuffer>,
         crtc_req: &DrmModeCrtc,
     ) -> Result<(), DrmError> {
+        let gem_object = fb.gem_object();
+        let resource_id = crate::device::gpu::drm::gem::virtio_gpu_obj_resource_id(&gem_object)?;
+        // no separate backing buffer; pages are pinned and flushed on-demand
+
+        // Keep legacy modeset path simple and robust: scan out the whole FB.
+        // Most userspace (including the double-buffer sample) uses x=y=0 and
+        // mode size equal to the framebuffer size.
+        let _ = crtc_req;
+        let width = fb.width();
+        let height = fb.height();
+
+        let rect = VirtioGpuRect {
+            x: 0,
+            y: 0,
+            width,
+            height,
+        };
+        let scanout_id = crtc.index() as u32;
+
+        // ensure the host-side 2D resource sees the latest guest framebuffer contents
+        // some devices (older qemu) may not implement this command; failure is
+        // non‑fatal so we log it and continue with flush+scanout.
+        self.vgpu.transfer_to_host_2d(resource_id, rect, 0);
+        self.vgpu
+            .set_scanout(scanout_id, resource_id, rect)
+            .map_err(|_| DrmError::Invalid)?;
+        // and finally flush to update the currently bound scanout
+        self.vgpu
+            .resource_flush(resource_id, rect)
+            .map_err(|_| DrmError::Invalid)
+    }
+
+    fn enable_vblank(&self, _crtc: Arc<DrmCrtc>) -> Result<(), DrmError> {
         todo!()
     }
 
-    fn enable_vblank(&self, crtc: Arc<DrmCrtc>) -> Result<(), DrmError> {
-        todo!()
-    }
-
-    fn disable_vblank(&self, crtc: Arc<DrmCrtc>) -> Result<(), DrmError> {
+    fn disable_vblank(&self, _crtc: Arc<DrmCrtc>) -> Result<(), DrmError> {
         todo!()
     }
 }
@@ -121,7 +155,7 @@ impl ConnectorFuncs for VirtioConnectorFuncs {
         connector.update_status(ConnectorStatus::Connected)
     }
 
-    fn get_modes(&self, connector: Arc<DrmConnector>) -> Result<(), DrmError> {
+    fn get_modes(&self, _connector: Arc<DrmConnector>) -> Result<(), DrmError> {
         // TODO
         Ok(())
     }

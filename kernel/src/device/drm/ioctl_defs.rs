@@ -22,7 +22,16 @@ pub(super) type DrmIoctlModeRmFB                = ioc!(DRM_IOCTL_MODE_RMFB,     
 pub(super) type DrmIoctlModeDirtyFb             = ioc!(DRM_IOCTL_MODE_DIRTYFB,              b'd', 0xb1, InOutData<DrmModeFbDirtyCmd>);
 pub(super) type DrmIoctlModeCreateDumb          = ioc!(DRM_IOCTL_MODE_CREATE_DUMB,          b'd', 0xb2, InOutData<DrmModeCreateDumb>);
 pub(super) type DrmIoctlModeMapDumb             = ioc!(DRM_IOCTL_MODE_MAP_DUMB,             b'd', 0xb3, InOutData<DrmModeMapDumb>);
-pub(super) type DrmIoctlModeDestroyDumb         = ioc!(DRM_IOCTL_MODE_DESTROY_DUMB,         b'd', 0xb4, InData<DrmModeDestroyDumb>);
+// The `DrmModeDestroyDumb` struct is a single `u32`.  On 64‑bit targets
+// it used to be padded to eight bytes which made `ioc!` generate the
+// wrong ioctl value (0xc00864b4) and prevented our handler from matching.
+// We solved that by annotating the struct with `#[repr(C, packed)]` in the
+// `aster-gpu` crate so that `size_of::<DrmModeDestroyDumb>() == 4`.  The
+// normal `ioc!` helper now computes the correct command value, so we can
+// use a plain type alias instead of hard‑coding a constant.
+
+pub(super) type DrmIoctlModeDestroyDumb         =
+    ioc!(DRM_IOCTL_MODE_DESTROY_DUMB,         b'd', 0xb4, InOutData<DrmModeDestroyDumb>);
 pub(super) type DrmIoctlModeGetPlaneResources   = ioc!(DRM_IOCTL_MODE_GETPLANERESOURCES,    b'd', 0xb5, InOutData<DrmModeGetPlaneRes>);
 pub(super) type DrmIoctlModeGetPlane            = ioc!(DRM_IOCTL_MODE_GETPLANE,             b'd', 0xb6, InOutData<DrmModeGetPlane>);
 pub(super) type DrmIoctlModeObjectGetProps      = ioc!(DRM_IOCTL_MODE_OBJ_GETPROPERTIES,    b'd', 0xb9, InOutData<DrmModeObjectGetProps>);
