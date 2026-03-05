@@ -59,6 +59,26 @@ impl DrmFramebuffer {
     pub fn write(&self, offset: usize, reader: &mut VmReader) -> Result<usize, DrmError> {
         self.gem_obj.write(offset, reader)
     }
+
+    pub fn width(&self) -> u32 {
+        self.width
+    }
+
+    pub fn height(&self) -> u32 {
+        self.height
+    }
+
+    pub fn pitch(&self) -> u32 {
+        self.pitch
+    }
+
+    pub fn bpp(&self) -> u32 {
+        self.bpp
+    }
+
+    pub fn gem_object(&self) -> Arc<DrmGemObject> {
+        self.gem_obj.clone()
+    }
 }
 
 impl DrmModeObject for DrmFramebuffer {

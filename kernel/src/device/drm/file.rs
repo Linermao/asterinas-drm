@@ -12,7 +12,12 @@ use aster_gpu::drm::{
     },
 };
 use hashbrown::HashMap;
-use ostd::mm::{VmIo, io_util::HasVmReaderWriter};
+use ostd::mm::{VmIo, io_util::HasVmReaderWriter, HasPaddr, HasSize};
+use crate::vm::vmo::{CommitFlags};
+use aster_virtio::device::gpu::drm::gem::{
+    VirtioGpuSgEntry, VirtioGpuSgTable, virtio_gpu_mode_dumb_create_with_sg,
+    virtio_gpu_object_unref,
+};
 
 use crate::{
     current_userspace,
@@ -477,14 +482,12 @@ impl FileIo for DrmFile {
                 let crtc = match mode_config.get_crtc(&crtc_id) {
                     Some(c) => c,
                     None => {
-                        println!("[kernel] crtc: {:?}", crtc_id);
                         return_errno!(Errno::ENOENT)
                     }
                 };
                 let drm_framebuffer = match mode_config.lookup_framebuffer(&fb_id) {
                     Some(fb) => fb,
                     None => {
-                        println!("[kernel] fb: {:?}", fb_id);
                         return_errno!(Errno::ENOENT);
                     }
                 };
@@ -548,7 +551,6 @@ impl FileIo for DrmFile {
                 Ok(0)
             }
             cmd @ DrmIoctlModeGetConnector => {
-                println!("[kernel] DrmIoctlModeGetConnector");
                 if !self.device.check_feature(DrmDriverFeatures::MODESET) {
                     return_errno!(Errno::EOPNOTSUPP);
                 }
@@ -805,21 +807,76 @@ impl FileIo for DrmFile {
                 }
 
                 let mut user_data: DrmModeCreateDumb = cmd.read()?;
+                let driver = self.device.driver();
+                let driver_name = driver.name();
 
-                if let Some(dumb_create) = self.device.driver().driver_ops().dumb_create {
+                if let Some(dumb_create) = driver.driver_ops().dumb_create {
                     // TODO: handle the error
-                    let gem = match dumb_create {
-                        DumbCreateProvider::MemfdBackend(dumb_create_impl) => {
-                            dumb_create_impl(&mut user_data, memfd_object_create)?
+                    let gem = if driver_name == "virtio_gpu" {
+                        // For virtio-gpu: pre-allocate memfd and build SG before create.
+                        // This keeps filesystem knowledge in file.rs.
+                        if user_data.bpp != 32 {
+                            return_errno!(Errno::EINVAL);
                         }
-                        DumbCreateProvider::Custom(dumb_create_impl) => {
-                            dumb_create_impl(&mut user_data)?
+
+                        let pitch = user_data.width.saturating_mul(4);
+                        let size_u64 = (pitch as u64).saturating_mul(user_data.height as u64);
+                        let backend = memfd_object_create("virtio-gpu-dumb", size_u64)?;
+
+                        let drm_memfd = backend
+                            .downcast_ref::<DrmMemfdFile>()
+                            .ok_or_else(|| Error::new(Errno::EINVAL))?;
+                        let mapp = drm_memfd.mappable()?;
+                        let inode = match mapp {
+                            Mappable::Inode(inode) => inode,
+                            _ => return_errno!(Errno::EINVAL),
+                        };
+                        let vmo = inode
+                            .page_cache()
+                            .ok_or_else(|| Error::new(Errno::EINVAL))?;
+
+                        let byte_sz = vmo.size();
+
+                        // `try_operate_on_range` works in **pages** not bytes. compute
+                        // number of pages to traverse instead of passing the raw byte
+                        // length, otherwise the iterator will iterate one entry per page
+                        // index (paging units are 4KiB) which explodes the SG length.
+                        let page_count =
+                            (byte_sz + ostd::mm::PAGE_SIZE - 1) / ostd::mm::PAGE_SIZE;
+                        // Collect physical addresses of each committed page and coalesce
+                        // contiguous pages into SG entries.
+                        let mut entries: alloc::vec::Vec<VirtioGpuSgEntry> = alloc::vec::Vec::new();
+                        for page_idx in 0..page_count {
+                            let frame = vmo.commit_on(page_idx, CommitFlags::empty())?;
+                            let p = frame.paddr();
+                            let s = frame.size();
+
+                            if let Some(last) = entries.last_mut() {
+                                let last_end = last.addr as usize + last.len as usize;
+                                if last_end == p {
+                                    last.len = last.len.saturating_add(s as u32);
+                                    continue;
+                                }
+                            }
+                            entries.push(VirtioGpuSgEntry { addr: p as u64, len: s as u32 });
+                        }
+                        let sg = VirtioGpuSgTable { entries };
+
+                        virtio_gpu_mode_dumb_create_with_sg(&mut user_data, backend, Some(&sg))?
+                    } else {
+                        match dumb_create {
+                            DumbCreateProvider::MemfdBackend(dumb_create_impl) => {
+                                dumb_create_impl(&mut user_data, memfd_object_create)?
+                            }
+                            DumbCreateProvider::Custom(dumb_create_impl) => {
+                                dumb_create_impl(&mut user_data)?
+                            }
                         }
                     };
                     let handle = self.next_handle();
                     user_data.handle = handle;
 
-                    self.insert_gem(handle, gem);
+                    self.insert_gem(handle, gem.clone());
 
                     cmd.write(&user_data)?;
                 } else {
@@ -858,8 +915,13 @@ impl FileIo for DrmFile {
 
                 let user_data: DrmModeDestroyDumb = cmd.read()?;
                 let handle = user_data.handle;
+                let driver = self.device.driver();
+                let driver_name = driver.name();
 
                 if let Some(gem_obj) = self.remove_gem(&handle) {
+                    if driver_name == "virtio_gpu" {
+                        let _ = virtio_gpu_object_unref(&gem_obj);
+                    }
                     // TODO: handle the error
                     let _ = gem_obj.release();
                     self.device.remove_offset(&gem_obj);

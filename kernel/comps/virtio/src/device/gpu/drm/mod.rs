@@ -16,14 +16,14 @@ use aster_gpu::{
 
 use crate::device::gpu::{
     device::VirtioGpuDevice,
-    drm::{gem::virtio_gpu_mode_dumb_create, output::virtio_gpu_output_init},
+    drm::{gem::virtio_gpu_mode_dumb_create_unreachable, output::virtio_gpu_output_init},
 };
 
 pub(crate) const DRIVER_NAME: &'static str = "virtio_gpu";
 pub(crate) const DRIVER_DESC: &'static str = "virtio GPU";
 pub(crate) const DRIVER_DATE: &'static str = "2026-01-02";
 
-mod gem;
+pub mod gem;
 mod output;
 
 const XRES_MIN: u32 = 32;
@@ -46,8 +46,9 @@ pub(crate) struct VirtioDrmDevice {
 
 impl VirtioDrmDevice {
     fn new(index: u32, gpu_device: Arc<dyn GpuDevice>) -> Result<Self, DrmError> {
-        // TODO: unwrap()
-        let vgpu = gpu_device.downcast_ref::<VirtioGpuDevice>().unwrap();
+        // acquire a typed Arc to the virtio GPU device
+        // safe because the driver registration ensures this is the right type
+        let vgpu = Arc::downcast::<VirtioGpuDevice>(gpu_device.clone()).unwrap();
 
         // initial mode_config
         let num_scanout: u32 = vgpu.num_scanouts();
@@ -61,7 +62,7 @@ impl VirtioDrmDevice {
         );
 
         for scanout in 0..num_scanout {
-            virtio_gpu_output_init(scanout, &mut mode_config, &vgpu)?;
+            virtio_gpu_output_init(scanout, &mut mode_config, vgpu.clone())?;
         }
 
         mode_config.init_standard_properties();
@@ -121,8 +122,8 @@ impl DrmDriver for VirtioGpuDrmDrvier {
 
     fn driver_ops(&self) -> DrmDriverOps {
         DrmDriverOps {
-            dumb_create: Some(DumbCreateProvider::MemfdBackend(
-                virtio_gpu_mode_dumb_create,
+            dumb_create: Some(DumbCreateProvider::Custom(
+                virtio_gpu_mode_dumb_create_unreachable,
             )),
         }
     }
