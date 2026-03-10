@@ -1,10 +1,13 @@
 use alloc::{format, sync::Arc};
 
-use aster_gpu::drm::{
-    device::DrmDevice,
-    driver::{DrmDriver, DrmDriverFeatures},
-    gem::DrmGemObject,
-    mode_config::DrmModeConfig,
+use aster_gpu::{
+    GpuDevice,
+    drm::{
+        device::DrmDevice,
+        driver::{DrmDriver, DrmDriverFeatures},
+        gem::DrmGemObject,
+        mode_config::DrmModeConfig,
+    },
 };
 use device_id::{DeviceId, MajorId, MinorId};
 
@@ -68,6 +71,10 @@ impl DrmMinor {
 
     pub fn driver(&self) -> Arc<dyn DrmDriver> {
         self.device.driver()
+    }
+
+    pub fn gpu_device(&self) -> Arc<dyn GpuDevice> {
+        self.device.gpu_device()
     }
 
     pub fn resources(&self) -> &Mutex<DrmModeConfig> {

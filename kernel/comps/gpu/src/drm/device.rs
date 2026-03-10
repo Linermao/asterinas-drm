@@ -9,6 +9,7 @@ use crate::drm::{
     gem::DrmGemObject,
     mode_config::DrmModeConfig,
 };
+use crate::GpuDevice;
 
 /// Represents a DRM device instance bound to a specific DRM driver.
 ///
@@ -19,6 +20,7 @@ use crate::drm::{
 pub struct DrmDevice {
     index: u32,
 
+    gpu_device: Arc<dyn GpuDevice>,
     driver: Arc<dyn DrmDriver>,
     /// Feature flags and capability bits advertised by the driver for this
     /// device instance.
@@ -44,12 +46,14 @@ pub struct DrmDevice {
 impl DrmDevice {
     pub fn new(
         index: u32,
+        gpu_device: Arc<dyn GpuDevice>,
         driver: Arc<dyn DrmDriver>,
         driver_features: DrmDriverFeatures,
         mode_config: DrmModeConfig,
     ) -> Self {
         Self {
             index,
+            gpu_device,
             driver,
             driver_features,
             mode_config: Mutex::new(mode_config),
@@ -70,6 +74,10 @@ impl DrmDevice {
 
     pub fn index(&self) -> u32 {
         self.index
+    }
+
+    pub fn gpu_device(&self) -> Arc<dyn GpuDevice> {
+        self.gpu_device.clone()
     }
 
     pub fn driver(&self) -> Arc<dyn DrmDriver> {
