@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
 use alloc::{boxed::Box, sync::Arc, vec, vec::Vec};
-use core::{cmp::min, hint::spin_loop, mem::size_of, sync::atomic::{AtomicU32, Ordering}};
+use core::{cmp::min, hint::spin_loop, mem::size_of, sync::atomic::{AtomicU32, AtomicU64, Ordering}};
 
 use aster_gpu::GpuDevice;
 use aster_util::mem_obj_slice::Slice;
@@ -16,13 +16,13 @@ use ostd::{
 use ostd::prelude::println;
 use super::{CMD_GET_CAPSET, CMD_GET_CAPSET_INFO, CMD_GET_DISPLAY_INFO, CMD_GET_EDID,
     CMD_RESOURCE_ATTACH_BACKING, CMD_RESOURCE_CREATE_2D, CMD_RESOURCE_UNREF, CMD_RESOURCE_DETACH_BACKING, CMD_RESOURCE_FLUSH,
-    CMD_TRANSFER_TO_HOST_2D, CMD_SET_SCANOUT, DEVICE_NAME, GpuFeatures, QUEUE_CONTROL,
+    CMD_TRANSFER_TO_HOST_2D, CMD_SET_SCANOUT, CMD_SUBMIT_3D, DEVICE_NAME, GpuFeatures, QUEUE_CONTROL,
     QUEUE_CURSOR, RESP_OK_CAPSET, RESP_OK_CAPSET_INFO, RESP_OK_DISPLAY_INFO, RESP_OK_EDID, RESP_OK_NODATA,
     VirtioGpuConfig, VirtioGpuCtrlHdr, VirtioGpuDisplayOne, VirtioGpuFormat, VirtioGpuGetCapset, VirtioGpuGetCapsetInfo,
     VirtioGpuGetEdid, VirtioGpuMemEntry, VirtioGpuRect, VirtioGpuResourceAttachBacking,
     VirtioGpuResourceUnref, VirtioGpuResourceDetachBacking,
     VirtioGpuResourceCreate2d, VirtioGpuRespCapsetInfo, VirtioGpuRespDisplayInfo,
-    VirtioGpuRespEdid, VirtioGpuResourceFlush, VirtioGpuTransferToHost2d, VirtioGpuSetScanout,
+    VirtioGpuRespEdid, VirtioGpuResourceFlush, VirtioGpuTransferToHost2d, VirtioGpuSetScanout, VirtioGpuCmdSubmit,
 };
 use crate::{
     device::{VirtioDeviceError, gpu::drm::VirtioGpuDrmDrvier},
@@ -64,10 +64,15 @@ const CTRL_REQ_STRIDE: usize = {
     if size_of::<VirtioGpuSetScanout>() > max {
         max = size_of::<VirtioGpuSetScanout>();
     }
+    if size_of::<VirtioGpuCmdSubmit>() > max {
+        max = size_of::<VirtioGpuCmdSubmit>();
+    }
     max
 };
 const CTRL_RESP_STRIDE: usize = size_of::<VirtioGpuRespEdid>();
 const VIRTIO_RING_F_INDIRECT_DESC: u64 = 1 << 28;
+const VIRTIO_GPU_FLAG_FENCE: u32 = 1 << 0;
+const VIRTIO_GPU_FLAG_INFO_RING_IDX: u32 = 1 << 1;
 
 bitflags! {
     struct VirtioGpuCaps: u32 {
@@ -89,6 +94,7 @@ pub struct VirtioGpuDevice {
     ctrl_responses: Arc<DmaStream>,
     id_allocator: SyncIdAlloc,
     next_resource_id: AtomicU32,
+    next_fence_id: AtomicU64,
     caps: VirtioGpuCaps,
     num_scanouts: SpinLock<u32>,
     display_infos: SpinLock<Vec<VirtioGpuDisplayOne>>,
@@ -159,6 +165,7 @@ impl VirtioGpuDevice {
             ctrl_responses,
             id_allocator: SyncIdAlloc::with_capacity(CTRL_QUEUE_SIZE as usize),
             next_resource_id: AtomicU32::new(1),
+            next_fence_id: AtomicU64::new(1),
             caps,
             num_scanouts: SpinLock::new(0),
             display_infos: SpinLock::new(Vec::new()),
@@ -287,6 +294,18 @@ impl GpuDevice for VirtioGpuDevice {
 }
 
 impl VirtioGpuDevice {
+    fn alloc_fence_id(&self) -> u64 {
+        self.next_fence_id.fetch_add(1, Ordering::Relaxed)
+    }
+
+    fn stamp_fence(&self, req_slice: &Slice<Arc<DmaStream>>, fence_id: u64) {
+        let mut hdr: VirtioGpuCtrlHdr = req_slice.read_val(0).unwrap();
+        hdr.flags |= VIRTIO_GPU_FLAG_FENCE;
+        hdr.fence_id = fence_id;
+        req_slice.write_val(0, &hdr).unwrap();
+        req_slice.sync_to_device().unwrap();
+    }
+
     pub fn alloc_resource_id(&self) -> u32 {
         self.next_resource_id.fetch_add(1, Ordering::Relaxed)
     }
@@ -350,7 +369,8 @@ impl VirtioGpuDevice {
         let req_dma = Arc::new(DmaStream::alloc(req_frames, false).unwrap());
         let req_slice = Slice::new(req_dma, 0..req_len);
         req_slice.write_val(0, &req).unwrap();
-        req_slice.sync_to_device().unwrap();
+        let fence_id = self.alloc_fence_id();
+        self.stamp_fence(&req_slice, fence_id);
 
         let token = loop {
             let mut queue = self.control_queue.disable_irq().lock();
@@ -384,6 +404,12 @@ impl VirtioGpuDevice {
         let resp_hdr: VirtioGpuCtrlHdr = resp_slice.read_val(0).unwrap();
         if resp_hdr.type_ != RESP_OK_CAPSET {
             return Err(VirtioGpuCommandError::UnexpectedResponse(resp_hdr.type_));
+        }
+        if resp_hdr.fence_id != fence_id {
+            return Err(VirtioGpuCommandError::FenceMismatch {
+                expected: fence_id,
+                got: resp_hdr.fence_id,
+            });
         }
 
         let data_offset = size_of::<VirtioGpuCtrlHdr>();
@@ -525,7 +551,8 @@ impl VirtioGpuDevice {
             req_slice.write_val(off, entry).unwrap();
             off += size_of::<VirtioGpuMemEntry>();
         }
-        req_slice.sync_to_device().unwrap();
+        let fence_id = self.alloc_fence_id();
+        self.stamp_fence(&req_slice, fence_id);
 
         let resp_len = size_of::<VirtioGpuCtrlHdr>();
         let resp_frames = resp_len.div_ceil(PAGE_SIZE);
@@ -568,6 +595,12 @@ impl VirtioGpuDevice {
         let resp_hdr: VirtioGpuCtrlHdr = resp_slice.read_val(0).unwrap();
         if resp_hdr.type_ != RESP_OK_NODATA {
             return Err(VirtioGpuCommandError::UnexpectedResponse(resp_hdr.type_));
+        }
+        if resp_hdr.fence_id != fence_id {
+            return Err(VirtioGpuCommandError::FenceMismatch {
+                expected: fence_id,
+                got: resp_hdr.fence_id,
+            });
         }
 
         Ok(())
@@ -638,6 +671,90 @@ impl VirtioGpuDevice {
         Ok(())
     }
 
+    pub fn submit_3d(
+        &self,
+        command: &[u8],
+        ring_idx: Option<u8>,
+    ) -> Result<u64, VirtioGpuCommandError> {
+        if command.is_empty() {
+            return Err(VirtioGpuCommandError::InvalidParameter);
+        }
+
+        let size = u32::try_from(command.len()).map_err(|_| VirtioGpuCommandError::InvalidParameter)?;
+        let mut hdr = VirtioGpuCtrlHdr {
+            type_: CMD_SUBMIT_3D,
+            ..Default::default()
+        };
+        if let Some(idx) = ring_idx {
+            hdr.flags |= VIRTIO_GPU_FLAG_INFO_RING_IDX;
+            hdr.ring_idx = idx;
+        }
+        let req = VirtioGpuCmdSubmit {
+            hdr,
+            size,
+            padding: 0,
+        };
+
+        let req_len = size_of::<VirtioGpuCmdSubmit>();
+        let req_dma = Arc::new(DmaStream::alloc(req_len.div_ceil(PAGE_SIZE), false).unwrap());
+        let req_slice = Slice::new(req_dma, 0..req_len);
+        req_slice.write_val(0, &req).unwrap();
+        let fence_id = self.alloc_fence_id();
+        self.stamp_fence(&req_slice, fence_id);
+
+        let cmd_dma = Arc::new(DmaStream::alloc(command.len().div_ceil(PAGE_SIZE), false).unwrap());
+        let cmd_slice = Slice::new(cmd_dma, 0..command.len());
+        cmd_slice.write_bytes(0, command).unwrap();
+
+        let resp_len = size_of::<VirtioGpuCtrlHdr>();
+        let resp_dma = Arc::new(DmaStream::alloc(resp_len.div_ceil(PAGE_SIZE), false).unwrap());
+        let resp_slice = Slice::new(resp_dma, 0..resp_len);
+        resp_slice.write_val(0, &VirtioGpuCtrlHdr::default()).unwrap();
+        resp_slice.sync_to_device().unwrap();
+
+        let token = loop {
+            let mut queue = self.control_queue.disable_irq().lock();
+            if queue.available_desc() >= 3 {
+                let token = queue
+                    .add_dma_buf(&[&req_slice, &cmd_slice], &[&resp_slice])
+                    .map_err(VirtioGpuCommandError::Queue)?;
+                if queue.should_notify() {
+                    queue.notify();
+                }
+                break token;
+            }
+            drop(queue);
+            spin_loop();
+        };
+
+        loop {
+            let mut queue = self.control_queue.disable_irq().lock();
+            if !queue.can_pop() {
+                drop(queue);
+                spin_loop();
+                continue;
+            }
+            queue
+                .pop_used_with_token(token)
+                .map_err(VirtioGpuCommandError::Queue)?;
+            break;
+        }
+
+        resp_slice.sync_from_device().unwrap();
+        let resp_hdr: VirtioGpuCtrlHdr = resp_slice.read_val(0).unwrap();
+        if resp_hdr.type_ != RESP_OK_NODATA {
+            return Err(VirtioGpuCommandError::UnexpectedResponse(resp_hdr.type_));
+        }
+        if resp_hdr.fence_id != fence_id {
+            return Err(VirtioGpuCommandError::FenceMismatch {
+                expected: fence_id,
+                got: resp_hdr.fence_id,
+            });
+        }
+
+        Ok(fence_id)
+    }
+
     pub fn num_queues(&self) -> usize {
         2
     }
@@ -695,6 +812,19 @@ impl VirtioGpuDevice {
         Req: Pod,
         Resp: Pod + Default,
     {
+        let (resp, _fence_id) = self.submit_control_command_with_fence(req, expected_resp_type)?;
+        Ok(resp)
+    }
+
+    pub(crate) fn submit_control_command_with_fence<Req, Resp>(
+        &self,
+        req: &Req,
+        expected_resp_type: u32,
+    ) -> Result<(Resp, u64), VirtioGpuCommandError>
+    where
+        Req: Pod,
+        Resp: Pod + Default,
+    {
         if size_of::<Req>() > CTRL_REQ_STRIDE {
             println!(
                 "[virtio-gpu] error: control command request size {} exceeds the stride {}",
@@ -720,7 +850,8 @@ impl VirtioGpuDevice {
                 id * CTRL_REQ_STRIDE..(id + 1) * CTRL_REQ_STRIDE,
             );
             req_slice.write_val(0, req).unwrap();
-            req_slice.sync_to_device().unwrap();
+            let fence_id = self.alloc_fence_id();
+            self.stamp_fence(&req_slice, fence_id);
             req_slice
         };
 
@@ -734,6 +865,8 @@ impl VirtioGpuDevice {
             resp_slice.sync_to_device().unwrap();
             resp_slice
         };
+
+        let req_fence_id: u64 = req_slice.read_val::<VirtioGpuCtrlHdr>(0).unwrap().fence_id;
 
         let token = loop {
             let mut queue = self.control_queue.disable_irq().lock();
@@ -770,9 +903,15 @@ impl VirtioGpuDevice {
         if resp_hdr.type_ != expected_resp_type && resp_hdr.type_ != RESP_OK_NODATA {
             return Err(VirtioGpuCommandError::UnexpectedResponse(resp_hdr.type_));
         }
+        if resp_hdr.fence_id != req_fence_id {
+            return Err(VirtioGpuCommandError::FenceMismatch {
+                expected: req_fence_id,
+                got: resp_hdr.fence_id,
+            });
+        }
 
         let resp: Resp = resp_slice.read_val(0).unwrap();
-        Ok(resp)
+        Ok((resp, req_fence_id))
     }
 
     pub fn has_cursor_queue(&self) -> bool {
@@ -788,6 +927,7 @@ pub enum VirtioGpuCommandError {
     RequestTooLarge(usize),
     ResponseTooLarge(usize),
     UnexpectedResponse(u32),
+    FenceMismatch { expected: u64, got: u64 },
 }
 
 #[derive(Debug, Clone, Copy, Default, Pod)]

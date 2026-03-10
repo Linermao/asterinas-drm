@@ -1,4 +1,4 @@
-use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use core::{fmt::Display, sync::atomic::{AtomicBool, AtomicU32, Ordering}, time::Duration};
 
 use aster_framebuffer::FRAMEBUFFER;
 use aster_gpu::drm::{
@@ -13,6 +13,8 @@ use aster_gpu::drm::{
 };
 use hashbrown::HashMap;
 use ostd::mm::{VmIo, io_util::HasVmReaderWriter, HasPaddr, HasSize};
+use ostd::sync::WaitQueue;
+use ostd::Pod;
 use crate::vm::vmo::{CommitFlags};
 use aster_virtio::device::gpu::drm::gem::{
     VirtioGpuSgEntry, VirtioGpuSgTable, virtio_gpu_mode_dumb_create_with_sg,
@@ -28,18 +30,190 @@ use crate::{
     },
     events::IoEvents,
     fs::{
-        file_handle::Mappable,
+        file_handle::{FileLike, Mappable},
+        file_table::FdFlags,
         inode_handle::FileIo,
-        utils::{InodeIo, StatusFlags},
+        path::RESERVED_MOUNT_ID,
+        pseudofs::AnonInodeFs,
+        utils::{CreationFlags, Inode, InodeIo, StatusFlags},
     },
     prelude::*,
-    process::signal::{PollHandle, Pollable},
+    process::{
+        posix_thread::AsThreadLocal,
+        signal::{PollHandle, Pollable},
+    },
+    time::{clocks::MonotonicClock, wait::WaitTimeout},
     util::ioctl::{RawIoctl, dispatch_ioctl},
 };
 use aster_virtio::device::gpu::{
     device::VirtioGpuDevice,
     drm as virtio_gpu_drm,
 };
+
+struct DrmSyncPoint {
+    signaled: AtomicBool,
+    wait_queue: WaitQueue,
+    eventfd_listeners: Mutex<Vec<Arc<dyn FileLike>>>,
+}
+
+impl DrmSyncPoint {
+    fn new(signaled: bool) -> Self {
+        Self {
+            signaled: AtomicBool::new(signaled),
+            wait_queue: WaitQueue::new(),
+            eventfd_listeners: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn is_signaled(&self) -> bool {
+        self.signaled.load(Ordering::Acquire)
+    }
+
+    fn signal(&self) {
+        self.signaled.store(true, Ordering::Release);
+        self.wait_queue.wake_all();
+
+        let listeners = core::mem::take(&mut *self.eventfd_listeners.lock());
+        for eventfd in listeners {
+            signal_eventfd(&eventfd);
+        }
+    }
+
+    fn reset(&self) {
+        self.signaled.store(false, Ordering::Release);
+    }
+
+    fn register_eventfd(&self, eventfd: Arc<dyn FileLike>) {
+        if self.is_signaled() {
+            signal_eventfd(&eventfd);
+            return;
+        }
+
+        self.eventfd_listeners.lock().push(eventfd);
+        if self.is_signaled() {
+            let listeners = core::mem::take(&mut *self.eventfd_listeners.lock());
+            for eventfd in listeners {
+                signal_eventfd(&eventfd);
+            }
+        }
+    }
+}
+
+struct DrmSyncObj {
+    binary: Arc<DrmSyncPoint>,
+    timeline: Mutex<HashMap<u64, Arc<DrmSyncPoint>>>,
+    timeline_available_listeners: Mutex<HashMap<u64, Vec<Arc<dyn FileLike>>>>,
+}
+
+impl DrmSyncObj {
+    fn new(initially_signaled: bool) -> Self {
+        Self {
+            binary: Arc::new(DrmSyncPoint::new(initially_signaled)),
+            timeline: Mutex::new(HashMap::new()),
+            timeline_available_listeners: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn binary_point(&self) -> Arc<DrmSyncPoint> {
+        self.binary.clone()
+    }
+
+    fn timeline_point(&self, point: u64, create: bool) -> Option<Arc<DrmSyncPoint>> {
+        let mut timeline = self.timeline.lock();
+        if let Some(existing) = timeline.get(&point) {
+            return Some(existing.clone());
+        }
+        if !create {
+            return None;
+        }
+        let entry = Arc::new(DrmSyncPoint::new(false));
+        timeline.insert(point, entry.clone());
+        let listeners = self.timeline_available_listeners.lock().remove(&point);
+        drop(timeline);
+        if let Some(listeners) = listeners {
+            for eventfd in listeners {
+                signal_eventfd(&eventfd);
+            }
+        }
+        Some(entry)
+    }
+
+    fn highest_signaled_point(&self) -> u64 {
+        let timeline = self.timeline.lock();
+        timeline
+            .iter()
+            .filter_map(|(point, sync_point)| sync_point.is_signaled().then_some(*point))
+            .max()
+            .unwrap_or(0)
+    }
+
+    fn has_timeline_point(&self, point: u64) -> bool {
+        self.timeline.lock().contains_key(&point)
+    }
+
+    fn register_timeline_available_eventfd(&self, point: u64, eventfd: Arc<dyn FileLike>) {
+        if self.has_timeline_point(point) {
+            signal_eventfd(&eventfd);
+            return;
+        }
+
+        self.timeline_available_listeners
+            .lock()
+            .entry(point)
+            .or_default()
+            .push(eventfd);
+    }
+}
+
+struct DrmSyncobjFdFile {
+    syncobj: Arc<DrmSyncObj>,
+}
+
+impl DrmSyncobjFdFile {
+    fn new(syncobj: Arc<DrmSyncObj>) -> Self {
+        Self { syncobj }
+    }
+
+    fn syncobj(&self) -> Arc<DrmSyncObj> {
+        self.syncobj.clone()
+    }
+}
+
+impl Pollable for DrmSyncobjFdFile {
+    fn poll(&self, mask: IoEvents, _poller: Option<&mut PollHandle>) -> IoEvents {
+        (IoEvents::IN | IoEvents::OUT) & mask
+    }
+}
+
+impl FileLike for DrmSyncobjFdFile {
+    fn inode(&self) -> &Arc<dyn Inode> {
+        AnonInodeFs::shared_inode()
+    }
+
+    fn dump_proc_fdinfo(self: Arc<Self>, _fd_flags: FdFlags) -> Box<dyn Display> {
+        struct FdInfo {
+            ino: u64,
+        }
+
+        impl Display for FdInfo {
+            fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+                writeln!(f, "pos:\t0")?;
+                writeln!(f, "flags:\t02")?;
+                writeln!(f, "mnt_id:\t{}", RESERVED_MOUNT_ID)?;
+                writeln!(f, "ino:\t{}", self.ino)
+            }
+        }
+
+        Box::new(FdInfo {
+            ino: self.inode().ino(),
+        })
+    }
+}
+
+fn signal_eventfd(eventfd: &Arc<dyn FileLike>) {
+    let one = 1u64.to_ne_bytes();
+    let _ = eventfd.write_bytes(&one);
+}
 
 /// Represents an open DRM file descriptor exposed to userspace.
 ///
@@ -59,7 +233,6 @@ use aster_virtio::device::gpu::{
 /// Each `DrmFile` instance is independent and represents a single userspace
 /// file descriptor, while the underlying DRM device and driver state are
 /// shared across all open files.
-#[derive(Debug)]
 pub(super) struct DrmFile {
     device: Arc<DrmMinor>,
 
@@ -86,6 +259,10 @@ pub(super) struct DrmFile {
     /// through this file.
     next_handle: AtomicU32,
     gem_table: Mutex<HashMap<u32, Arc<DrmGemObject>>>,
+
+    next_syncobj_handle: AtomicU32,
+    syncobj_table: Mutex<HashMap<u32, Arc<DrmSyncObj>>>,
+    syncobj_wait_queue: WaitQueue,
 }
 
 impl Pollable for DrmFile {
@@ -109,6 +286,10 @@ impl DrmFile {
 
             next_handle: AtomicU32::new(1),
             gem_table: Mutex::new(HashMap::new()),
+
+            next_syncobj_handle: AtomicU32::new(1),
+            syncobj_table: Mutex::new(HashMap::new()),
+            syncobj_wait_queue: WaitQueue::new(),
         }
     }
 
@@ -122,6 +303,138 @@ impl DrmFile {
 
     fn lookup_gem(&self, handle: &u32) -> Option<Arc<DrmGemObject>> {
         self.gem_table.lock().get(handle).cloned()
+    }
+
+    fn next_syncobj_handle(&self) -> u32 {
+        self.next_syncobj_handle.fetch_add(1, Ordering::SeqCst)
+    }
+
+    fn insert_syncobj(&self, handle: u32, syncobj: Arc<DrmSyncObj>) {
+        self.syncobj_table.lock().insert(handle, syncobj);
+    }
+
+    fn lookup_syncobj(&self, handle: &u32) -> Option<Arc<DrmSyncObj>> {
+        self.syncobj_table.lock().get(handle).cloned()
+    }
+
+    fn remove_syncobj(&self, handle: &u32) -> Option<Arc<DrmSyncObj>> {
+        self.syncobj_table.lock().remove(handle)
+    }
+
+    fn read_user_array<T: Pod>(&self, ptr: u64, count: u32) -> Result<Vec<T>> {
+        if count == 0 {
+            return Ok(Vec::new());
+        }
+        if ptr == 0 {
+            return_errno!(Errno::EFAULT);
+        }
+
+        let mut values = Vec::with_capacity(count as usize);
+        for i in 0..count as usize {
+            let offset = ptr as usize + i * core::mem::size_of::<T>();
+            values.push(current_userspace!().read_val(offset)?);
+        }
+        Ok(values)
+    }
+
+    fn write_user_array<T: Pod>(&self, ptr: u64, values: &[T]) -> Result<()> {
+        if values.is_empty() {
+            return Ok(());
+        }
+        if ptr == 0 {
+            return_errno!(Errno::EFAULT);
+        }
+
+        for (i, value) in values.iter().enumerate() {
+            let offset = ptr as usize + i * core::mem::size_of::<T>();
+            current_userspace!().write_val(offset, value)?;
+        }
+        Ok(())
+    }
+
+    fn syncobj_deadline_to_duration(&self, timeout_nsec: u64) -> Option<Duration> {
+        if timeout_nsec == u64::MAX {
+            return None;
+        }
+
+        let now_ns = MonotonicClock::get().read_time().as_nanos() as u64;
+        Some(Duration::from_nanos(timeout_nsec.saturating_sub(now_ns)))
+    }
+
+    fn syncobj_wait_common(
+        &self,
+        points: &[Arc<DrmSyncPoint>],
+        wait_all: bool,
+        timeout_nsec: u64,
+    ) -> Result<Option<u32>> {
+        let first_signaled = || -> Option<u32> {
+            if wait_all {
+                if points.iter().all(|point| point.is_signaled()) {
+                    Some(0)
+                } else {
+                    None
+                }
+            } else {
+                points.iter().position(|point| point.is_signaled()).map(|idx| idx as u32)
+            }
+        };
+
+        if let Some(index) = first_signaled() {
+            return Ok(Some(index));
+        }
+
+        let timeout = self.syncobj_deadline_to_duration(timeout_nsec);
+        let wait_res = self
+            .syncobj_wait_queue
+            .wait_until_or_timeout(first_signaled, timeout.as_ref());
+
+        match wait_res {
+            Ok(index) => Ok(Some(index)),
+            Err(err) if err.error() == Errno::ETIME => Ok(None),
+            Err(err) => Err(err),
+        }
+    }
+
+    fn syncobj_timeline_point(
+        &self,
+        syncobj: &Arc<DrmSyncObj>,
+        point: u64,
+        wait_for_submit: bool,
+    ) -> Result<Arc<DrmSyncPoint>> {
+        match syncobj.timeline_point(point, wait_for_submit) {
+            Some(sync_point) => Ok(sync_point),
+            None => return_errno!(Errno::EINVAL),
+        }
+    }
+
+    fn current_file_by_fd(&self, fd: i32) -> Result<Arc<dyn FileLike>> {
+        if fd < 0 {
+            return_errno!(Errno::EINVAL);
+        }
+
+        let current = ostd::task::Task::current().unwrap();
+        let thread_local = current
+            .as_thread_local()
+            .ok_or_else(|| Error::new(Errno::ESRCH))?;
+
+        let mut file_table = thread_local.borrow_file_table();
+        let file = file_table.unwrap().read().get_file(fd)?.clone();
+        Ok(file)
+    }
+
+    fn install_current_fd(&self, file: Arc<dyn FileLike>, cloexec: bool) -> Result<i32> {
+        let current = ostd::task::Task::current().unwrap();
+        let thread_local = current
+            .as_thread_local()
+            .ok_or_else(|| Error::new(Errno::ESRCH))?;
+
+        let mut file_table = thread_local.borrow_file_table();
+        let flags = if cloexec {
+            FdFlags::CLOEXEC
+        } else {
+            FdFlags::empty()
+        };
+        Ok(file_table.unwrap().write().insert(file, flags))
     }
 
     fn virtio_gpu_param_value(&self, param: u64) -> Result<Option<u64>> {
@@ -1090,6 +1403,471 @@ impl FileIo for DrmFile {
                     } else {
                         return_errno!(Errno::EFAULT);
                     }
+                }
+
+                Ok(0)
+            }
+            cmd @ DrmIoctlVirtioGpuExecbuffer => {
+                let mut user_data: aster_virtio::device::gpu::drm::VirtioGpuExecbuffer = cmd.read()?;
+
+                let Some(virtio_gpu) = self.virtio_gpu_device() else {
+                    return_errno!(Errno::ENOTTY);
+                };
+                if !virtio_gpu.has_virgl_3d() {
+                    return_errno!(Errno::EOPNOTSUPP);
+                }
+
+                if (user_data.flags & !virtio_gpu_drm::VIRTGPU_EXECBUF_FLAGS) != 0 {
+                    return_errno!(Errno::EINVAL);
+                }
+                if (user_data.flags
+                    & (virtio_gpu_drm::VIRTGPU_EXECBUF_FENCE_FD_IN
+                        | virtio_gpu_drm::VIRTGPU_EXECBUF_FENCE_FD_OUT))
+                    != 0
+                {
+                    return_errno!(Errno::EOPNOTSUPP);
+                }
+                if user_data.size == 0 || user_data.command == 0 {
+                    return_errno!(Errno::EINVAL);
+                }
+
+                let mut command = vec![0u8; user_data.size as usize];
+                current_userspace!().read_bytes(user_data.command as usize, &mut command)?;
+
+                let bo_handles: Vec<u32> =
+                    self.read_user_array(user_data.bo_handles, user_data.num_bo_handles)?;
+                for bo_handle in bo_handles {
+                    if self.lookup_gem(&bo_handle).is_none() {
+                        return_errno!(Errno::ENOENT);
+                    }
+                }
+
+                let syncobj_stride = core::mem::size_of::<
+                    aster_virtio::device::gpu::drm::VirtioGpuExecbufferSyncobj,
+                >() as u32;
+                if (user_data.num_in_syncobjs > 0 || user_data.num_out_syncobjs > 0)
+                    && user_data.syncobj_stride != syncobj_stride
+                {
+                    return_errno!(Errno::EINVAL);
+                }
+
+                let in_syncobjs: Vec<aster_virtio::device::gpu::drm::VirtioGpuExecbufferSyncobj> =
+                    self.read_user_array(user_data.in_syncobjs, user_data.num_in_syncobjs)?;
+                let out_syncobjs: Vec<aster_virtio::device::gpu::drm::VirtioGpuExecbufferSyncobj> =
+                    self.read_user_array(user_data.out_syncobjs, user_data.num_out_syncobjs)?;
+
+                for sync in in_syncobjs.iter().chain(out_syncobjs.iter()) {
+                    if (sync.flags & !virtio_gpu_drm::VIRTGPU_EXECBUF_SYNCOBJ_FLAGS) != 0 {
+                        return_errno!(Errno::EINVAL);
+                    }
+                }
+
+                for sync in &in_syncobjs {
+                    let syncobj = self
+                        .lookup_syncobj(&sync.handle)
+                        .ok_or_else(|| Error::new(Errno::ENOENT))?;
+                    if sync.point == 0 {
+                        let point = syncobj.binary_point();
+                        let _ = self.syncobj_wait_common(&[point.clone()], true, u64::MAX)?;
+                        if (sync.flags & virtio_gpu_drm::VIRTGPU_EXECBUF_SYNCOBJ_RESET) != 0 {
+                            point.reset();
+                        }
+                    } else {
+                        let point = self.syncobj_timeline_point(&syncobj, sync.point, true)?;
+                        let _ = self.syncobj_wait_common(&[point.clone()], true, u64::MAX)?;
+                        if (sync.flags & virtio_gpu_drm::VIRTGPU_EXECBUF_SYNCOBJ_RESET) != 0 {
+                            point.reset();
+                        }
+                    }
+                }
+
+                let ring_idx = if (user_data.flags & virtio_gpu_drm::VIRTGPU_EXECBUF_RING_IDX) != 0
+                {
+                    Some(u8::try_from(user_data.ring_idx).map_err(|_| Error::new(Errno::EINVAL))?)
+                } else {
+                    None
+                };
+
+                let fence_id = virtio_gpu
+                    .submit_3d(&command, ring_idx)
+                    .map_err(|_| Error::new(Errno::EIO))?;
+
+                for sync in &out_syncobjs {
+                    let syncobj = self
+                        .lookup_syncobj(&sync.handle)
+                        .ok_or_else(|| Error::new(Errno::ENOENT))?;
+
+                    let effective_point = if sync.point == 0 { fence_id } else { sync.point };
+                    let point = syncobj
+                        .timeline_point(effective_point, true)
+                        .ok_or_else(|| Error::new(Errno::EINVAL))?;
+                    if (sync.flags & virtio_gpu_drm::VIRTGPU_EXECBUF_SYNCOBJ_RESET) != 0 {
+                        point.reset();
+                    }
+                    point.signal();
+
+                    if effective_point != fence_id {
+                        syncobj.timeline.lock().insert(fence_id, point.clone());
+                    }
+                    if sync.point == 0 {
+                        syncobj.binary.signal();
+                    }
+                }
+                self.syncobj_wait_queue.wake_all();
+
+                cmd.write(&user_data)?;
+                Ok(0)
+            }
+            cmd @ DrmIoctlSyncobjCreate => {
+                if !self.device.check_feature(DrmDriverFeatures::SYNCOBJ) {
+                    return_errno!(Errno::EOPNOTSUPP);
+                }
+
+                let mut user_data: DrmSyncobjCreate = cmd.read()?;
+                if user_data.flags & !DRM_SYNCOBJ_CREATE_SIGNALED != 0 {
+                    return_errno!(Errno::EINVAL);
+                }
+
+                let handle = self.next_syncobj_handle();
+                let initially_signaled =
+                    (user_data.flags & DRM_SYNCOBJ_CREATE_SIGNALED) != 0;
+                self.insert_syncobj(handle, Arc::new(DrmSyncObj::new(initially_signaled)));
+
+                user_data.handle = handle;
+                cmd.write(&user_data)?;
+                Ok(0)
+            }
+            cmd @ DrmIoctlSyncobjDestroy => {
+                if !self.device.check_feature(DrmDriverFeatures::SYNCOBJ) {
+                    return_errno!(Errno::EOPNOTSUPP);
+                }
+
+                let user_data: DrmSyncobjDestroy = cmd.read()?;
+                if self.remove_syncobj(&user_data.handle).is_none() {
+                    return_errno!(Errno::ENOENT);
+                }
+
+                Ok(0)
+            }
+            cmd @ DrmIoctlSyncobjHandleToFd => {
+                if !self.device.check_feature(DrmDriverFeatures::SYNCOBJ) {
+                    return_errno!(Errno::EOPNOTSUPP);
+                }
+
+                let mut user_data: DrmSyncobjHandle = cmd.read()?;
+                let known_flags = DRM_SYNCOBJ_HANDLE_TO_FD_FLAGS_EXPORT_SYNC_FILE
+                    | CreationFlags::O_CLOEXEC.bits();
+                if user_data.flags & !known_flags != 0 {
+                    return_errno!(Errno::EINVAL);
+                }
+
+                let syncobj = self
+                    .lookup_syncobj(&user_data.handle)
+                    .ok_or_else(|| Error::new(Errno::ENOENT))?;
+                let fd_file: Arc<dyn FileLike> = Arc::new(DrmSyncobjFdFile::new(syncobj));
+
+                let cloexec = (user_data.flags & CreationFlags::O_CLOEXEC.bits()) != 0;
+                let fd = self.install_current_fd(fd_file, cloexec)?;
+                user_data.fd = fd;
+                cmd.write(&user_data)?;
+
+                Ok(0)
+            }
+            cmd @ DrmIoctlSyncobjFdToHandle => {
+                if !self.device.check_feature(DrmDriverFeatures::SYNCOBJ) {
+                    return_errno!(Errno::EOPNOTSUPP);
+                }
+
+                let mut user_data: DrmSyncobjHandle = cmd.read()?;
+                let known_flags = DRM_SYNCOBJ_FD_TO_HANDLE_FLAGS_IMPORT_SYNC_FILE;
+                if user_data.flags & !known_flags != 0 {
+                    return_errno!(Errno::EINVAL);
+                }
+
+                let file = self.current_file_by_fd(user_data.fd)?;
+                let syncobj_file = file
+                    .downcast_ref::<DrmSyncobjFdFile>()
+                    .ok_or_else(|| Error::new(Errno::EINVAL))?;
+
+                let handle = self.next_syncobj_handle();
+                self.insert_syncobj(handle, syncobj_file.syncobj());
+                user_data.handle = handle;
+                cmd.write(&user_data)?;
+
+                Ok(0)
+            }
+            cmd @ DrmIoctlSyncobjWait => {
+                if !self.device.check_feature(DrmDriverFeatures::SYNCOBJ) {
+                    return_errno!(Errno::EOPNOTSUPP);
+                }
+
+                let mut user_data: DrmSyncobjWait = cmd.read()?;
+                let known_flags =
+                    DRM_SYNCOBJ_WAIT_FLAGS_WAIT_ALL | DRM_SYNCOBJ_WAIT_FLAGS_WAIT_FOR_SUBMIT;
+                if user_data.flags & !known_flags != 0 {
+                    return_errno!(Errno::EINVAL);
+                }
+
+                let handles: Vec<u32> = self.read_user_array(user_data.handles, user_data.count_handles)?;
+                if handles.is_empty() {
+                    return_errno!(Errno::EINVAL);
+                }
+
+                let points = handles
+                    .iter()
+                    .map(|handle| {
+                        let syncobj = self
+                            .lookup_syncobj(handle)
+                            .ok_or_else(|| Error::new(Errno::ENOENT))?;
+                        Ok(syncobj.binary_point())
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+
+                let wait_all = (user_data.flags & DRM_SYNCOBJ_WAIT_FLAGS_WAIT_ALL) != 0;
+                let first_signaled = self.syncobj_wait_common(&points, wait_all, user_data.timeout_nsec)?;
+                let Some(index) = first_signaled else {
+                    return_errno!(Errno::ETIME);
+                };
+
+                user_data.first_signaled = index;
+                cmd.write(&user_data)?;
+                Ok(0)
+            }
+            cmd @ DrmIoctlSyncobjReset => {
+                if !self.device.check_feature(DrmDriverFeatures::SYNCOBJ) {
+                    return_errno!(Errno::EOPNOTSUPP);
+                }
+
+                let user_data: DrmSyncobjArray = cmd.read()?;
+                let handles: Vec<u32> = self.read_user_array(user_data.handles, user_data.count_handles)?;
+                for handle in handles {
+                    let syncobj = self
+                        .lookup_syncobj(&handle)
+                        .ok_or_else(|| Error::new(Errno::ENOENT))?;
+                    syncobj.binary.reset();
+                }
+
+                Ok(0)
+            }
+            cmd @ DrmIoctlSyncobjSignal => {
+                if !self.device.check_feature(DrmDriverFeatures::SYNCOBJ) {
+                    return_errno!(Errno::EOPNOTSUPP);
+                }
+
+                let user_data: DrmSyncobjArray = cmd.read()?;
+                let handles: Vec<u32> = self.read_user_array(user_data.handles, user_data.count_handles)?;
+                for handle in handles {
+                    let syncobj = self
+                        .lookup_syncobj(&handle)
+                        .ok_or_else(|| Error::new(Errno::ENOENT))?;
+                    syncobj.binary.signal();
+                }
+                self.syncobj_wait_queue.wake_all();
+
+                Ok(0)
+            }
+            cmd @ DrmIoctlSyncobjTimelineWait => {
+                if !self
+                    .device
+                    .check_feature(DrmDriverFeatures::SYNCOBJ_TIMELINE)
+                {
+                    return_errno!(Errno::EOPNOTSUPP);
+                }
+
+                let mut user_data: DrmSyncobjTimelineWait = cmd.read()?;
+                let known_flags = DRM_SYNCOBJ_WAIT_FLAGS_WAIT_ALL
+                    | DRM_SYNCOBJ_WAIT_FLAGS_WAIT_FOR_SUBMIT
+                    | DRM_SYNCOBJ_WAIT_FLAGS_WAIT_AVAILABLE;
+                if user_data.flags & !known_flags != 0 {
+                    return_errno!(Errno::EINVAL);
+                }
+
+                let handles: Vec<u32> = self.read_user_array(user_data.handles, user_data.count_handles)?;
+                let points_in: Vec<u64> = self.read_user_array(user_data.points, user_data.count_handles)?;
+                if handles.is_empty() {
+                    return_errno!(Errno::EINVAL);
+                }
+
+                let wait_for_submit =
+                    (user_data.flags & DRM_SYNCOBJ_WAIT_FLAGS_WAIT_FOR_SUBMIT) != 0;
+                let wait_all = (user_data.flags & DRM_SYNCOBJ_WAIT_FLAGS_WAIT_ALL) != 0;
+                let wait_available =
+                    (user_data.flags & DRM_SYNCOBJ_WAIT_FLAGS_WAIT_AVAILABLE) != 0;
+
+                let first_signaled = if wait_available {
+                    let entries = handles
+                        .iter()
+                        .zip(points_in.iter())
+                        .map(|(handle, point)| {
+                            let syncobj = self
+                                .lookup_syncobj(handle)
+                                .ok_or_else(|| Error::new(Errno::ENOENT))?;
+                            Ok((syncobj, *point))
+                        })
+                        .collect::<Result<Vec<_>>>()?;
+
+                    let first_available = || -> Option<u32> {
+                        if wait_all {
+                            if entries
+                                .iter()
+                                .all(|(syncobj, point)| syncobj.has_timeline_point(*point))
+                            {
+                                Some(0)
+                            } else {
+                                None
+                            }
+                        } else {
+                            entries
+                                .iter()
+                                .position(|(syncobj, point)| syncobj.has_timeline_point(*point))
+                                .map(|idx| idx as u32)
+                        }
+                    };
+
+                    if let Some(index) = first_available() {
+                        Some(index)
+                    } else {
+                        let timeout = self.syncobj_deadline_to_duration(user_data.timeout_nsec);
+                        match self
+                            .syncobj_wait_queue
+                            .wait_until_or_timeout(first_available, timeout.as_ref())
+                        {
+                            Ok(index) => Some(index),
+                            Err(err) if err.error() == Errno::ETIME => None,
+                            Err(err) => return Err(err),
+                        }
+                    }
+                } else {
+                    let points = handles
+                        .iter()
+                        .zip(points_in.iter())
+                        .map(|(handle, point)| {
+                            let syncobj = self
+                                .lookup_syncobj(handle)
+                                .ok_or_else(|| Error::new(Errno::ENOENT))?;
+                            self.syncobj_timeline_point(&syncobj, *point, wait_for_submit)
+                        })
+                        .collect::<Result<Vec<_>>>()?;
+                    self.syncobj_wait_common(&points, wait_all, user_data.timeout_nsec)?
+                };
+
+                let Some(index) = first_signaled else { return_errno!(Errno::ETIME); };
+
+                user_data.first_signaled = index;
+                cmd.write(&user_data)?;
+                Ok(0)
+            }
+            cmd @ DrmIoctlSyncobjQuery => {
+                if !self
+                    .device
+                    .check_feature(DrmDriverFeatures::SYNCOBJ_TIMELINE)
+                {
+                    return_errno!(Errno::EOPNOTSUPP);
+                }
+
+                let user_data: DrmSyncobjTimelineArray = cmd.read()?;
+                let handles: Vec<u32> = self.read_user_array(user_data.handles, user_data.count_handles)?;
+                let mut out_points: Vec<u64> = Vec::with_capacity(handles.len());
+
+                for handle in handles {
+                    let syncobj = self
+                        .lookup_syncobj(&handle)
+                        .ok_or_else(|| Error::new(Errno::ENOENT))?;
+                    out_points.push(syncobj.highest_signaled_point());
+                }
+
+                self.write_user_array::<u64>(user_data.points, out_points.as_slice())?;
+                Ok(0)
+            }
+            cmd @ DrmIoctlSyncobjTransfer => {
+                if !self
+                    .device
+                    .check_feature(DrmDriverFeatures::SYNCOBJ_TIMELINE)
+                {
+                    return_errno!(Errno::EOPNOTSUPP);
+                }
+
+                let user_data: DrmSyncobjTransfer = cmd.read()?;
+                if user_data.flags != 0 {
+                    return_errno!(Errno::EINVAL);
+                }
+
+                let src_syncobj = self
+                    .lookup_syncobj(&user_data.src_handle)
+                    .ok_or_else(|| Error::new(Errno::ENOENT))?;
+                let dst_syncobj = self
+                    .lookup_syncobj(&user_data.dst_handle)
+                    .ok_or_else(|| Error::new(Errno::ENOENT))?;
+
+                let src_point = src_syncobj
+                    .timeline_point(user_data.src_point, false)
+                    .ok_or_else(|| Error::new(Errno::EINVAL))?;
+                dst_syncobj
+                    .timeline
+                    .lock()
+                    .insert(user_data.dst_point, src_point);
+
+                Ok(0)
+            }
+            cmd @ DrmIoctlSyncobjTimelineSignal => {
+                if !self
+                    .device
+                    .check_feature(DrmDriverFeatures::SYNCOBJ_TIMELINE)
+                {
+                    return_errno!(Errno::EOPNOTSUPP);
+                }
+
+                let user_data: DrmSyncobjTimelineArray = cmd.read()?;
+                let handles: Vec<u32> = self.read_user_array(user_data.handles, user_data.count_handles)?;
+                let points_in: Vec<u64> = self.read_user_array(user_data.points, user_data.count_handles)?;
+
+                for (handle, point) in handles.iter().zip(points_in.iter()) {
+                    let syncobj = self
+                        .lookup_syncobj(handle)
+                        .ok_or_else(|| Error::new(Errno::ENOENT))?;
+                    let sync_point = syncobj
+                        .timeline_point(*point, true)
+                        .ok_or_else(|| Error::new(Errno::EINVAL))?;
+                    sync_point.signal();
+                }
+                self.syncobj_wait_queue.wake_all();
+
+                Ok(0)
+            }
+            cmd @ DrmIoctlSyncobjEventfd => {
+                if !self.device.check_feature(DrmDriverFeatures::SYNCOBJ) {
+                    return_errno!(Errno::EOPNOTSUPP);
+                }
+
+                let user_data: DrmSyncobjEventfd = cmd.read()?;
+                let known_flags = DRM_SYNCOBJ_WAIT_FLAGS_WAIT_AVAILABLE;
+                if user_data.flags & !known_flags != 0 {
+                    return_errno!(Errno::EINVAL);
+                }
+
+                let syncobj = self
+                    .lookup_syncobj(&user_data.handle)
+                    .ok_or_else(|| Error::new(Errno::ENOENT))?;
+                let eventfd = self.current_file_by_fd(user_data.fd)?;
+
+                let wait_available =
+                    (user_data.flags & DRM_SYNCOBJ_WAIT_FLAGS_WAIT_AVAILABLE) != 0;
+                if wait_available {
+                    if user_data.point == 0 {
+                        signal_eventfd(&eventfd);
+                    } else {
+                        syncobj.register_timeline_available_eventfd(user_data.point, eventfd);
+                    }
+                    return Ok(0);
+                }
+
+                if user_data.point == 0 {
+                    syncobj.binary_point().register_eventfd(eventfd);
+                } else {
+                    let point = syncobj
+                        .timeline_point(user_data.point, true)
+                        .ok_or_else(|| Error::new(Errno::EINVAL))?;
+                    point.register_eventfd(eventfd);
                 }
 
                 Ok(0)

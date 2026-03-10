@@ -387,3 +387,95 @@ impl DrmModeObjectGetProps {
         return self.props_ptr == 0 && self.prop_values_ptr == 0;
     }
 }
+
+pub const DRM_SYNCOBJ_CREATE_SIGNALED: u32 = 0x1;
+
+pub const DRM_SYNCOBJ_FD_TO_HANDLE_FLAGS_IMPORT_SYNC_FILE: u32 = 0x1;
+pub const DRM_SYNCOBJ_HANDLE_TO_FD_FLAGS_EXPORT_SYNC_FILE: u32 = 0x1;
+
+pub const DRM_SYNCOBJ_WAIT_FLAGS_WAIT_ALL: u32 = 0x1;
+pub const DRM_SYNCOBJ_WAIT_FLAGS_WAIT_FOR_SUBMIT: u32 = 0x2;
+pub const DRM_SYNCOBJ_WAIT_FLAGS_WAIT_AVAILABLE: u32 = 0x4;
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod)]
+pub struct DrmSyncobjCreate {
+    pub handle: u32,
+    pub flags: u32,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod)]
+pub struct DrmSyncobjDestroy {
+    pub handle: u32,
+    pub pad: u32,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod)]
+pub struct DrmSyncobjHandle {
+    pub handle: u32,
+    pub flags: u32,
+    pub fd: i32,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod)]
+pub struct DrmSyncobjWait {
+    pub handles: u64,
+    pub timeout_nsec: u64,
+    pub count_handles: u32,
+    pub flags: u32,
+    pub first_signaled: u32,
+    pub pad: u32,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod)]
+pub struct DrmSyncobjTimelineWait {
+    pub handles: u64,
+    pub points: u64,
+    pub timeout_nsec: u64,
+    pub count_handles: u32,
+    pub flags: u32,
+    pub first_signaled: u32,
+    pub pad: u32,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod)]
+pub struct DrmSyncobjArray {
+    pub handles: u64,
+    pub count_handles: u32,
+    pub pad: u32,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod)]
+pub struct DrmSyncobjTimelineArray {
+    pub handles: u64,
+    pub points: u64,
+    pub count_handles: u32,
+    pub pad: u32,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod)]
+pub struct DrmSyncobjTransfer {
+    pub src_handle: u32,
+    pub dst_handle: u32,
+    pub src_point: u64,
+    pub dst_point: u64,
+    pub flags: u32,
+    pub pad: u32,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod)]
+pub struct DrmSyncobjEventfd {
+    pub handle: u32,
+    pub flags: u32,
+    pub point: u64,
+    pub fd: i32,
+    pub pad: u32,
+}
