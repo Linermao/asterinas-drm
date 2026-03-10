@@ -18,8 +18,8 @@ use ostd::Pod;
 use crate::vm::vmo::{CommitFlags};
 use aster_virtio::device::gpu::drm::gem::{
     VirtioGpuSgEntry, VirtioGpuSgTable, virtio_gpu_mode_dumb_create_with_sg,
-    virtio_gpu_object_create, virtio_gpu_object_unref, virtio_gpu_resource_info_by_gem,
-    virtio_gpu_resource_info_by_hw_res,
+    virtio_gpu_blob_state_by_gem, virtio_gpu_obj_resource_id, virtio_gpu_object_create,
+    virtio_gpu_object_unref, virtio_gpu_resource_info_by_gem, virtio_gpu_resource_info_by_hw_res,
 };
 
 use crate::{
@@ -2014,6 +2014,56 @@ impl FileIo for DrmFile {
                     Err(_) => return_errno!(Errno::EINVAL),
                 }
 
+                Ok(0)
+            }
+            cmd @ DrmIoctlVirtioGpuTransferFromHost => {
+                let user_data: aster_virtio::device::gpu::drm::VirtioGpuTransferFromHost = cmd.read()?;
+
+                let Some(virtio_gpu) = self.virtio_gpu_device() else {
+                    return_errno!(Errno::ENOTTY);
+                };
+
+                if !virtio_gpu.has_virgl_3d() {
+                    return_errno!(Errno::ENOSYS);
+                }
+
+                let gem_obj = self
+                    .lookup_gem(&user_data.bo_handle)
+                    .ok_or_else(|| Error::new(Errno::ENOENT))?;
+
+                let (guest_blob, host3d_blob) =
+                    virtio_gpu_blob_state_by_gem(&gem_obj).map_err(|_| Error::new(Errno::EINVAL))?;
+                if guest_blob && !host3d_blob {
+                    return_errno!(Errno::EINVAL);
+                }
+                if !host3d_blob && (user_data.stride != 0 || user_data.layer_stride != 0) {
+                    return_errno!(Errno::EINVAL);
+                }
+
+                let resource_id =
+                    virtio_gpu_obj_resource_id(&gem_obj).map_err(|_| Error::new(Errno::EINVAL))?;
+
+                let transfer_box = aster_virtio::device::gpu::VirtioGpuBox {
+                    x: user_data.box_.x,
+                    y: user_data.box_.y,
+                    z: user_data.box_.z,
+                    w: user_data.box_.w,
+                    h: user_data.box_.h,
+                    d: user_data.box_.d,
+                };
+
+                virtio_gpu
+                    .transfer_from_host_3d(
+                        resource_id,
+                        transfer_box,
+                        user_data.level,
+                        user_data.offset as u64,
+                        user_data.stride,
+                        user_data.layer_stride,
+                    )
+                    .map_err(|_| Error::new(Errno::EIO))?;
+
+                cmd.write(&user_data)?;
                 Ok(0)
             }
             _ => {

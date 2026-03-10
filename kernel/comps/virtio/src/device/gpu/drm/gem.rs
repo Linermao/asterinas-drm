@@ -82,7 +82,7 @@ fn objects_map() -> &'static SpinLock<BTreeMap<usize, VirtioGpuObject>> {
 /// Return the hardware resource handle associated with the given GEM object.
 /// This function assumes the object was previously created by
 /// `virtio_gpu_object_create` and therefore has an attached backing.
-pub(crate) fn virtio_gpu_obj_resource_id(
+pub fn virtio_gpu_obj_resource_id(
     gem_object: &Arc<DrmGemObject>,
 ) -> Result<u32, DrmError> {
     let objs = objects_map().lock();
@@ -198,6 +198,16 @@ pub fn virtio_gpu_resource_info_by_gem(
         obj.size,
         obj.hw_res_handle,
     ))
+}
+
+/// Return blob flags associated with a virtio-gpu GEM object.
+pub fn virtio_gpu_blob_state_by_gem(gem_object: &Arc<DrmGemObject>) -> Result<(bool, bool), DrmError> {
+    let objs = objects_map().lock();
+    let obj = objs
+        .get(&object_key(gem_object))
+        .ok_or(DrmError::Invalid)?;
+
+    Ok((obj.guest_blob, obj.host3d_blob))
 }
 
 /// Attach backing pages to an existing virtio-gpu resource.

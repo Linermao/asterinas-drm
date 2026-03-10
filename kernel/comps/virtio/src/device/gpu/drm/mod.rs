@@ -26,6 +26,7 @@ pub(crate) const DRIVER_DATE: &'static str = "2026-01-02";
 
 pub const DRM_VIRTGPU_GETPARAM: u8 = 0x03;
 pub const DRM_VIRTGPU_RESOURCE_CREATE: u8 = 0x04;
+pub const DRM_VIRTGPU_TRANSFER_FROM_HOST: u8 = 0x06;
 pub const DRM_VIRTGPU_GET_CAPS: u8 = 0x09;
 pub const DRM_VIRTGPU_MAP: u8 = 0x07;
 pub const DRM_VIRTGPU_EXECBUFFER: u8 = 0x02;
@@ -115,6 +116,28 @@ pub struct VirtioGpuExecbuffer {
     pub num_out_syncobjs: u32,
     pub in_syncobjs: u64,
     pub out_syncobjs: u64,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod)]
+pub struct VirtioGpu3dBox {
+    pub x: u32,
+    pub y: u32,
+    pub z: u32,
+    pub w: u32,
+    pub h: u32,
+    pub d: u32,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod)]
+pub struct VirtioGpuTransferFromHost {
+    pub bo_handle: u32,
+    pub box_: VirtioGpu3dBox,
+    pub level: u32,
+    pub offset: u32,
+    pub stride: u32,
+    pub layer_stride: u32,
 }
 
 #[repr(C)]
