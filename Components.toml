@@ -4,6 +4,8 @@ block = { name = "aster-block" }
 cmdline = { name = "aster-cmdline" }
 console = { name = "aster-console" }
 framebuffer = { name = "aster-framebuffer" }
+gpu = { name = "aster-gpu" }
+sysfb = { name = "aster-sysfb" }
 i8042 = { name = "aster-i8042" }
 input = { name = "aster-input" }
 kernel = { name = "aster-kernel" }

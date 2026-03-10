@@ -353,6 +353,19 @@ impl From<aster_systree::Error> for Error {
     }
 }
 
+impl From<aster_gpu::drm::DrmError> for Error {
+    fn from(value: aster_gpu::drm::DrmError) -> Self {
+        match value {
+            aster_gpu::drm::DrmError::Invalid => Error::new(Errno::EINVAL),
+            aster_gpu::drm::DrmError::Busy => Error::new(Errno::EBUSY),
+            aster_gpu::drm::DrmError::NoMemory => Error::new(Errno::ENOMEM),
+            aster_gpu::drm::DrmError::NotSupported => Error::new(Errno::EOPNOTSUPP),
+            aster_gpu::drm::DrmError::NotFound => Error::new(Errno::ENOENT),
+            aster_gpu::drm::DrmError::PermissionDenied => Error::new(Errno::EACCES),
+        }
+    }
+}
+
 impl From<aster_util::printer::VmPrinterError> for Error {
     fn from(value: aster_util::printer::VmPrinterError) -> Self {
         match value {

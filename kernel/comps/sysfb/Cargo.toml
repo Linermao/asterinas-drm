@@ -1,0 +1,17 @@
+[package]
+name = "aster-sysfb"
+version = "0.1.0"
+edition.workspace = true
+
+[dependencies]
+component.workspace = true
+aster-gpu.workspace = true
+aster-framebuffer.workspace = true
+log.workspace = true
+ostd.workspace = true
+spin.workspace = true
+hashbrown.workspace = true
+bitflags.workspace = true
+
+[lints]
+workspace = true
