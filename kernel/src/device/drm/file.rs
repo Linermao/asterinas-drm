@@ -2066,6 +2066,66 @@ impl FileIo for DrmFile {
                 cmd.write(&user_data)?;
                 Ok(0)
             }
+            cmd @ DrmIoctlVirtioGpuTransferToHost => {
+                let user_data: aster_virtio::device::gpu::drm::VirtioGpuTransferToHost = cmd.read()?;
+
+                let Some(virtio_gpu) = self.virtio_gpu_device() else {
+                    return_errno!(Errno::ENOTTY);
+                };
+
+                let gem_obj = self
+                    .lookup_gem(&user_data.bo_handle)
+                    .ok_or_else(|| Error::new(Errno::ENOENT))?;
+
+                let (guest_blob, host3d_blob) =
+                    virtio_gpu_blob_state_by_gem(&gem_obj).map_err(|_| Error::new(Errno::EINVAL))?;
+                if guest_blob && !host3d_blob {
+                    return_errno!(Errno::EINVAL);
+                }
+
+                let resource_id =
+                    virtio_gpu_obj_resource_id(&gem_obj).map_err(|_| Error::new(Errno::EINVAL))?;
+
+                if !virtio_gpu.has_virgl_3d() {
+                    let rect = aster_virtio::device::gpu::VirtioGpuRect {
+                        x: user_data.box_.x,
+                        y: user_data.box_.y,
+                        width: user_data.box_.w,
+                        height: user_data.box_.h,
+                    };
+
+                    virtio_gpu
+                        .transfer_to_host_2d(resource_id, rect, user_data.offset as u64)
+                        .map_err(|_| Error::new(Errno::EIO))?;
+                } else {
+                    if !host3d_blob && (user_data.stride != 0 || user_data.layer_stride != 0) {
+                        return_errno!(Errno::EINVAL);
+                    }
+
+                    let transfer_box = aster_virtio::device::gpu::VirtioGpuBox {
+                        x: user_data.box_.x,
+                        y: user_data.box_.y,
+                        z: user_data.box_.z,
+                        w: user_data.box_.w,
+                        h: user_data.box_.h,
+                        d: user_data.box_.d,
+                    };
+
+                    virtio_gpu
+                        .transfer_to_host_3d(
+                            resource_id,
+                            transfer_box,
+                            user_data.level,
+                            user_data.offset as u64,
+                            user_data.stride,
+                            user_data.layer_stride,
+                        )
+                        .map_err(|_| Error::new(Errno::EIO))?;
+                }
+
+                cmd.write(&user_data)?;
+                Ok(0)
+            }
             _ => {
                 let driver = self.device.driver();
                 match driver.handle_command(raw_ioctl.cmd(), raw_ioctl.arg()) {
