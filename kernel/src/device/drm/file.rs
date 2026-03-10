@@ -36,6 +36,10 @@ use crate::{
     process::signal::{PollHandle, Pollable},
     util::ioctl::{RawIoctl, dispatch_ioctl},
 };
+use aster_virtio::device::gpu::{
+    device::VirtioGpuDevice,
+    drm as virtio_gpu_drm,
+};
 
 /// Represents an open DRM file descriptor exposed to userspace.
 ///
@@ -118,6 +122,42 @@ impl DrmFile {
 
     fn lookup_gem(&self, handle: &u32) -> Option<Arc<DrmGemObject>> {
         self.gem_table.lock().get(handle).cloned()
+    }
+
+    fn virtio_gpu_param_value(&self, param: u64) -> Result<Option<u64>> {
+        let gpu_device = self.device.gpu_device();
+        let Ok(virtio_gpu) = Arc::downcast::<VirtioGpuDevice>(gpu_device) else {
+            return Ok(None);
+        };
+
+        let value = match param {
+            virtio_gpu_drm::VIRTGPU_PARAM_3D_FEATURES => u64::from(virtio_gpu.has_virgl_3d()),
+            virtio_gpu_drm::VIRTGPU_PARAM_CAPSET_QUERY_FIX => {
+                u64::from(virtio_gpu.num_capsets() > 0)
+            }
+            virtio_gpu_drm::VIRTGPU_PARAM_RESOURCE_BLOB => {
+                u64::from(virtio_gpu.has_resource_blob())
+            }
+            virtio_gpu_drm::VIRTGPU_PARAM_HOST_VISIBLE => 0,
+            virtio_gpu_drm::VIRTGPU_PARAM_CROSS_DEVICE => 0,
+            virtio_gpu_drm::VIRTGPU_PARAM_CONTEXT_INIT => 0,
+            virtio_gpu_drm::VIRTGPU_PARAM_SUPPORTED_CAPSET_IDS => virtio_gpu
+                .capset_infos()
+                .into_iter()
+                .fold(0u64, |supported, capset| {
+                    if capset.capset_id < u64::BITS {
+                        supported | (1u64 << capset.capset_id)
+                    } else {
+                        supported
+                    }
+                }),
+            virtio_gpu_drm::VIRTGPU_PARAM_EXPLICIT_DEBUG_NAME => 0,
+            _ => {
+                return_errno!(Errno::EINVAL);
+            }
+        };
+
+        Ok(Some(value))
     }
 
     fn remove_gem(&self, handle: &u32) -> Option<Arc<DrmGemObject>> {
@@ -1032,6 +1072,20 @@ impl FileIo for DrmFile {
                     }
                 }
 
+                Ok(0)
+            }
+            cmd @ DrmIoctlVirtioGpuGetParam => {
+                let mut user_data = cmd.read()?;
+
+                let value = match self.virtio_gpu_param_value(user_data.param)? {
+                    Some(value) => value,
+                    None => {
+                        return_errno!(Errno::ENOTTY);
+                    }
+                };
+
+                user_data.value = value;
+                cmd.write(&user_data)?;
                 Ok(0)
             }
             _ => {
