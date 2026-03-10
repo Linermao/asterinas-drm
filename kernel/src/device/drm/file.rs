@@ -4,7 +4,7 @@ use aster_framebuffer::FRAMEBUFFER;
 use aster_gpu::drm::{
     DrmError,
     driver::{DrmDriverFeatures, DumbCreateProvider},
-    gem::DrmGemObject,
+    gem::{DrmGemBackend, DrmGemObject},
     ioctl::*,
     mode_config::{
         DrmModeModeInfo, DrmModeObject,
@@ -18,7 +18,8 @@ use ostd::Pod;
 use crate::vm::vmo::{CommitFlags};
 use aster_virtio::device::gpu::drm::gem::{
     VirtioGpuSgEntry, VirtioGpuSgTable, virtio_gpu_mode_dumb_create_with_sg,
-    virtio_gpu_object_unref, virtio_gpu_resource_info_by_hw_res,
+    virtio_gpu_object_create, virtio_gpu_object_unref, virtio_gpu_resource_info_by_gem,
+    virtio_gpu_resource_info_by_hw_res,
 };
 
 use crate::{
@@ -471,6 +472,49 @@ impl DrmFile {
         };
 
         Ok(Some(value))
+    }
+
+    fn virtio_gpu_sg_from_backend(
+        &self,
+        backend: &Arc<dyn DrmGemBackend>,
+    ) -> Result<VirtioGpuSgTable> {
+        let drm_memfd = backend
+            .downcast_ref::<DrmMemfdFile>()
+            .ok_or_else(|| Error::new(Errno::EINVAL))?;
+        let mapp = drm_memfd.mappable()?;
+        let inode = match mapp {
+            Mappable::Inode(inode) => inode,
+            _ => return_errno!(Errno::EINVAL),
+        };
+        let vmo = inode
+            .page_cache()
+            .ok_or_else(|| Error::new(Errno::EINVAL))?;
+
+        let byte_sz = vmo.size();
+        let page_count = (byte_sz + ostd::mm::PAGE_SIZE - 1) / ostd::mm::PAGE_SIZE;
+
+        // Gather physical pages and coalesce contiguous ranges for compact SG.
+        let mut entries: Vec<VirtioGpuSgEntry> = Vec::new();
+        for page_idx in 0..page_count {
+            let frame = vmo.commit_on(page_idx, CommitFlags::empty())?;
+            let p = frame.paddr();
+            let s = frame.size();
+
+            if let Some(last) = entries.last_mut() {
+                let last_end = last.addr as usize + last.len as usize;
+                if last_end == p {
+                    last.len = last.len.saturating_add(s as u32);
+                    continue;
+                }
+            }
+
+            entries.push(VirtioGpuSgEntry {
+                addr: p as u64,
+                len: s as u32,
+            });
+        }
+
+        Ok(VirtioGpuSgTable { entries })
     }
 
     fn virtio_gpu_device(&self) -> Option<Arc<VirtioGpuDevice>> {
@@ -1196,44 +1240,7 @@ impl FileIo for DrmFile {
                         let size_u64 = (pitch as u64).saturating_mul(user_data.height as u64);
                         let backend = memfd_object_create("virtio-gpu-dumb", size_u64)?;
 
-                        let drm_memfd = backend
-                            .downcast_ref::<DrmMemfdFile>()
-                            .ok_or_else(|| Error::new(Errno::EINVAL))?;
-                        let mapp = drm_memfd.mappable()?;
-                        let inode = match mapp {
-                            Mappable::Inode(inode) => inode,
-                            _ => return_errno!(Errno::EINVAL),
-                        };
-                        let vmo = inode
-                            .page_cache()
-                            .ok_or_else(|| Error::new(Errno::EINVAL))?;
-
-                        let byte_sz = vmo.size();
-
-                        // `try_operate_on_range` works in **pages** not bytes. compute
-                        // number of pages to traverse instead of passing the raw byte
-                        // length, otherwise the iterator will iterate one entry per page
-                        // index (paging units are 4KiB) which explodes the SG length.
-                        let page_count =
-                            (byte_sz + ostd::mm::PAGE_SIZE - 1) / ostd::mm::PAGE_SIZE;
-                        // Collect physical addresses of each committed page and coalesce
-                        // contiguous pages into SG entries.
-                        let mut entries: alloc::vec::Vec<VirtioGpuSgEntry> = alloc::vec::Vec::new();
-                        for page_idx in 0..page_count {
-                            let frame = vmo.commit_on(page_idx, CommitFlags::empty())?;
-                            let p = frame.paddr();
-                            let s = frame.size();
-
-                            if let Some(last) = entries.last_mut() {
-                                let last_end = last.addr as usize + last.len as usize;
-                                if last_end == p {
-                                    last.len = last.len.saturating_add(s as u32);
-                                    continue;
-                                }
-                            }
-                            entries.push(VirtioGpuSgEntry { addr: p as u64, len: s as u32 });
-                        }
-                        let sg = VirtioGpuSgTable { entries };
+                        let sg = self.virtio_gpu_sg_from_backend(&backend)?;
 
                         virtio_gpu_mode_dumb_create_with_sg(&mut user_data, backend, Some(&sg))?
                     } else {
@@ -1883,6 +1890,63 @@ impl FileIo for DrmFile {
                 };
 
                 user_data.value = value;
+                cmd.write(&user_data)?;
+                Ok(0)
+            }
+            cmd @ DrmIoctlVirtioGpuResourceCreate => {
+                let mut user_data: aster_virtio::device::gpu::drm::VirtioGpuResourceCreate =
+                    cmd.read()?;
+
+                let Some(virtio_gpu) = self.virtio_gpu_device() else {
+                    return_errno!(Errno::ENOTTY);
+                };
+
+                if user_data.width == 0 || user_data.height == 0 {
+                    return_errno!(Errno::EINVAL);
+                }
+
+                if !virtio_gpu.has_virgl_3d() {
+                    // Match Linux's non-virgl restrictions for legacy 2D resource_create.
+                    if user_data.depth > 1
+                        || user_data.nr_samples > 1
+                        || user_data.last_level > 1
+                        || user_data.target != 2
+                        || user_data.array_size > 1
+                    {
+                        return_errno!(Errno::EINVAL);
+                    }
+                }
+
+                let size = if user_data.size == 0 {
+                    ostd::mm::PAGE_SIZE as u64
+                } else {
+                    user_data.size as u64
+                };
+
+                let backend = memfd_object_create("virtio-gpu-resource", size)?;
+                let sg = self.virtio_gpu_sg_from_backend(&backend)?;
+
+                // `virtio_gpu_object_create` submits a fenced control command and waits
+                // for completion, so creation is ordered similarly to Linux's fenced path.
+                let gem_obj = virtio_gpu_object_create(
+                    size,
+                    user_data.stride,
+                    user_data.width,
+                    user_data.height,
+                    Some(&sg),
+                    backend,
+                )?;
+
+                let handle = self.next_handle();
+                self.insert_gem(handle, gem_obj.clone());
+
+                let (_, _, _, _, resource_id) =
+                    virtio_gpu_resource_info_by_gem(&gem_obj).map_err(|_| Error::new(Errno::EINVAL))?;
+
+                user_data.bo_handle = handle;
+                user_data.res_handle = resource_id;
+                user_data.size = u32::try_from(size).map_err(|_| Error::new(Errno::EOVERFLOW))?;
+
                 cmd.write(&user_data)?;
                 Ok(0)
             }

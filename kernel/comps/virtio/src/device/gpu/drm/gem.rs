@@ -182,6 +182,24 @@ pub fn virtio_gpu_resource_info_by_hw_res(hw_res: u32) -> Result<(u32, u32, u32,
     Ok((obj.width, obj.height, obj.pitch, obj.size))
 }
 
+/// Return metadata for a virtio-gpu resource associated with a GEM object.
+pub fn virtio_gpu_resource_info_by_gem(
+    gem_object: &Arc<DrmGemObject>,
+) -> Result<(u32, u32, u32, u64, u32), DrmError> {
+    let objs = objects_map().lock();
+    let obj = objs
+        .get(&object_key(gem_object))
+        .ok_or(DrmError::Invalid)?;
+
+    Ok((
+        obj.width,
+        obj.height,
+        obj.pitch,
+        obj.size,
+        obj.hw_res_handle,
+    ))
+}
+
 /// Attach backing pages to an existing virtio-gpu resource.
 ///
 /// The caller (usually file.rs) is responsible for flushing caches and
