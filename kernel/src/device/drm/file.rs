@@ -160,6 +160,26 @@ impl DrmFile {
         Ok(Some(value))
     }
 
+    fn virtio_gpu_device(&self) -> Option<Arc<VirtioGpuDevice>> {
+        Arc::downcast::<VirtioGpuDevice>(self.device.gpu_device()).ok()
+    }
+
+    fn virtio_gpu_capset_info(
+        &self,
+        capset_id: u32,
+        capset_version: u32,
+    ) -> Result<Option<aster_virtio::device::gpu::VirtioGpuRespCapsetInfo>> {
+        let Some(virtio_gpu) = self.virtio_gpu_device() else {
+            return Ok(None);
+        };
+
+        let capset = virtio_gpu.capset_infos().into_iter().find(|capset| {
+            capset.capset_id == capset_id && capset_version <= capset.capset_max_version
+        });
+
+        Ok(capset)
+    }
+
     fn remove_gem(&self, handle: &u32) -> Option<Arc<DrmGemObject>> {
         self.gem_table.lock().remove(handle)
     }
@@ -1085,6 +1105,36 @@ impl FileIo for DrmFile {
                 };
 
                 user_data.value = value;
+                cmd.write(&user_data)?;
+                Ok(0)
+            }
+            cmd @ DrmIoctlVirtioGpuGetCaps => {
+                let user_data = cmd.read()?;
+
+                let Some(virtio_gpu) = self.virtio_gpu_device() else {
+                    return_errno!(Errno::ENOTTY);
+                };
+
+                let Some(capset_info) = self
+                    .virtio_gpu_capset_info(user_data.cap_set_id, user_data.cap_set_ver)?
+                else {
+                    return_errno!(Errno::EINVAL);
+                };
+
+                let caps = match virtio_gpu.get_capset(
+                    capset_info.capset_id,
+                    user_data.cap_set_ver,
+                    capset_info.capset_max_size,
+                ) {
+                    Ok(v) => v,
+                    Err(_) => return_errno!(Errno::EIO),
+                };
+
+                let copy_len = core::cmp::min(user_data.size as usize, caps.len());
+                if copy_len > 0 {
+                    current_userspace!().write_bytes(user_data.addr as usize, &caps[..copy_len])?;
+                }
+
                 cmd.write(&user_data)?;
                 Ok(0)
             }

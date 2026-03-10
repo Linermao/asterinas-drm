@@ -14,11 +14,11 @@ use ostd::{
     sync::SpinLock,
 };
 use ostd::prelude::println;
-use super::{CMD_GET_CAPSET_INFO, CMD_GET_DISPLAY_INFO, CMD_GET_EDID,
+use super::{CMD_GET_CAPSET, CMD_GET_CAPSET_INFO, CMD_GET_DISPLAY_INFO, CMD_GET_EDID,
     CMD_RESOURCE_ATTACH_BACKING, CMD_RESOURCE_CREATE_2D, CMD_RESOURCE_UNREF, CMD_RESOURCE_DETACH_BACKING, CMD_RESOURCE_FLUSH,
     CMD_TRANSFER_TO_HOST_2D, CMD_SET_SCANOUT, DEVICE_NAME, GpuFeatures, QUEUE_CONTROL,
-    QUEUE_CURSOR, RESP_OK_CAPSET_INFO, RESP_OK_DISPLAY_INFO, RESP_OK_EDID, RESP_OK_NODATA,
-    VirtioGpuConfig, VirtioGpuCtrlHdr, VirtioGpuDisplayOne, VirtioGpuFormat, VirtioGpuGetCapsetInfo,
+    QUEUE_CURSOR, RESP_OK_CAPSET, RESP_OK_CAPSET_INFO, RESP_OK_DISPLAY_INFO, RESP_OK_EDID, RESP_OK_NODATA,
+    VirtioGpuConfig, VirtioGpuCtrlHdr, VirtioGpuDisplayOne, VirtioGpuFormat, VirtioGpuGetCapset, VirtioGpuGetCapsetInfo,
     VirtioGpuGetEdid, VirtioGpuMemEntry, VirtioGpuRect, VirtioGpuResourceAttachBacking,
     VirtioGpuResourceUnref, VirtioGpuResourceDetachBacking,
     VirtioGpuResourceCreate2d, VirtioGpuRespCapsetInfo, VirtioGpuRespDisplayInfo,
@@ -36,6 +36,9 @@ const CTRL_REQ_STRIDE: usize = {
     let mut max = size_of::<VirtioGpuCtrlHdr>();
     if size_of::<VirtioGpuGetCapsetInfo>() > max {
         max = size_of::<VirtioGpuGetCapsetInfo>();
+    }
+    if size_of::<VirtioGpuGetCapset>() > max {
+        max = size_of::<VirtioGpuGetCapset>();
     }
     if size_of::<VirtioGpuGetEdid>() > max {
         max = size_of::<VirtioGpuGetEdid>();
@@ -315,6 +318,78 @@ impl VirtioGpuDevice {
             &req,
             RESP_OK_CAPSET_INFO,
         )
+    }
+
+    pub fn get_capset(
+        &self,
+        capset_id: u32,
+        capset_version: u32,
+        capset_size: u32,
+    ) -> Result<Vec<u8>, VirtioGpuCommandError> {
+        let req = VirtioGpuGetCapset {
+            hdr: VirtioGpuCtrlHdr {
+                type_: CMD_GET_CAPSET,
+                ..Default::default()
+            },
+            capset_id,
+            capset_version,
+        };
+
+        let resp_len = size_of::<VirtioGpuCtrlHdr>()
+            + usize::try_from(capset_size).map_err(|_| VirtioGpuCommandError::InvalidParameter)?;
+        let resp_frames = resp_len.div_ceil(PAGE_SIZE);
+        let resp_dma = Arc::new(DmaStream::alloc(resp_frames, false).unwrap());
+        let resp_slice = Slice::new(resp_dma, 0..resp_len);
+        resp_slice
+            .write_val(0, &VirtioGpuCtrlHdr::default())
+            .unwrap();
+        resp_slice.sync_to_device().unwrap();
+
+        let req_len = size_of::<VirtioGpuGetCapset>();
+        let req_frames = req_len.div_ceil(PAGE_SIZE);
+        let req_dma = Arc::new(DmaStream::alloc(req_frames, false).unwrap());
+        let req_slice = Slice::new(req_dma, 0..req_len);
+        req_slice.write_val(0, &req).unwrap();
+        req_slice.sync_to_device().unwrap();
+
+        let token = loop {
+            let mut queue = self.control_queue.disable_irq().lock();
+            if queue.available_desc() >= 2 {
+                let token = queue
+                    .add_dma_buf(&[&req_slice], &[&resp_slice])
+                    .map_err(VirtioGpuCommandError::Queue)?;
+                if queue.should_notify() {
+                    queue.notify();
+                }
+                break token;
+            }
+            drop(queue);
+            spin_loop();
+        };
+
+        loop {
+            let mut queue = self.control_queue.disable_irq().lock();
+            if !queue.can_pop() {
+                drop(queue);
+                spin_loop();
+                continue;
+            }
+            queue
+                .pop_used_with_token(token)
+                .map_err(VirtioGpuCommandError::Queue)?;
+            break;
+        }
+
+        resp_slice.sync_from_device().unwrap();
+        let resp_hdr: VirtioGpuCtrlHdr = resp_slice.read_val(0).unwrap();
+        if resp_hdr.type_ != RESP_OK_CAPSET {
+            return Err(VirtioGpuCommandError::UnexpectedResponse(resp_hdr.type_));
+        }
+
+        let data_offset = size_of::<VirtioGpuCtrlHdr>();
+        let mut data = vec![0; usize::try_from(capset_size).unwrap()];
+        resp_slice.read_bytes(data_offset, &mut data).unwrap();
+        Ok(data)
     }
 
     pub fn get_edid(&self, scanout: u32) -> Result<VirtioGpuRespEdid, VirtioGpuCommandError> {
