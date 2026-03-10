@@ -26,6 +26,7 @@ pub(crate) const DRIVER_DATE: &'static str = "2026-01-02";
 
 pub const DRM_VIRTGPU_GETPARAM: u8 = 0x03;
 pub const DRM_VIRTGPU_GET_CAPS: u8 = 0x09;
+pub const DRM_VIRTGPU_MAP: u8 = 0x07;
 
 pub const VIRTGPU_PARAM_3D_FEATURES: u64 = 1;
 pub const VIRTGPU_PARAM_CAPSET_QUERY_FIX: u64 = 2;
@@ -51,6 +52,14 @@ pub struct VirtioGpuGetCaps {
     pub addr: u64,
     pub size: u32,
     pub pad: u32,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod)]
+pub struct VirtioGpuMap {
+    pub handle: u32,
+    pub pad: u32,
+    pub addr: u64,
 }
 
 pub mod gem;
