@@ -17,7 +17,7 @@ use ostd::sync::WaitQueue;
 use ostd::Pod;
 use crate::vm::vmo::{CommitFlags};
 use aster_virtio::device::gpu::drm::gem::{
-    VirtioGpuSgEntry, VirtioGpuSgTable, virtio_gpu_mode_dumb_create_with_sg,
+    VirtioGpuSgEntry, VirtioGpuSgTable, virtio_gpu_blob_object_create, virtio_gpu_mode_dumb_create_with_sg,
     virtio_gpu_blob_state_by_gem, virtio_gpu_obj_resource_id, virtio_gpu_object_create,
     virtio_gpu_object_unref, virtio_gpu_resource_info_by_gem, virtio_gpu_resource_info_by_hw_res,
 };
@@ -2027,6 +2027,82 @@ impl FileIo for DrmFile {
                 if copy_len > 0 {
                     current_userspace!().write_bytes(user_data.addr as usize, &caps[..copy_len])?;
                 }
+
+                cmd.write(&user_data)?;
+                Ok(0)
+            }
+            cmd @ DrmIoctlVirtioGpuResourceCreateBlob => {
+                let mut user_data: aster_virtio::device::gpu::drm::VirtioGpuResourceCreateBlob =
+                    cmd.read()?;
+
+                let Some(virtio_gpu) = self.virtio_gpu_device() else {
+                    return_errno!(Errno::ENOTTY);
+                };
+
+                if !virtio_gpu.has_resource_blob() {
+                    return_errno!(Errno::EINVAL);
+                }
+                if (user_data.blob_flags & !virtio_gpu_drm::VIRTGPU_BLOB_FLAG_USE_MASK) != 0 {
+                    return_errno!(Errno::EINVAL);
+                }
+                if (user_data.blob_flags & virtio_gpu_drm::VIRTGPU_BLOB_FLAG_USE_CROSS_DEVICE) != 0 {
+                    return_errno!(Errno::EINVAL);
+                }
+
+                let (guest_blob, host3d_blob) = match user_data.blob_mem {
+                    virtio_gpu_drm::VIRTGPU_BLOB_MEM_GUEST => (true, false),
+                    virtio_gpu_drm::VIRTGPU_BLOB_MEM_HOST3D => (false, true),
+                    virtio_gpu_drm::VIRTGPU_BLOB_MEM_HOST3D_GUEST => (true, true),
+                    _ => return_errno!(Errno::EINVAL),
+                };
+
+                if host3d_blob {
+                    if !virtio_gpu.has_virgl_3d() {
+                        return_errno!(Errno::EINVAL);
+                    }
+                    if user_data.cmd_size % 4 != 0 {
+                        return_errno!(Errno::EINVAL);
+                    }
+                } else if user_data.blob_id != 0 || user_data.cmd_size != 0 {
+                    return_errno!(Errno::EINVAL);
+                }
+
+                if !guest_blob {
+                    return_errno!(Errno::EINVAL);
+                }
+
+                if user_data.cmd_size != 0 {
+                    let mut command = vec![0u8; user_data.cmd_size as usize];
+                    current_userspace!().read_bytes(user_data.cmd as usize, &mut command)?;
+                    virtio_gpu
+                        .submit_3d(&command, None)
+                        .map_err(|_| Error::new(Errno::EIO))?;
+                }
+
+                let backend = memfd_object_create("virtio-gpu-blob", user_data.size)?;
+                let sg = self.virtio_gpu_sg_from_backend(&backend)?;
+
+                let gem_obj = virtio_gpu_blob_object_create(
+                    user_data.size,
+                    Some(&sg),
+                    backend,
+                    user_data.blob_mem,
+                    user_data.blob_flags,
+                    user_data.blob_id,
+                    0,
+                    guest_blob,
+                    host3d_blob,
+                )
+                .map_err(|_| Error::new(Errno::EINVAL))?;
+
+                let handle = self.next_handle();
+                self.insert_gem(handle, gem_obj.clone());
+
+                let resource_id =
+                    virtio_gpu_obj_resource_id(&gem_obj).map_err(|_| Error::new(Errno::EINVAL))?;
+
+                user_data.bo_handle = handle;
+                user_data.res_handle = resource_id;
 
                 cmd.write(&user_data)?;
                 Ok(0)

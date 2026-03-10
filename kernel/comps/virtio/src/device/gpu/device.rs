@@ -15,13 +15,13 @@ use ostd::{
 };
 use ostd::prelude::println;
 use super::{CMD_GET_CAPSET, CMD_GET_CAPSET_INFO, CMD_GET_DISPLAY_INFO, CMD_GET_EDID,
-    CMD_RESOURCE_ATTACH_BACKING, CMD_RESOURCE_CREATE_2D, CMD_RESOURCE_UNREF, CMD_RESOURCE_DETACH_BACKING, CMD_RESOURCE_FLUSH,
+    CMD_RESOURCE_ATTACH_BACKING, CMD_RESOURCE_CREATE_2D, CMD_RESOURCE_CREATE_BLOB, CMD_RESOURCE_UNREF, CMD_RESOURCE_DETACH_BACKING, CMD_RESOURCE_FLUSH,
     CMD_TRANSFER_FROM_HOST_3D, CMD_TRANSFER_TO_HOST_2D, CMD_TRANSFER_TO_HOST_3D, CMD_SET_SCANOUT, CMD_SUBMIT_3D, DEVICE_NAME, GpuFeatures, QUEUE_CONTROL,
     QUEUE_CURSOR, RESP_OK_CAPSET, RESP_OK_CAPSET_INFO, RESP_OK_DISPLAY_INFO, RESP_OK_EDID, RESP_OK_NODATA,
     VirtioGpuConfig, VirtioGpuCtrlHdr, VirtioGpuDisplayOne, VirtioGpuFormat, VirtioGpuGetCapset, VirtioGpuGetCapsetInfo,
     VirtioGpuGetEdid, VirtioGpuMemEntry, VirtioGpuRect, VirtioGpuResourceAttachBacking,
     VirtioGpuResourceUnref, VirtioGpuResourceDetachBacking,
-    VirtioGpuResourceCreate2d, VirtioGpuRespCapsetInfo, VirtioGpuRespDisplayInfo,
+    VirtioGpuResourceCreate2d, VirtioGpuResourceCreateBlob, VirtioGpuRespCapsetInfo, VirtioGpuRespDisplayInfo,
     VirtioGpuRespEdid, VirtioGpuResourceFlush, VirtioGpuTransferHost3d, VirtioGpuTransferToHost2d, VirtioGpuSetScanout, VirtioGpuCmdSubmit,
 };
 use crate::{
@@ -550,6 +550,100 @@ impl VirtioGpuDevice {
 
         req_slice.write_val(0, &hdr).unwrap();
         let mut off = size_of::<VirtioGpuResourceAttachBackingHdr>();
+        for entry in entries {
+            req_slice.write_val(off, entry).unwrap();
+            off += size_of::<VirtioGpuMemEntry>();
+        }
+        let fence_id = self.alloc_fence_id();
+        self.stamp_fence(&req_slice, fence_id);
+
+        let resp_len = size_of::<VirtioGpuCtrlHdr>();
+        let resp_frames = resp_len.div_ceil(PAGE_SIZE);
+        let resp_dma = Arc::new(DmaStream::alloc(resp_frames, false).unwrap());
+        let resp_slice = Slice::new(resp_dma, 0..resp_len);
+        resp_slice
+            .write_val(0, &VirtioGpuCtrlHdr::default())
+            .unwrap();
+        resp_slice.sync_to_device().unwrap();
+
+        let token = loop {
+            let mut queue = self.control_queue.disable_irq().lock();
+            if queue.available_desc() >= 2 {
+                let token = queue
+                    .add_dma_buf(&[&req_slice], &[&resp_slice])
+                    .map_err(VirtioGpuCommandError::Queue)?;
+                if queue.should_notify() {
+                    queue.notify();
+                }
+                break token;
+            }
+            drop(queue);
+            spin_loop();
+        };
+
+        loop {
+            let mut queue = self.control_queue.disable_irq().lock();
+            if !queue.can_pop() {
+                drop(queue);
+                spin_loop();
+                continue;
+            }
+            queue
+                .pop_used_with_token(token)
+                .map_err(VirtioGpuCommandError::Queue)?;
+            break;
+        }
+
+        resp_slice.sync_from_device().unwrap();
+        let resp_hdr: VirtioGpuCtrlHdr = resp_slice.read_val(0).unwrap();
+        if resp_hdr.type_ != RESP_OK_NODATA {
+            return Err(VirtioGpuCommandError::UnexpectedResponse(resp_hdr.type_));
+        }
+        if resp_hdr.fence_id != fence_id {
+            return Err(VirtioGpuCommandError::FenceMismatch {
+                expected: fence_id,
+                got: resp_hdr.fence_id,
+            });
+        }
+
+        Ok(())
+    }
+
+    pub fn resource_create_blob(
+        &self,
+        resource_id: u32,
+        blob_mem: u32,
+        blob_flags: u32,
+        blob_id: u64,
+        size: u64,
+        ctx_id: u32,
+        entries: &[VirtioGpuMemEntry],
+    ) -> Result<(), VirtioGpuCommandError> {
+        let nr_entries =
+            u32::try_from(entries.len()).map_err(|_| VirtioGpuCommandError::InvalidParameter)?;
+
+        let req = VirtioGpuResourceCreateBlob {
+            hdr: VirtioGpuCtrlHdr {
+                type_: CMD_RESOURCE_CREATE_BLOB,
+                ctx_id,
+                ..Default::default()
+            },
+            resource_id,
+            blob_mem,
+            blob_flags,
+            nr_entries,
+            blob_id,
+            size,
+        };
+
+        let req_len = size_of::<VirtioGpuResourceCreateBlob>()
+            + entries.len() * size_of::<VirtioGpuMemEntry>();
+        let req_frames = req_len.div_ceil(PAGE_SIZE);
+        let req_dma = Arc::new(DmaStream::alloc(req_frames, false).unwrap());
+        let req_slice = Slice::new(req_dma, 0..req_len);
+
+        req_slice.write_val(0, &req).unwrap();
+        let mut off = size_of::<VirtioGpuResourceCreateBlob>();
         for entry in entries {
             req_slice.write_val(off, entry).unwrap();
             off += size_of::<VirtioGpuMemEntry>();

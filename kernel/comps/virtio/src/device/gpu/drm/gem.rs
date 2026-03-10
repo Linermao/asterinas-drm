@@ -131,6 +131,69 @@ pub fn virtio_gpu_object_create(
     virtio_gpu_object_create_with_backend(size, pitch, width, height, initial_sg, backend)
 }
 
+pub fn virtio_gpu_blob_object_create(
+    size: u64,
+    initial_sg: Option<&VirtioGpuSgTable>,
+    backend: Arc<dyn DrmGemBackend>,
+    blob_mem: u32,
+    blob_flags: u32,
+    blob_id: u64,
+    ctx_id: u32,
+    guest_blob: bool,
+    host3d_blob: bool,
+) -> Result<Arc<DrmGemObject>, DrmError> {
+    let gem_object = Arc::new(DrmGemObject::new(size, 0, backend));
+
+    let resource_id = with_vgpu(|vgpu| {
+        let resource_id = vgpu.alloc_resource_id();
+        let entries: Vec<VirtioGpuMemEntry> = initial_sg
+            .map(|sg| {
+                sg.entries
+                    .iter()
+                    .map(|entry| VirtioGpuMemEntry {
+                        addr: entry.addr,
+                        length: entry.len,
+                        padding: 0,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        vgpu
+            .resource_create_blob(
+                resource_id,
+                blob_mem,
+                blob_flags,
+                blob_id,
+                size,
+                ctx_id,
+                entries.as_slice(),
+            )
+            .map_err(|_| DrmError::Invalid)?;
+        Ok(resource_id)
+    })?;
+
+    let mut virtio_gpu_obj = VirtioGpuObject::new(
+        gem_object.clone(),
+        resource_id,
+        0,
+        0,
+        0,
+        size,
+        VirtioGpuCtrlHdr::default(),
+    );
+    virtio_gpu_obj.dumb = false;
+    virtio_gpu_obj.guest_blob = guest_blob;
+    virtio_gpu_obj.host3d_blob = host3d_blob;
+    virtio_gpu_obj.blob_mem = blob_mem;
+    virtio_gpu_obj.blob_flags = blob_flags;
+
+    objects_map()
+        .lock()
+        .insert(object_key(&gem_object), virtio_gpu_obj);
+
+    Ok(gem_object)
+}
+
 pub fn virtio_gpu_object_create_with_backend(
     size: u64,
     pitch: u32,

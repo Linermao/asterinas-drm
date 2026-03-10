@@ -30,6 +30,7 @@ pub const DRM_VIRTGPU_TRANSFER_FROM_HOST: u8 = 0x06;
 pub const DRM_VIRTGPU_TRANSFER_TO_HOST: u8 = 0x07;
 pub const DRM_VIRTGPU_WAIT: u8 = 0x08;
 pub const DRM_VIRTGPU_GET_CAPS: u8 = 0x09;
+pub const DRM_VIRTGPU_RESOURCE_CREATE_BLOB: u8 = 0x0a;
 pub const DRM_VIRTGPU_MAP: u8 = 0x07;
 pub const DRM_VIRTGPU_EXECBUFFER: u8 = 0x02;
 
@@ -42,6 +43,16 @@ pub const VIRTGPU_EXECBUF_FLAGS: u32 =
 pub const VIRTGPU_EXECBUF_SYNCOBJ_RESET: u32 = 0x01;
 pub const VIRTGPU_EXECBUF_SYNCOBJ_FLAGS: u32 = VIRTGPU_EXECBUF_SYNCOBJ_RESET;
 pub const VIRTGPU_WAIT_NOWAIT: u32 = 0x01;
+pub const VIRTGPU_BLOB_MEM_GUEST: u32 = 0x0001;
+pub const VIRTGPU_BLOB_MEM_HOST3D: u32 = 0x0002;
+pub const VIRTGPU_BLOB_MEM_HOST3D_GUEST: u32 = 0x0003;
+
+pub const VIRTGPU_BLOB_FLAG_USE_MAPPABLE: u32 = 0x0001;
+pub const VIRTGPU_BLOB_FLAG_USE_SHAREABLE: u32 = 0x0002;
+pub const VIRTGPU_BLOB_FLAG_USE_CROSS_DEVICE: u32 = 0x0004;
+pub const VIRTGPU_BLOB_FLAG_USE_MASK: u32 = VIRTGPU_BLOB_FLAG_USE_MAPPABLE
+    | VIRTGPU_BLOB_FLAG_USE_SHAREABLE
+    | VIRTGPU_BLOB_FLAG_USE_CROSS_DEVICE;
 
 pub const VIRTGPU_PARAM_3D_FEATURES: u64 = 1;
 pub const VIRTGPU_PARAM_CAPSET_QUERY_FIX: u64 = 2;
@@ -159,6 +170,20 @@ pub struct VirtioGpuTransferToHost {
 pub struct VirtioGpuWait {
     pub handle: u32,
     pub flags: u32,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod)]
+pub struct VirtioGpuResourceCreateBlob {
+    pub blob_mem: u32,
+    pub blob_flags: u32,
+    pub bo_handle: u32,
+    pub res_handle: u32,
+    pub size: u64,
+    pub pad: u32,
+    pub cmd_size: u32,
+    pub cmd: u64,
+    pub blob_id: u64,
 }
 
 #[repr(C)]
