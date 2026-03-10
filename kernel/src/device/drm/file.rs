@@ -170,6 +170,43 @@ struct DrmSyncobjFdFile {
     syncobj: Arc<DrmSyncObj>,
 }
 
+const VIRTGPU_MAX_CAPSET_ID: u64 = 63;
+const VIRTGPU_MAX_RINGS: u32 = 64;
+const VIRTGPU_DEBUG_NAME_MAX_LEN: usize = 65;
+
+#[derive(Debug)]
+struct VirtioGpuContextState {
+    ctx_id: u32,
+    context_init: u32,
+    context_created: bool,
+    num_rings: u32,
+    rings_initialized: bool,
+    ring_idx_mask: u64,
+    debug_name: [u8; VIRTGPU_DEBUG_NAME_MAX_LEN],
+    debug_name_len: usize,
+    explicit_debug_name: bool,
+}
+
+impl VirtioGpuContextState {
+    const fn new() -> Self {
+        Self {
+            ctx_id: 0,
+            context_init: 0,
+            context_created: false,
+            num_rings: 0,
+            rings_initialized: false,
+            ring_idx_mask: 0,
+            debug_name: [0; VIRTGPU_DEBUG_NAME_MAX_LEN],
+            debug_name_len: 0,
+            explicit_debug_name: false,
+        }
+    }
+
+    fn debug_name_bytes(&self) -> &[u8] {
+        &self.debug_name[..self.debug_name_len]
+    }
+}
+
 impl DrmSyncobjFdFile {
     fn new(syncobj: Arc<DrmSyncObj>) -> Self {
         Self { syncobj }
@@ -266,6 +303,8 @@ pub(super) struct DrmFile {
     next_syncobj_handle: AtomicU32,
     syncobj_table: Mutex<HashMap<u32, Arc<DrmSyncObj>>>,
     syncobj_wait_queue: WaitQueue,
+
+    virtio_gpu_context: Mutex<VirtioGpuContextState>,
 }
 
 impl Pollable for DrmFile {
@@ -295,6 +334,8 @@ impl DrmFile {
             next_syncobj_handle: AtomicU32::new(1),
             syncobj_table: Mutex::new(HashMap::new()),
             syncobj_wait_queue: WaitQueue::new(),
+
+            virtio_gpu_context: Mutex::new(VirtioGpuContextState::new()),
         }
     }
 
@@ -494,7 +535,9 @@ impl DrmFile {
             }
             virtio_gpu_drm::VIRTGPU_PARAM_HOST_VISIBLE => 0,
             virtio_gpu_drm::VIRTGPU_PARAM_CROSS_DEVICE => 0,
-            virtio_gpu_drm::VIRTGPU_PARAM_CONTEXT_INIT => 0,
+            virtio_gpu_drm::VIRTGPU_PARAM_CONTEXT_INIT => {
+                u64::from(virtio_gpu.has_context_init() && virtio_gpu.has_virgl_3d())
+            }
             virtio_gpu_drm::VIRTGPU_PARAM_SUPPORTED_CAPSET_IDS => virtio_gpu
                 .capset_infos()
                 .into_iter()
@@ -505,7 +548,9 @@ impl DrmFile {
                         supported
                     }
                 }),
-            virtio_gpu_drm::VIRTGPU_PARAM_EXPLICIT_DEBUG_NAME => 0,
+            virtio_gpu_drm::VIRTGPU_PARAM_EXPLICIT_DEBUG_NAME => {
+                u64::from(virtio_gpu.has_context_init() && virtio_gpu.has_virgl_3d())
+            }
             _ => {
                 return_errno!(Errno::EINVAL);
             }
@@ -559,6 +604,85 @@ impl DrmFile {
 
     fn virtio_gpu_device(&self) -> Option<Arc<VirtioGpuDevice>> {
         Arc::downcast::<VirtioGpuDevice>(self.device.gpu_device()).ok()
+    }
+
+    fn virtio_gpu_supported_capset_mask(&self, virtio_gpu: &VirtioGpuDevice) -> u64 {
+        virtio_gpu.capset_infos().into_iter().fold(0u64, |supported, capset| {
+            if capset.capset_id < u64::BITS {
+                supported | (1u64 << capset.capset_id)
+            } else {
+                supported
+            }
+        })
+    }
+
+    fn read_user_cstring<const N: usize>(&self, ptr: u64) -> Result<([u8; N], usize)> {
+        if ptr == 0 {
+            return_errno!(Errno::EFAULT);
+        }
+
+        let mut out = [0u8; N];
+        let mut len = 0usize;
+        while len + 1 < N {
+            let byte: u8 = current_userspace!().read_val(ptr as usize + len)?;
+            if byte == 0 {
+                return Ok((out, len));
+            }
+            out[len] = byte;
+            len += 1;
+        }
+
+        let terminator: u8 = current_userspace!().read_val(ptr as usize + len)?;
+        if terminator != 0 {
+            return_errno!(Errno::EINVAL);
+        }
+
+        Ok((out, len))
+    }
+
+    fn ensure_virtio_gpu_context(&self, virtio_gpu: &Arc<VirtioGpuDevice>) -> Result<u32> {
+        let mut state = self.virtio_gpu_context.lock();
+        self.ensure_virtio_gpu_context_locked(virtio_gpu, &mut state)
+    }
+
+    fn ensure_virtio_gpu_context_locked(
+        &self,
+        virtio_gpu: &Arc<VirtioGpuDevice>,
+        state: &mut VirtioGpuContextState,
+    ) -> Result<u32> {
+        if state.context_created {
+            return Ok(state.ctx_id);
+        }
+
+        let ctx_id = if state.ctx_id != 0 {
+            state.ctx_id
+        } else {
+            virtio_gpu.alloc_context_id()
+        };
+
+        virtio_gpu
+            .context_create(ctx_id, state.context_init, state.debug_name_bytes())
+            .map_err(|_| Error::new(Errno::EIO))?;
+
+        state.ctx_id = ctx_id;
+        state.context_created = true;
+        Ok(ctx_id)
+    }
+
+    fn virtio_gpu_ring_idx(&self, requested: bool, ring_idx: u32) -> Result<Option<u8>> {
+        if !requested {
+            return Ok(None);
+        }
+
+        let state = self.virtio_gpu_context.lock();
+        if !state.rings_initialized {
+            return_errno!(Errno::EINVAL);
+        }
+        if ring_idx >= state.num_rings {
+            return_errno!(Errno::EINVAL);
+        }
+
+        Ok(Some(u8::try_from(ring_idx).map_err(|_| Error::new(Errno::EINVAL))?))
     }
 
     fn virtio_gpu_capset_info(
@@ -1529,19 +1653,18 @@ impl FileIo for DrmFile {
                     }
                 }
 
-                let ring_idx = if (user_data.flags & virtio_gpu_drm::VIRTGPU_EXECBUF_RING_IDX) != 0
-                {
-                    Some(u8::try_from(user_data.ring_idx).map_err(|_| Error::new(Errno::EINVAL))?)
-                } else {
-                    None
-                };
+                let ctx_id = self.ensure_virtio_gpu_context(&virtio_gpu)?;
+                let ring_idx = self.virtio_gpu_ring_idx(
+                    (user_data.flags & virtio_gpu_drm::VIRTGPU_EXECBUF_RING_IDX) != 0,
+                    user_data.ring_idx,
+                )?;
 
                 for bo_handle in &bo_handles {
                     self.reset_gem_wait_point(bo_handle);
                 }
 
                 let submit_result = virtio_gpu
-                    .submit_3d(&command, ring_idx)
+                    .submit_3d(&command, ctx_id, ring_idx)
                     .map_err(|_| Error::new(Errno::EIO));
 
                 for bo_handle in &bo_handles {
@@ -1966,6 +2089,8 @@ impl FileIo for DrmFile {
                     {
                         return_errno!(Errno::EINVAL);
                     }
+                } else {
+                    let _ = self.ensure_virtio_gpu_context(&virtio_gpu)?;
                 }
 
                 let size = if user_data.size == 0 {
@@ -2072,12 +2197,19 @@ impl FileIo for DrmFile {
                 }
 
                 if user_data.cmd_size != 0 {
+                    let ctx_id = self.ensure_virtio_gpu_context(&virtio_gpu)?;
                     let mut command = vec![0u8; user_data.cmd_size as usize];
                     current_userspace!().read_bytes(user_data.cmd as usize, &mut command)?;
                     virtio_gpu
-                        .submit_3d(&command, None)
+                        .submit_3d(&command, ctx_id, None)
                         .map_err(|_| Error::new(Errno::EIO))?;
                 }
+
+                let ctx_id = if host3d_blob {
+                    self.ensure_virtio_gpu_context(&virtio_gpu)?
+                } else {
+                    0
+                };
 
                 let backend = memfd_object_create("virtio-gpu-blob", user_data.size)?;
                 let sg = self.virtio_gpu_sg_from_backend(&backend)?;
@@ -2089,7 +2221,7 @@ impl FileIo for DrmFile {
                     user_data.blob_mem,
                     user_data.blob_flags,
                     user_data.blob_id,
-                    0,
+                    ctx_id,
                     guest_blob,
                     host3d_blob,
                 )
@@ -2105,6 +2237,101 @@ impl FileIo for DrmFile {
                 user_data.res_handle = resource_id;
 
                 cmd.write(&user_data)?;
+                Ok(0)
+            }
+            cmd @ DrmIoctlVirtioGpuContextInit => {
+                let user_data: aster_virtio::device::gpu::drm::VirtioGpuContextInit = cmd.read()?;
+
+                let Some(virtio_gpu) = self.virtio_gpu_device() else {
+                    return_errno!(Errno::ENOTTY);
+                };
+
+                if !virtio_gpu.has_context_init() || !virtio_gpu.has_virgl_3d() {
+                    return_errno!(Errno::EINVAL);
+                }
+
+                if user_data.num_params > 4 {
+                    return_errno!(Errno::EINVAL);
+                }
+
+                let params: Vec<aster_virtio::device::gpu::drm::VirtioGpuContextSetParam> =
+                    self.read_user_array(user_data.ctx_set_params, user_data.num_params)?;
+
+                let supported_capset_mask = self.virtio_gpu_supported_capset_mask(&virtio_gpu);
+                let mut state = self.virtio_gpu_context.lock();
+                if state.context_created {
+                    return_errno!(Errno::EEXIST);
+                }
+
+                for param in params {
+                    match param.param {
+                        virtio_gpu_drm::VIRTGPU_CONTEXT_PARAM_CAPSET_ID => {
+                            if param.value > VIRTGPU_MAX_CAPSET_ID {
+                                return_errno!(Errno::EINVAL);
+                            }
+                            if (supported_capset_mask & (1u64 << param.value)) == 0 {
+                                return_errno!(Errno::EINVAL);
+                            }
+                            if (state.context_init
+                                & virtio_gpu_drm::VIRTIO_GPU_CONTEXT_INIT_CAPSET_ID_MASK)
+                                != 0
+                            {
+                                return_errno!(Errno::EINVAL);
+                            }
+
+                            state.context_init |= (param.value as u32)
+                                & virtio_gpu_drm::VIRTIO_GPU_CONTEXT_INIT_CAPSET_ID_MASK;
+                        }
+                        virtio_gpu_drm::VIRTGPU_CONTEXT_PARAM_NUM_RINGS => {
+                            if state.rings_initialized {
+                                return_errno!(Errno::EINVAL);
+                            }
+
+                            let num_rings = u32::try_from(param.value)
+                                .map_err(|_| Error::new(Errno::EINVAL))?;
+                            if num_rings > VIRTGPU_MAX_RINGS {
+                                return_errno!(Errno::EINVAL);
+                            }
+
+                            state.num_rings = num_rings;
+                            state.rings_initialized = true;
+                        }
+                        virtio_gpu_drm::VIRTGPU_CONTEXT_PARAM_POLL_RINGS_MASK => {
+                            if state.ring_idx_mask != 0 {
+                                return_errno!(Errno::EINVAL);
+                            }
+                            state.ring_idx_mask = param.value;
+                        }
+                        virtio_gpu_drm::VIRTGPU_CONTEXT_PARAM_DEBUG_NAME => {
+                            if state.explicit_debug_name {
+                                return_errno!(Errno::EINVAL);
+                            }
+
+                            let (debug_name, debug_name_len) =
+                                self.read_user_cstring::<VIRTGPU_DEBUG_NAME_MAX_LEN>(param.value)?;
+                            state.debug_name = debug_name;
+                            state.debug_name_len = debug_name_len;
+                            state.explicit_debug_name = true;
+                        }
+                        _ => return_errno!(Errno::EINVAL),
+                    }
+                }
+
+                if state.ring_idx_mask != 0 {
+                    let valid_ring_mask = if state.num_rings >= u64::BITS {
+                        u64::MAX
+                    } else if state.num_rings == 0 {
+                        0
+                    } else {
+                        (1u64 << state.num_rings) - 1
+                    };
+
+                    if (state.ring_idx_mask & !valid_ring_mask) != 0 {
+                        return_errno!(Errno::EINVAL);
+                    }
+                }
+
+                let _ = self.ensure_virtio_gpu_context_locked(&virtio_gpu, &mut state)?;
                 Ok(0)
             }
             cmd @ DrmIoctlVirtioGpuMap => {
@@ -2316,5 +2543,18 @@ impl FileIo for DrmFile {
                 }
             }
         })
+    }
+}
+
+impl Drop for DrmFile {
+    fn drop(&mut self) {
+        let Some(virtio_gpu) = self.virtio_gpu_device() else {
+            return;
+        };
+
+        let state = self.virtio_gpu_context.lock();
+        if state.context_created {
+            let _ = virtio_gpu.context_destroy(state.ctx_id);
+        }
     }
 }

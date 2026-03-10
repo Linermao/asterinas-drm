@@ -33,6 +33,8 @@ pub(super) const CMD_GET_CAPSET_INFO: u32 = 0x0108;
 pub(super) const CMD_GET_CAPSET: u32 = 0x0109;
 pub(super) const CMD_GET_EDID: u32 = 0x010a;
 pub(super) const CMD_RESOURCE_CREATE_BLOB: u32 = 0x010c;
+pub(super) const CMD_CTX_CREATE: u32 = 0x0200;
+pub(super) const CMD_CTX_DESTROY: u32 = 0x0201;
 pub(super) const CMD_TRANSFER_TO_HOST_3D: u32 = 0x0205;
 pub(super) const CMD_TRANSFER_FROM_HOST_3D: u32 = 0x0206;
 pub(super) const CMD_SUBMIT_3D: u32 = 0x0207;
@@ -277,6 +279,32 @@ pub struct VirtioGpuResourceCreateBlob {
     pub nr_entries: u32,
     pub blob_id: u64,
     pub size: u64,
+}
+
+#[derive(Debug, Clone, Copy, Pod)]
+#[repr(C)]
+pub struct VirtioGpuCtxCreate {
+    pub hdr: VirtioGpuCtrlHdr,
+    pub nlen: u32,
+    pub context_init: u32,
+    pub debug_name: [u8; 64],
+}
+
+impl Default for VirtioGpuCtxCreate {
+    fn default() -> Self {
+        Self {
+            hdr: VirtioGpuCtrlHdr::default(),
+            nlen: 0,
+            context_init: 0,
+            debug_name: [0; 64],
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, Pod)]
+#[repr(C)]
+pub struct VirtioGpuCtxDestroy {
+    pub hdr: VirtioGpuCtrlHdr,
 }
 
 #[derive(Debug, Clone, Copy, Default, Pod)]
