@@ -1138,6 +1138,20 @@ impl FileIo for DrmFile {
                 cmd.write(&user_data)?;
                 Ok(0)
             }
+            cmd @ DrmIoctlVirtioGpuMap => {
+                let mut user_data: aster_virtio::device::gpu::drm::VirtioGpuMap = cmd.read()?;
+
+                let handle = user_data.handle;
+
+                if let Some(gem_obj) = self.lookup_gem(&handle) {
+                    user_data.addr = self.device.create_offset(gem_obj) as u64;
+                    cmd.write(&user_data)?;
+                } else {
+                    return_errno!(Errno::ENOENT);
+                }
+
+                Ok(0)
+            }
             _ => {
                 let driver = self.device.driver();
                 match driver.handle_command(raw_ioctl.cmd(), raw_ioctl.arg()) {
