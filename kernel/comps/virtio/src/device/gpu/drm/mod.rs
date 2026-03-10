@@ -25,6 +25,7 @@ pub(crate) const DRIVER_DESC: &'static str = "virtio GPU";
 pub(crate) const DRIVER_DATE: &'static str = "2026-01-02";
 
 pub const DRM_VIRTGPU_GETPARAM: u8 = 0x03;
+pub const DRM_VIRTGPU_RESOURCE_CREATE: u8 = 0x04;
 pub const DRM_VIRTGPU_GET_CAPS: u8 = 0x09;
 pub const DRM_VIRTGPU_MAP: u8 = 0x07;
 pub const DRM_VIRTGPU_EXECBUFFER: u8 = 0x02;
@@ -52,6 +53,25 @@ pub const VIRTGPU_PARAM_EXPLICIT_DEBUG_NAME: u64 = 8;
 pub struct VirtioGpuGetParam {
     pub param: u64,
     pub value: u64,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod)]
+pub struct VirtioGpuResourceCreate {
+    pub target: u32,
+    pub format: u32,
+    pub bind: u32,
+    pub width: u32,
+    pub height: u32,
+    pub depth: u32,
+    pub array_size: u32,
+    pub last_level: u32,
+    pub nr_samples: u32,
+    pub flags: u32,
+    pub bo_handle: u32,
+    pub res_handle: u32,
+    pub size: u32,
+    pub stride: u32,
 }
 
 #[repr(C)]

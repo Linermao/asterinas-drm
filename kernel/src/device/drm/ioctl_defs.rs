@@ -1,6 +1,7 @@
 use aster_gpu::drm::ioctl::*;
 use aster_virtio::device::gpu::drm::{
     VirtioGpuExecbuffer, VirtioGpuGetCaps, VirtioGpuGetParam, VirtioGpuMap,
+    VirtioGpuResourceCreate,
     VirtioGpuResourceInfo,
 };
 
@@ -42,6 +43,7 @@ pub(super) type DrmIoctlModeObjectGetProps      = ioc!(DRM_IOCTL_MODE_OBJ_GETPRO
 pub(super) type DrmIoctlModeCursor2             = ioc!(DRM_IOCTL_MODE_CURSOR2,              b'd', 0xbb, InOutData<DrmModeCursor>);
 pub(super) type DrmIoctlVirtioGpuGetParam       = ioc!(DRM_IOCTL_VIRTGPU_GETPARAM,          b'd', 0x43, InOutData<VirtioGpuGetParam>);
 pub(super) type DrmIoctlVirtioGpuExecbuffer     = ioc!(DRM_IOCTL_VIRTGPU_EXECBUFFER,        b'd', 0x42, InOutData<VirtioGpuExecbuffer>);
+pub(super) type DrmIoctlVirtioGpuResourceCreate = ioc!(DRM_IOCTL_VIRTGPU_RESOURCE_CREATE,   b'd', 0x44, InOutData<VirtioGpuResourceCreate>);
 pub(super) type DrmIoctlVirtioGpuGetCaps        = ioc!(DRM_IOCTL_VIRTGPU_GET_CAPS,          b'd', 0x49, InOutData<VirtioGpuGetCaps>);
 pub(super) type DrmIoctlVirtioGpuMap            = ioc!(DRM_IOCTL_VIRTGPU_MAP,               b'd', 0x47, InOutData<VirtioGpuMap>);
 pub(super) type DrmIoctlVirtioGpuResourceInfo   = ioc!(DRM_IOCTL_VIRTGPU_RESOURCE_INFO,    b'd', 0x45, InOutData<VirtioGpuResourceInfo>);
