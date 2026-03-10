@@ -27,6 +27,7 @@ pub(crate) const DRIVER_DATE: &'static str = "2026-01-02";
 pub const DRM_VIRTGPU_GETPARAM: u8 = 0x03;
 pub const DRM_VIRTGPU_RESOURCE_CREATE: u8 = 0x04;
 pub const DRM_VIRTGPU_TRANSFER_FROM_HOST: u8 = 0x06;
+pub const DRM_VIRTGPU_TRANSFER_TO_HOST: u8 = 0x07;
 pub const DRM_VIRTGPU_GET_CAPS: u8 = 0x09;
 pub const DRM_VIRTGPU_MAP: u8 = 0x07;
 pub const DRM_VIRTGPU_EXECBUFFER: u8 = 0x02;
@@ -132,6 +133,17 @@ pub struct VirtioGpu3dBox {
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod)]
 pub struct VirtioGpuTransferFromHost {
+    pub bo_handle: u32,
+    pub box_: VirtioGpu3dBox,
+    pub level: u32,
+    pub offset: u32,
+    pub stride: u32,
+    pub layer_stride: u32,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod)]
+pub struct VirtioGpuTransferToHost {
     pub bo_handle: u32,
     pub box_: VirtioGpu3dBox,
     pub level: u32,

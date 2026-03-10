@@ -16,7 +16,7 @@ use ostd::{
 use ostd::prelude::println;
 use super::{CMD_GET_CAPSET, CMD_GET_CAPSET_INFO, CMD_GET_DISPLAY_INFO, CMD_GET_EDID,
     CMD_RESOURCE_ATTACH_BACKING, CMD_RESOURCE_CREATE_2D, CMD_RESOURCE_UNREF, CMD_RESOURCE_DETACH_BACKING, CMD_RESOURCE_FLUSH,
-    CMD_TRANSFER_FROM_HOST_3D, CMD_TRANSFER_TO_HOST_2D, CMD_SET_SCANOUT, CMD_SUBMIT_3D, DEVICE_NAME, GpuFeatures, QUEUE_CONTROL,
+    CMD_TRANSFER_FROM_HOST_3D, CMD_TRANSFER_TO_HOST_2D, CMD_TRANSFER_TO_HOST_3D, CMD_SET_SCANOUT, CMD_SUBMIT_3D, DEVICE_NAME, GpuFeatures, QUEUE_CONTROL,
     QUEUE_CURSOR, RESP_OK_CAPSET, RESP_OK_CAPSET_INFO, RESP_OK_DISPLAY_INFO, RESP_OK_EDID, RESP_OK_NODATA,
     VirtioGpuConfig, VirtioGpuCtrlHdr, VirtioGpuDisplayOne, VirtioGpuFormat, VirtioGpuGetCapset, VirtioGpuGetCapsetInfo,
     VirtioGpuGetEdid, VirtioGpuMemEntry, VirtioGpuRect, VirtioGpuResourceAttachBacking,
@@ -60,6 +60,9 @@ const CTRL_REQ_STRIDE: usize = {
     }
     if size_of::<VirtioGpuTransferToHost2d>() > max {
         max = size_of::<VirtioGpuTransferToHost2d>();
+    }
+    if size_of::<VirtioGpuTransferHost3d>() > max {
+        max = size_of::<VirtioGpuTransferHost3d>();
     }
     if size_of::<VirtioGpuSetScanout>() > max {
         max = size_of::<VirtioGpuSetScanout>();
@@ -660,6 +663,35 @@ impl VirtioGpuDevice {
         let req = VirtioGpuTransferHost3d {
             hdr: VirtioGpuCtrlHdr {
                 type_: CMD_TRANSFER_FROM_HOST_3D,
+                ..Default::default()
+            },
+            box_,
+            offset,
+            resource_id,
+            level,
+            stride,
+            layer_stride,
+        };
+        let _: VirtioGpuCtrlHdr = self
+            .submit_control_command::<VirtioGpuTransferHost3d, VirtioGpuCtrlHdr>(
+                &req,
+                RESP_OK_NODATA,
+            )?;
+        Ok(())
+    }
+
+    pub fn transfer_to_host_3d(
+        &self,
+        resource_id: u32,
+        box_: super::VirtioGpuBox,
+        level: u32,
+        offset: u64,
+        stride: u32,
+        layer_stride: u32,
+    ) -> Result<(), VirtioGpuCommandError> {
+        let req = VirtioGpuTransferHost3d {
+            hdr: VirtioGpuCtrlHdr {
+                type_: CMD_TRANSFER_TO_HOST_3D,
                 ..Default::default()
             },
             box_,
