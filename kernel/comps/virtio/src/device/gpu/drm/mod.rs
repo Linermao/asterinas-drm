@@ -25,6 +25,7 @@ pub(crate) const DRIVER_DESC: &'static str = "virtio GPU";
 pub(crate) const DRIVER_DATE: &'static str = "2026-01-02";
 
 pub const DRM_VIRTGPU_GETPARAM: u8 = 0x03;
+pub const DRM_VIRTGPU_GET_CAPS: u8 = 0x09;
 
 pub const VIRTGPU_PARAM_3D_FEATURES: u64 = 1;
 pub const VIRTGPU_PARAM_CAPSET_QUERY_FIX: u64 = 2;
@@ -40,6 +41,16 @@ pub const VIRTGPU_PARAM_EXPLICIT_DEBUG_NAME: u64 = 8;
 pub struct VirtioGpuGetParam {
     pub param: u64,
     pub value: u64,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod)]
+pub struct VirtioGpuGetCaps {
+    pub cap_set_id: u32,
+    pub cap_set_ver: u32,
+    pub addr: u64,
+    pub size: u32,
+    pub pad: u32,
 }
 
 pub mod gem;
