@@ -5,6 +5,7 @@ use aster_virtio::device::gpu::drm::{
     VirtioGpuTransferFromHost,
     VirtioGpuTransferToHost,
     VirtioGpuResourceInfo,
+    VirtioGpuWait,
 };
 
 use crate::util::ioctl::{InData, InOutData, NoData, ioc};
@@ -48,6 +49,7 @@ pub(super) type DrmIoctlVirtioGpuExecbuffer     = ioc!(DRM_IOCTL_VIRTGPU_EXECBUF
 pub(super) type DrmIoctlVirtioGpuResourceCreate = ioc!(DRM_IOCTL_VIRTGPU_RESOURCE_CREATE,   b'd', 0x44, InOutData<VirtioGpuResourceCreate>);
 pub(super) type DrmIoctlVirtioGpuTransferFromHost = ioc!(DRM_IOCTL_VIRTGPU_TRANSFER_FROM_HOST, b'd', 0x46, InOutData<VirtioGpuTransferFromHost>);
 pub(super) type DrmIoctlVirtioGpuTransferToHost = ioc!(DRM_IOCTL_VIRTGPU_TRANSFER_TO_HOST, b'd', 0x47, InOutData<VirtioGpuTransferToHost>);
+pub(super) type DrmIoctlVirtioGpuWait           = ioc!(DRM_IOCTL_VIRTGPU_WAIT, b'd', 0x48, InOutData<VirtioGpuWait>);
 pub(super) type DrmIoctlVirtioGpuGetCaps        = ioc!(DRM_IOCTL_VIRTGPU_GET_CAPS,          b'd', 0x49, InOutData<VirtioGpuGetCaps>);
 pub(super) type DrmIoctlVirtioGpuMap            = ioc!(DRM_IOCTL_VIRTGPU_MAP,               b'd', 0x41, InOutData<VirtioGpuMap>);
 pub(super) type DrmIoctlVirtioGpuResourceInfo   = ioc!(DRM_IOCTL_VIRTGPU_RESOURCE_INFO,    b'd', 0x45, InOutData<VirtioGpuResourceInfo>);

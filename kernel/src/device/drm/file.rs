@@ -260,6 +260,8 @@ pub(super) struct DrmFile {
     /// through this file.
     next_handle: AtomicU32,
     gem_table: Mutex<HashMap<u32, Arc<DrmGemObject>>>,
+    gem_wait_table: Mutex<HashMap<u32, Arc<DrmSyncPoint>>>,
+    gem_wait_queue: WaitQueue,
 
     next_syncobj_handle: AtomicU32,
     syncobj_table: Mutex<HashMap<u32, Arc<DrmSyncObj>>>,
@@ -287,6 +289,8 @@ impl DrmFile {
 
             next_handle: AtomicU32::new(1),
             gem_table: Mutex::new(HashMap::new()),
+            gem_wait_table: Mutex::new(HashMap::new()),
+            gem_wait_queue: WaitQueue::new(),
 
             next_syncobj_handle: AtomicU32::new(1),
             syncobj_table: Mutex::new(HashMap::new()),
@@ -300,10 +304,30 @@ impl DrmFile {
 
     fn insert_gem(&self, handle: u32, gem_object: Arc<DrmGemObject>) {
         self.gem_table.lock().insert(handle, gem_object);
+        self.gem_wait_table
+            .lock()
+            .insert(handle, Arc::new(DrmSyncPoint::new(true)));
     }
 
     fn lookup_gem(&self, handle: &u32) -> Option<Arc<DrmGemObject>> {
         self.gem_table.lock().get(handle).cloned()
+    }
+
+    fn lookup_gem_wait_point(&self, handle: &u32) -> Option<Arc<DrmSyncPoint>> {
+        self.gem_wait_table.lock().get(handle).cloned()
+    }
+
+    fn reset_gem_wait_point(&self, handle: &u32) {
+        if let Some(point) = self.lookup_gem_wait_point(handle) {
+            point.reset();
+        }
+    }
+
+    fn signal_gem_wait_point(&self, handle: &u32) {
+        if let Some(point) = self.lookup_gem_wait_point(handle) {
+            point.signal();
+            self.gem_wait_queue.wake_all();
+        }
     }
 
     fn next_syncobj_handle(&self) -> u32 {
@@ -360,6 +384,22 @@ impl DrmFile {
 
         let now_ns = MonotonicClock::get().read_time().as_nanos() as u64;
         Some(Duration::from_nanos(timeout_nsec.saturating_sub(now_ns)))
+    }
+
+    fn gem_wait_common(&self, point: &Arc<DrmSyncPoint>, timeout: Option<Duration>) -> Result<bool> {
+        if point.is_signaled() {
+            return Ok(true);
+        }
+
+        let wait_res = self
+            .gem_wait_queue
+            .wait_until_or_timeout(|| point.is_signaled().then_some(()), timeout.as_ref());
+
+        match wait_res {
+            Ok(()) => Ok(true),
+            Err(err) if err.error() == Errno::ETIME => Ok(false),
+            Err(err) => Err(err),
+        }
     }
 
     fn syncobj_wait_common(
@@ -538,6 +578,7 @@ impl DrmFile {
     }
 
     fn remove_gem(&self, handle: &u32) -> Option<Arc<DrmGemObject>> {
+        self.gem_wait_table.lock().remove(handle);
         self.gem_table.lock().remove(handle)
     }
 }
@@ -1443,7 +1484,7 @@ impl FileIo for DrmFile {
 
                 let bo_handles: Vec<u32> =
                     self.read_user_array(user_data.bo_handles, user_data.num_bo_handles)?;
-                for bo_handle in bo_handles {
+                for bo_handle in &bo_handles {
                     if self.lookup_gem(&bo_handle).is_none() {
                         return_errno!(Errno::ENOENT);
                     }
@@ -1495,9 +1536,19 @@ impl FileIo for DrmFile {
                     None
                 };
 
-                let fence_id = virtio_gpu
+                for bo_handle in &bo_handles {
+                    self.reset_gem_wait_point(bo_handle);
+                }
+
+                let submit_result = virtio_gpu
                     .submit_3d(&command, ring_idx)
-                    .map_err(|_| Error::new(Errno::EIO))?;
+                    .map_err(|_| Error::new(Errno::EIO));
+
+                for bo_handle in &bo_handles {
+                    self.signal_gem_wait_point(bo_handle);
+                }
+
+                let fence_id = submit_result?;
 
                 for sync in &out_syncobjs {
                     let syncobj = self
@@ -2043,6 +2094,8 @@ impl FileIo for DrmFile {
                 let resource_id =
                     virtio_gpu_obj_resource_id(&gem_obj).map_err(|_| Error::new(Errno::EINVAL))?;
 
+                self.reset_gem_wait_point(&user_data.bo_handle);
+
                 let transfer_box = aster_virtio::device::gpu::VirtioGpuBox {
                     x: user_data.box_.x,
                     y: user_data.box_.y,
@@ -2052,7 +2105,7 @@ impl FileIo for DrmFile {
                     d: user_data.box_.d,
                 };
 
-                virtio_gpu
+                let transfer_result = virtio_gpu
                     .transfer_from_host_3d(
                         resource_id,
                         transfer_box,
@@ -2061,7 +2114,11 @@ impl FileIo for DrmFile {
                         user_data.stride,
                         user_data.layer_stride,
                     )
-                    .map_err(|_| Error::new(Errno::EIO))?;
+                    .map_err(|_| Error::new(Errno::EIO));
+
+                self.signal_gem_wait_point(&user_data.bo_handle);
+
+                transfer_result?;
 
                 cmd.write(&user_data)?;
                 Ok(0)
@@ -2086,6 +2143,8 @@ impl FileIo for DrmFile {
                 let resource_id =
                     virtio_gpu_obj_resource_id(&gem_obj).map_err(|_| Error::new(Errno::EINVAL))?;
 
+                self.reset_gem_wait_point(&user_data.bo_handle);
+
                 if !virtio_gpu.has_virgl_3d() {
                     let rect = aster_virtio::device::gpu::VirtioGpuRect {
                         x: user_data.box_.x,
@@ -2094,11 +2153,14 @@ impl FileIo for DrmFile {
                         height: user_data.box_.h,
                     };
 
-                    virtio_gpu
+                    let transfer_result = virtio_gpu
                         .transfer_to_host_2d(resource_id, rect, user_data.offset as u64)
-                        .map_err(|_| Error::new(Errno::EIO))?;
+                        .map_err(|_| Error::new(Errno::EIO));
+                    self.signal_gem_wait_point(&user_data.bo_handle);
+                    transfer_result?;
                 } else {
                     if !host3d_blob && (user_data.stride != 0 || user_data.layer_stride != 0) {
+                        self.signal_gem_wait_point(&user_data.bo_handle);
                         return_errno!(Errno::EINVAL);
                     }
 
@@ -2111,7 +2173,7 @@ impl FileIo for DrmFile {
                         d: user_data.box_.d,
                     };
 
-                    virtio_gpu
+                    let transfer_result = virtio_gpu
                         .transfer_to_host_3d(
                             resource_id,
                             transfer_box,
@@ -2120,7 +2182,36 @@ impl FileIo for DrmFile {
                             user_data.stride,
                             user_data.layer_stride,
                         )
-                        .map_err(|_| Error::new(Errno::EIO))?;
+                        .map_err(|_| Error::new(Errno::EIO));
+                    self.signal_gem_wait_point(&user_data.bo_handle);
+                    transfer_result?;
+                }
+
+                cmd.write(&user_data)?;
+                Ok(0)
+            }
+            cmd @ DrmIoctlVirtioGpuWait => {
+                let user_data: aster_virtio::device::gpu::drm::VirtioGpuWait = cmd.read()?;
+
+                let Some(_virtio_gpu) = self.virtio_gpu_device() else {
+                    return_errno!(Errno::ENOTTY);
+                };
+
+                let _gem_obj = self
+                    .lookup_gem(&user_data.handle)
+                    .ok_or_else(|| Error::new(Errno::ENOENT))?;
+                let point = self
+                    .lookup_gem_wait_point(&user_data.handle)
+                    .ok_or_else(|| Error::new(Errno::ENOENT))?;
+
+                let signaled = if (user_data.flags & virtio_gpu_drm::VIRTGPU_WAIT_NOWAIT) != 0 {
+                    point.is_signaled()
+                } else {
+                    self.gem_wait_common(&point, Some(Duration::from_secs(15)))?
+                };
+
+                if !signaled {
+                    return_errno!(Errno::EBUSY);
                 }
 
                 cmd.write(&user_data)?;
