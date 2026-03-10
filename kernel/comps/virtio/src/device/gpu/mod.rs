@@ -32,6 +32,7 @@ pub(super) const CMD_RESOURCE_DETACH_BACKING: u32 = 0x0107;
 pub(super) const CMD_GET_CAPSET_INFO: u32 = 0x0108;
 pub(super) const CMD_GET_CAPSET: u32 = 0x0109;
 pub(super) const CMD_GET_EDID: u32 = 0x010a;
+pub(super) const CMD_SUBMIT_3D: u32 = 0x0207;
 
 bitflags! {
     /// VirtIO GPU features defined by the specification.
@@ -247,4 +248,12 @@ pub struct VirtioGpuSetScanout {
     pub rect: VirtioGpuRect,
     pub scanout_id: u32,
     pub resource_id: u32,
+}
+
+#[derive(Debug, Clone, Copy, Default, Pod)]
+#[repr(C)]
+pub struct VirtioGpuCmdSubmit {
+    pub hdr: VirtioGpuCtrlHdr,
+    pub size: u32,
+    pub padding: u32,
 }

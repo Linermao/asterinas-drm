@@ -27,6 +27,16 @@ pub(crate) const DRIVER_DATE: &'static str = "2026-01-02";
 pub const DRM_VIRTGPU_GETPARAM: u8 = 0x03;
 pub const DRM_VIRTGPU_GET_CAPS: u8 = 0x09;
 pub const DRM_VIRTGPU_MAP: u8 = 0x07;
+pub const DRM_VIRTGPU_EXECBUFFER: u8 = 0x02;
+
+pub const VIRTGPU_EXECBUF_FENCE_FD_IN: u32 = 0x01;
+pub const VIRTGPU_EXECBUF_FENCE_FD_OUT: u32 = 0x02;
+pub const VIRTGPU_EXECBUF_RING_IDX: u32 = 0x04;
+pub const VIRTGPU_EXECBUF_FLAGS: u32 =
+    VIRTGPU_EXECBUF_FENCE_FD_IN | VIRTGPU_EXECBUF_FENCE_FD_OUT | VIRTGPU_EXECBUF_RING_IDX;
+
+pub const VIRTGPU_EXECBUF_SYNCOBJ_RESET: u32 = 0x01;
+pub const VIRTGPU_EXECBUF_SYNCOBJ_FLAGS: u32 = VIRTGPU_EXECBUF_SYNCOBJ_RESET;
 
 pub const VIRTGPU_PARAM_3D_FEATURES: u64 = 1;
 pub const VIRTGPU_PARAM_CAPSET_QUERY_FIX: u64 = 2;
@@ -60,6 +70,31 @@ pub struct VirtioGpuMap {
     pub handle: u32,
     pub pad: u32,
     pub addr: u64,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod)]
+pub struct VirtioGpuExecbufferSyncobj {
+    pub handle: u32,
+    pub flags: u32,
+    pub point: u64,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod)]
+pub struct VirtioGpuExecbuffer {
+    pub flags: u32,
+    pub size: u32,
+    pub command: u64,
+    pub bo_handles: u64,
+    pub num_bo_handles: u32,
+    pub fence_fd: i32,
+    pub ring_idx: u32,
+    pub syncobj_stride: u32,
+    pub num_in_syncobjs: u32,
+    pub num_out_syncobjs: u32,
+    pub in_syncobjs: u64,
+    pub out_syncobjs: u64,
 }
 
 #[repr(C)]
