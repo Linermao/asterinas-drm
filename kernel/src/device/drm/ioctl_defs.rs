@@ -1,5 +1,5 @@
 use aster_gpu::drm::ioctl::*;
-use aster_virtio::device::gpu::drm::{VirtioGpuGetCaps, VirtioGpuGetParam};
+use aster_virtio::device::gpu::drm::{VirtioGpuGetCaps, VirtioGpuGetParam, VirtioGpuResourceInfo};
 use aster_virtio::device::gpu::drm::VirtioGpuMap;
 
 use crate::util::ioctl::{InData, InOutData, NoData, ioc};
@@ -41,3 +41,4 @@ pub(super) type DrmIoctlModeCursor2             = ioc!(DRM_IOCTL_MODE_CURSOR2,  
 pub(super) type DrmIoctlVirtioGpuGetParam       = ioc!(DRM_IOCTL_VIRTGPU_GETPARAM,          b'd', 0x43, InOutData<VirtioGpuGetParam>);
 pub(super) type DrmIoctlVirtioGpuGetCaps        = ioc!(DRM_IOCTL_VIRTGPU_GET_CAPS,          b'd', 0x49, InOutData<VirtioGpuGetCaps>);
 pub(super) type DrmIoctlVirtioGpuMap            = ioc!(DRM_IOCTL_VIRTGPU_MAP,               b'd', 0x47, InOutData<VirtioGpuMap>);
+pub(super) type DrmIoctlVirtioGpuResourceInfo   = ioc!(DRM_IOCTL_VIRTGPU_RESOURCE_INFO,    b'd', 0x45, InOutData<VirtioGpuResourceInfo>);

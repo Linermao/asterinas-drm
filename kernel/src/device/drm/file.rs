@@ -16,7 +16,7 @@ use ostd::mm::{VmIo, io_util::HasVmReaderWriter, HasPaddr, HasSize};
 use crate::vm::vmo::{CommitFlags};
 use aster_virtio::device::gpu::drm::gem::{
     VirtioGpuSgEntry, VirtioGpuSgTable, virtio_gpu_mode_dumb_create_with_sg,
-    virtio_gpu_object_unref,
+    virtio_gpu_object_unref, virtio_gpu_resource_info_by_hw_res,
 };
 
 use crate::{
@@ -1148,6 +1148,28 @@ impl FileIo for DrmFile {
                     cmd.write(&user_data)?;
                 } else {
                     return_errno!(Errno::ENOENT);
+                }
+
+                Ok(0)
+            }
+            cmd @ DrmIoctlVirtioGpuResourceInfo => {
+                let mut user_data: aster_virtio::device::gpu::drm::VirtioGpuResourceInfo = cmd.read()?;
+
+                // The UAPI exposes resource_id; validate node is virtio-backed
+                let Some(virtio_gpu) = self.virtio_gpu_device() else {
+                    return_errno!(Errno::ENOTTY);
+                };
+
+                // Look up resource metadata by host resource id
+                match virtio_gpu_resource_info_by_hw_res(user_data.resource_id) {
+                    Ok((width, height, pitch, size)) => {
+                        user_data.width = width;
+                        user_data.height = height;
+                        user_data.pitch = pitch;
+                        user_data.size = size;
+                        cmd.write(&user_data)?;
+                    }
+                    Err(_) => return_errno!(Errno::EINVAL),
                 }
 
                 Ok(0)

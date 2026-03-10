@@ -62,6 +62,16 @@ pub struct VirtioGpuMap {
     pub addr: u64,
 }
 
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod)]
+pub struct VirtioGpuResourceInfo {
+    pub resource_id: u32,
+    pub width: u32,
+    pub height: u32,
+    pub pitch: u32,
+    pub size: u64,
+}
+
 pub mod gem;
 mod output;
 

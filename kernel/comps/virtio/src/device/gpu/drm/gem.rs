@@ -171,6 +171,17 @@ pub fn virtio_gpu_object_create_with_backend(
     Ok(gem_object)
 }
 
+/// Return metadata for a virtio-gpu resource identified by the host resource id.
+pub fn virtio_gpu_resource_info_by_hw_res(hw_res: u32) -> Result<(u32, u32, u32, u64), DrmError> {
+    let objs = objects_map().lock();
+    let obj = objs
+        .values()
+        .find(|o| o.hw_res_handle == hw_res)
+        .ok_or(DrmError::Invalid)?;
+
+    Ok((obj.width, obj.height, obj.pitch, obj.size))
+}
+
 /// Attach backing pages to an existing virtio-gpu resource.
 ///
 /// The caller (usually file.rs) is responsible for flushing caches and
