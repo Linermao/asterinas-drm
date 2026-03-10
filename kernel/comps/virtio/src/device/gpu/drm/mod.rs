@@ -28,6 +28,7 @@ pub const DRM_VIRTGPU_GETPARAM: u8 = 0x03;
 pub const DRM_VIRTGPU_RESOURCE_CREATE: u8 = 0x04;
 pub const DRM_VIRTGPU_TRANSFER_FROM_HOST: u8 = 0x06;
 pub const DRM_VIRTGPU_TRANSFER_TO_HOST: u8 = 0x07;
+pub const DRM_VIRTGPU_WAIT: u8 = 0x08;
 pub const DRM_VIRTGPU_GET_CAPS: u8 = 0x09;
 pub const DRM_VIRTGPU_MAP: u8 = 0x07;
 pub const DRM_VIRTGPU_EXECBUFFER: u8 = 0x02;
@@ -40,6 +41,7 @@ pub const VIRTGPU_EXECBUF_FLAGS: u32 =
 
 pub const VIRTGPU_EXECBUF_SYNCOBJ_RESET: u32 = 0x01;
 pub const VIRTGPU_EXECBUF_SYNCOBJ_FLAGS: u32 = VIRTGPU_EXECBUF_SYNCOBJ_RESET;
+pub const VIRTGPU_WAIT_NOWAIT: u32 = 0x01;
 
 pub const VIRTGPU_PARAM_3D_FEATURES: u64 = 1;
 pub const VIRTGPU_PARAM_CAPSET_QUERY_FIX: u64 = 2;
@@ -150,6 +152,13 @@ pub struct VirtioGpuTransferToHost {
     pub offset: u32,
     pub stride: u32,
     pub layer_stride: u32,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod)]
+pub struct VirtioGpuWait {
+    pub handle: u32,
+    pub flags: u32,
 }
 
 #[repr(C)]
