@@ -32,6 +32,7 @@ pub(super) const CMD_RESOURCE_DETACH_BACKING: u32 = 0x0107;
 pub(super) const CMD_GET_CAPSET_INFO: u32 = 0x0108;
 pub(super) const CMD_GET_CAPSET: u32 = 0x0109;
 pub(super) const CMD_GET_EDID: u32 = 0x010a;
+pub(super) const CMD_RESOURCE_CREATE_BLOB: u32 = 0x010c;
 pub(super) const CMD_TRANSFER_TO_HOST_3D: u32 = 0x0205;
 pub(super) const CMD_TRANSFER_FROM_HOST_3D: u32 = 0x0206;
 pub(super) const CMD_SUBMIT_3D: u32 = 0x0207;
@@ -264,6 +265,18 @@ pub struct VirtioGpuTransferHost3d {
     pub level: u32,
     pub stride: u32,
     pub layer_stride: u32,
+}
+
+#[derive(Debug, Clone, Copy, Default, Pod)]
+#[repr(C)]
+pub struct VirtioGpuResourceCreateBlob {
+    pub hdr: VirtioGpuCtrlHdr,
+    pub resource_id: u32,
+    pub blob_mem: u32,
+    pub blob_flags: u32,
+    pub nr_entries: u32,
+    pub blob_id: u64,
+    pub size: u64,
 }
 
 #[derive(Debug, Clone, Copy, Default, Pod)]
