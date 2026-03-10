@@ -14,12 +14,15 @@ use ostd::{
     sync::SpinLock,
 };
 use ostd::prelude::println;
-use super::{CMD_GET_CAPSET, CMD_GET_CAPSET_INFO, CMD_GET_DISPLAY_INFO, CMD_GET_EDID,
-    CMD_RESOURCE_ATTACH_BACKING, CMD_RESOURCE_CREATE_2D, CMD_RESOURCE_CREATE_BLOB, CMD_RESOURCE_UNREF, CMD_RESOURCE_DETACH_BACKING, CMD_RESOURCE_FLUSH,
-    CMD_TRANSFER_FROM_HOST_3D, CMD_TRANSFER_TO_HOST_2D, CMD_TRANSFER_TO_HOST_3D, CMD_SET_SCANOUT, CMD_SUBMIT_3D, DEVICE_NAME, GpuFeatures, QUEUE_CONTROL,
+use super::{CMD_CTX_CREATE, CMD_CTX_DESTROY, CMD_GET_CAPSET, CMD_GET_CAPSET_INFO,
+    CMD_GET_DISPLAY_INFO, CMD_GET_EDID, CMD_RESOURCE_ATTACH_BACKING,
+    CMD_RESOURCE_CREATE_2D, CMD_RESOURCE_CREATE_BLOB, CMD_RESOURCE_UNREF,
+    CMD_RESOURCE_DETACH_BACKING, CMD_RESOURCE_FLUSH, CMD_TRANSFER_FROM_HOST_3D,
+    CMD_TRANSFER_TO_HOST_2D, CMD_TRANSFER_TO_HOST_3D, CMD_SET_SCANOUT, CMD_SUBMIT_3D,
+    DEVICE_NAME, GpuFeatures, QUEUE_CONTROL,
     QUEUE_CURSOR, RESP_OK_CAPSET, RESP_OK_CAPSET_INFO, RESP_OK_DISPLAY_INFO, RESP_OK_EDID, RESP_OK_NODATA,
     VirtioGpuConfig, VirtioGpuCtrlHdr, VirtioGpuDisplayOne, VirtioGpuFormat, VirtioGpuGetCapset, VirtioGpuGetCapsetInfo,
-    VirtioGpuGetEdid, VirtioGpuMemEntry, VirtioGpuRect, VirtioGpuResourceAttachBacking,
+    VirtioGpuCtxCreate, VirtioGpuCtxDestroy, VirtioGpuGetEdid, VirtioGpuMemEntry, VirtioGpuRect, VirtioGpuResourceAttachBacking,
     VirtioGpuResourceUnref, VirtioGpuResourceDetachBacking,
     VirtioGpuResourceCreate2d, VirtioGpuResourceCreateBlob, VirtioGpuRespCapsetInfo, VirtioGpuRespDisplayInfo,
     VirtioGpuRespEdid, VirtioGpuResourceFlush, VirtioGpuTransferHost3d, VirtioGpuTransferToHost2d, VirtioGpuSetScanout, VirtioGpuCmdSubmit,
@@ -84,6 +87,7 @@ bitflags! {
         const INDIRECT_DESC = 1 << 2;
         const RESOURCE_ASSIGN_UUID = 1 << 3;
         const RESOURCE_BLOB = 1 << 4;
+        const CONTEXT_INIT = 1 << 5;
     }
 }
 
@@ -97,6 +101,7 @@ pub struct VirtioGpuDevice {
     ctrl_responses: Arc<DmaStream>,
     id_allocator: SyncIdAlloc,
     next_resource_id: AtomicU32,
+    next_context_id: AtomicU32,
     next_fence_id: AtomicU64,
     caps: VirtioGpuCaps,
     num_scanouts: SpinLock<u32>,
@@ -112,7 +117,8 @@ impl VirtioGpuDevice {
         let supported_features = GpuFeatures::VIRGL
             | GpuFeatures::EDID
             | GpuFeatures::RESOURCE_UUID
-            | GpuFeatures::RESOURCE_BLOB;
+            | GpuFeatures::RESOURCE_BLOB
+            | GpuFeatures::CONTEXT_INIT;
         (GpuFeatures::from_bits_truncate(device_features) & supported_features).bits()
     }
 
@@ -157,6 +163,9 @@ impl VirtioGpuDevice {
         if gpu_features.contains(GpuFeatures::RESOURCE_BLOB) {
             caps.insert(VirtioGpuCaps::RESOURCE_BLOB);
         }
+        if gpu_features.contains(GpuFeatures::CONTEXT_INIT) {
+            caps.insert(VirtioGpuCaps::CONTEXT_INIT);
+        }
 
         let config_manager = VirtioGpuConfig::new_manager(transport.as_ref());
         let device = Arc::new(VirtioGpuDevice {
@@ -168,6 +177,7 @@ impl VirtioGpuDevice {
             ctrl_responses,
             id_allocator: SyncIdAlloc::with_capacity(CTRL_QUEUE_SIZE as usize),
             next_resource_id: AtomicU32::new(1),
+            next_context_id: AtomicU32::new(1),
             next_fence_id: AtomicU64::new(1),
             caps,
             num_scanouts: SpinLock::new(0),
@@ -212,12 +222,13 @@ impl VirtioGpuDevice {
             config.num_scanouts, config.num_capsets
         );
         info!(
-            "virtio-gpu features: virgl_3d={}, edid={}, indirect_desc={}, resource_uuid={}, resource_blob={}",
+            "virtio-gpu features: virgl_3d={}, edid={}, indirect_desc={}, resource_uuid={}, resource_blob={}, context_init={}",
             device.has_virgl_3d(),
             device.has_edid(),
             device.has_indirect(),
             device.has_resource_assign_uuid(),
-            device.has_resource_blob()
+            device.has_resource_blob(),
+            device.has_context_init()
         );
         *device.num_scanouts.lock() = config.num_scanouts;
         *device.num_capsets.lock() = config.num_capsets;
@@ -311,6 +322,51 @@ impl VirtioGpuDevice {
 
     pub fn alloc_resource_id(&self) -> u32 {
         self.next_resource_id.fetch_add(1, Ordering::Relaxed)
+    }
+
+    pub fn alloc_context_id(&self) -> u32 {
+        self.next_context_id.fetch_add(1, Ordering::Relaxed)
+    }
+
+    pub fn context_create(
+        &self,
+        context_id: u32,
+        context_init: u32,
+        debug_name: &[u8],
+    ) -> Result<(), VirtioGpuCommandError> {
+        if debug_name.len() > 64 {
+            return Err(VirtioGpuCommandError::InvalidParameter);
+        }
+
+        let mut req = VirtioGpuCtxCreate {
+            hdr: VirtioGpuCtrlHdr {
+                type_: CMD_CTX_CREATE,
+                ctx_id: context_id,
+                ..Default::default()
+            },
+            nlen: debug_name.len() as u32,
+            context_init,
+            debug_name: [0; 64],
+        };
+        req.debug_name[..debug_name.len()].copy_from_slice(debug_name);
+
+        let _: VirtioGpuCtrlHdr =
+            self.submit_control_command::<VirtioGpuCtxCreate, VirtioGpuCtrlHdr>(&req, RESP_OK_NODATA)?;
+        Ok(())
+    }
+
+    pub fn context_destroy(&self, context_id: u32) -> Result<(), VirtioGpuCommandError> {
+        let req = VirtioGpuCtxDestroy {
+            hdr: VirtioGpuCtrlHdr {
+                type_: CMD_CTX_DESTROY,
+                ctx_id: context_id,
+                ..Default::default()
+            },
+        };
+
+        let _: VirtioGpuCtrlHdr =
+            self.submit_control_command::<VirtioGpuCtxDestroy, VirtioGpuCtrlHdr>(&req, RESP_OK_NODATA)?;
+        Ok(())
     }
 
     pub fn get_display_info(&self) -> Result<VirtioGpuRespDisplayInfo, VirtioGpuCommandError> {
@@ -826,11 +882,7 @@ impl VirtioGpuDevice {
         Ok(())
     }
 
-    pub fn submit_3d(
-        &self,
-        command: &[u8],
-        ring_idx: Option<u8>,
-    ) -> Result<u64, VirtioGpuCommandError> {
+    pub fn submit_3d(&self, command: &[u8], ctx_id: u32, ring_idx: Option<u8>) -> Result<u64, VirtioGpuCommandError> {
         if command.is_empty() {
             return Err(VirtioGpuCommandError::InvalidParameter);
         }
@@ -838,6 +890,7 @@ impl VirtioGpuDevice {
         let size = u32::try_from(command.len()).map_err(|_| VirtioGpuCommandError::InvalidParameter)?;
         let mut hdr = VirtioGpuCtrlHdr {
             type_: CMD_SUBMIT_3D,
+            ctx_id,
             ..Default::default()
         };
         if let Some(idx) = ring_idx {
@@ -940,6 +993,10 @@ impl VirtioGpuDevice {
 
     pub fn has_resource_blob(&self) -> bool {
         self.caps.contains(VirtioGpuCaps::RESOURCE_BLOB)
+    }
+
+    pub fn has_context_init(&self) -> bool {
+        self.caps.contains(VirtioGpuCaps::CONTEXT_INIT)
     }
 
     pub fn display_infos(&self) -> Vec<VirtioGpuDisplayOne> {

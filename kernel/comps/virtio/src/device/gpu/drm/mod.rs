@@ -26,12 +26,14 @@ pub(crate) const DRIVER_DATE: &'static str = "2026-01-02";
 
 pub const DRM_VIRTGPU_GETPARAM: u8 = 0x03;
 pub const DRM_VIRTGPU_RESOURCE_CREATE: u8 = 0x04;
+pub const DRM_VIRTGPU_RESOURCE_INFO: u8 = 0x05;
 pub const DRM_VIRTGPU_TRANSFER_FROM_HOST: u8 = 0x06;
 pub const DRM_VIRTGPU_TRANSFER_TO_HOST: u8 = 0x07;
 pub const DRM_VIRTGPU_WAIT: u8 = 0x08;
 pub const DRM_VIRTGPU_GET_CAPS: u8 = 0x09;
 pub const DRM_VIRTGPU_RESOURCE_CREATE_BLOB: u8 = 0x0a;
-pub const DRM_VIRTGPU_MAP: u8 = 0x07;
+pub const DRM_VIRTGPU_CONTEXT_INIT: u8 = 0x0b;
+pub const DRM_VIRTGPU_MAP: u8 = 0x01;
 pub const DRM_VIRTGPU_EXECBUFFER: u8 = 0x02;
 
 pub const VIRTGPU_EXECBUF_FENCE_FD_IN: u32 = 0x01;
@@ -62,6 +64,13 @@ pub const VIRTGPU_PARAM_CROSS_DEVICE: u64 = 5;
 pub const VIRTGPU_PARAM_CONTEXT_INIT: u64 = 6;
 pub const VIRTGPU_PARAM_SUPPORTED_CAPSET_IDS: u64 = 7;
 pub const VIRTGPU_PARAM_EXPLICIT_DEBUG_NAME: u64 = 8;
+
+pub const VIRTGPU_CONTEXT_PARAM_CAPSET_ID: u64 = 0x0001;
+pub const VIRTGPU_CONTEXT_PARAM_NUM_RINGS: u64 = 0x0002;
+pub const VIRTGPU_CONTEXT_PARAM_POLL_RINGS_MASK: u64 = 0x0003;
+pub const VIRTGPU_CONTEXT_PARAM_DEBUG_NAME: u64 = 0x0004;
+
+pub const VIRTIO_GPU_CONTEXT_INIT_CAPSET_ID_MASK: u32 = 0x000000ff;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod)]
@@ -184,6 +193,21 @@ pub struct VirtioGpuResourceCreateBlob {
     pub cmd_size: u32,
     pub cmd: u64,
     pub blob_id: u64,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod)]
+pub struct VirtioGpuContextSetParam {
+    pub param: u64,
+    pub value: u64,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod)]
+pub struct VirtioGpuContextInit {
+    pub num_params: u32,
+    pub pad: u32,
+    pub ctx_set_params: u64,
 }
 
 #[repr(C)]
