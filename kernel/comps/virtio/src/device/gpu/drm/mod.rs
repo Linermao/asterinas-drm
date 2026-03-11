@@ -111,9 +111,9 @@ pub struct VirtioGpuGetCaps {
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod)]
 pub struct VirtioGpuMap {
+    pub offset: u64,
     pub handle: u32,
     pub pad: u32,
-    pub addr: u64,
 }
 
 #[repr(C)]
