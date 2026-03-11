@@ -18,8 +18,8 @@ use ostd::Pod;
 use crate::vm::vmo::{CommitFlags};
 use aster_virtio::device::gpu::drm::gem::{
     VirtioGpuObjectParams, VirtioGpuSgEntry, VirtioGpuSgTable, virtio_gpu_blob_object_create, virtio_gpu_mode_dumb_create_with_sg,
-    virtio_gpu_blob_state_by_gem, virtio_gpu_create_hdr_by_gem, virtio_gpu_obj_resource_id, virtio_gpu_object_create,
-    virtio_gpu_object_unref, virtio_gpu_resource_info_by_hw_res,
+    virtio_gpu_blob_mem_by_gem, virtio_gpu_blob_state_by_gem, virtio_gpu_create_hdr_by_gem,
+    virtio_gpu_obj_resource_id, virtio_gpu_object_create, virtio_gpu_object_unref,
 };
 
 use crate::{
@@ -2403,22 +2403,28 @@ impl FileIo for DrmFile {
             cmd @ DrmIoctlVirtioGpuResourceInfo => {
                 let mut user_data: aster_virtio::device::gpu::drm::VirtioGpuResourceInfo = cmd.read()?;
 
-                // The UAPI exposes resource_id; validate node is virtio-backed
                 let Some(virtio_gpu) = self.virtio_gpu_device() else {
                     return_errno!(Errno::ENOTTY);
                 };
+                let _ = virtio_gpu;
 
-                // Look up resource metadata by host resource id
-                match virtio_gpu_resource_info_by_hw_res(user_data.resource_id) {
-                    Ok((width, height, pitch, size)) => {
-                        user_data.width = width;
-                        user_data.height = height;
-                        user_data.pitch = pitch;
-                        user_data.size = size;
-                        cmd.write(&user_data)?;
-                    }
-                    Err(_) => return_errno!(Errno::EINVAL),
+                // Match Linux: lookup by bo_handle in this drm_file's GEM table.
+                let gem_obj = self
+                    .lookup_gem(&user_data.bo_handle)
+                    .ok_or_else(|| Error::new(Errno::ENOENT))?;
+
+                let size_u64 = gem_obj.size();
+                user_data.size = u32::try_from(size_u64).map_err(|_| Error::new(Errno::EOVERFLOW))?;
+                user_data.res_handle =
+                    virtio_gpu_obj_resource_id(&gem_obj).map_err(|_| Error::new(Errno::EINVAL))?;
+
+                let (guest_blob, host3d_blob, blob_mem) =
+                    virtio_gpu_blob_mem_by_gem(&gem_obj).map_err(|_| Error::new(Errno::EINVAL))?;
+                if host3d_blob || guest_blob {
+                    user_data.blob_mem = blob_mem;
                 }
+
+                cmd.write(&user_data)?;
 
                 Ok(0)
             }

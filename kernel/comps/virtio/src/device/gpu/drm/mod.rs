@@ -213,11 +213,10 @@ pub struct VirtioGpuContextInit {
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod)]
 pub struct VirtioGpuResourceInfo {
-    pub resource_id: u32,
-    pub width: u32,
-    pub height: u32,
-    pub pitch: u32,
-    pub size: u64,
+    pub bo_handle: u32,
+    pub res_handle: u32,
+    pub size: u32,
+    pub blob_mem: u32,
 }
 
 pub mod gem;

@@ -332,6 +332,16 @@ pub fn virtio_gpu_blob_state_by_gem(gem_object: &Arc<DrmGemObject>) -> Result<(b
     Ok((obj.guest_blob, obj.host3d_blob))
 }
 
+/// Return blob memory domain metadata for a virtio-gpu GEM object.
+pub fn virtio_gpu_blob_mem_by_gem(gem_object: &Arc<DrmGemObject>) -> Result<(bool, bool, u32), DrmError> {
+    let objs = objects_map().lock();
+    let obj = objs
+        .get(&object_key(gem_object))
+        .ok_or(DrmError::Invalid)?;
+
+    Ok((obj.guest_blob, obj.host3d_blob, obj.blob_mem))
+}
+
 /// Return the last control header associated with object creation.
 /// The header carries the virtio fence id used by the creation command.
 pub fn virtio_gpu_create_hdr_by_gem(gem_object: &Arc<DrmGemObject>) -> Result<VirtioGpuCtrlHdr, DrmError> {
