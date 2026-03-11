@@ -2146,17 +2146,31 @@ impl FileIo for DrmFile {
                 Ok(0)
             }
             cmd @ DrmIoctlVirtioGpuGetCaps => {
-                let user_data = cmd.read()?;
+                let mut user_data = cmd.read()?;
 
                 let Some(virtio_gpu) = self.virtio_gpu_device() else {
                     return_errno!(Errno::ENOTTY);
                 };
+
+                // If the device reports no capsets, behave like Linux and return ENOSYS.
+                if virtio_gpu.num_capsets() == 0 {
+                    println!("virtio-gpu: device has no capsets, rejecting GET_CAPS");
+                    return_errno!(Errno::ENOSYS);
+                }
+
+                // Userspace must not pass size == 0.
+                if user_data.size == 0 {
+                    return_errno!(Errno::EINVAL);
+                }
 
                 let Some(capset_info) = self
                     .virtio_gpu_capset_info(user_data.cap_set_id, user_data.cap_set_ver)?
                 else {
                     return_errno!(Errno::EINVAL);
                 };
+
+                let host_caps_size = capset_info.capset_max_size;
+                let size_to_copy = core::cmp::min(user_data.size, host_caps_size) as usize;
 
                 let caps = match virtio_gpu.get_capset(
                     capset_info.capset_id,
@@ -2167,7 +2181,7 @@ impl FileIo for DrmFile {
                     Err(_) => return_errno!(Errno::EIO),
                 };
 
-                let copy_len = core::cmp::min(user_data.size as usize, caps.len());
+                let copy_len = core::cmp::min(size_to_copy, caps.len());
                 if copy_len > 0 {
                     current_userspace!().write_bytes(user_data.addr as usize, &caps[..copy_len])?;
                 }

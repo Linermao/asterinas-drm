@@ -168,6 +168,12 @@ impl VirtioGpuDevice {
         }
 
         let config_manager = VirtioGpuConfig::new_manager(transport.as_ref());
+
+        // Read initial config so we can initialize spinlocks with sensible
+        // defaults derived from device config (avoids temporarily showing
+        // zero values before config is read from the device).
+        let initial_config = config_manager.read_config();
+
         let device = Arc::new(VirtioGpuDevice {
             config_manager,
             control_queue: SpinLock::new(control_queue),
@@ -180,11 +186,11 @@ impl VirtioGpuDevice {
             next_context_id: AtomicU32::new(1),
             next_fence_id: AtomicU64::new(1),
             caps,
-            num_scanouts: SpinLock::new(0),
+            num_scanouts: SpinLock::new(initial_config.num_scanouts),
             display_infos: SpinLock::new(Vec::new()),
             display_info_resp: SpinLock::new(None),
             edids: SpinLock::new(Vec::new()),
-            num_capsets: SpinLock::new(0),
+            num_capsets: SpinLock::new(initial_config.num_capsets),
             capset_infos: SpinLock::new(Vec::new()),
         });
 
