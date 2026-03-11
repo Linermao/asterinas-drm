@@ -117,7 +117,7 @@ impl Device for DrmMinor {
     fn devtmpfs_path(&self) -> Option<String> {
         match self.type_ {
             DrmMinorType::Primary => Some(format!("dri/card{}", self.index)),
-            DrmMinorType::Render => Some(format!("dri/render{}", RENDER_MINOR_BASE + self.index)),
+            DrmMinorType::Render => Some(format!("dri/renderD{}", RENDER_MINOR_BASE + self.index)),
             DrmMinorType::Control => Some(format!("dri/controlD{}", self.index)),
             _ => None,
         }
