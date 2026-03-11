@@ -19,7 +19,7 @@ pub struct DrmVersion {
 
 impl DrmVersion {
     pub fn is_first_call(&self) -> bool {
-        return self.name == 0 && self.date == 0 && self.desc == 0;
+        self.name == 0 && self.date == 0 && self.desc == 0
     }
 }
 

@@ -214,7 +214,7 @@ impl VirtioGpuDevice {
             );
         }
 
-        // Register this bus-level GPU device to the common GPU subsystem.
+        // Register this bus-level DRM driver to the common GPU subsystem.
         if let Err(err) = aster_gpu::register_driver(DEVICE_NAME, Arc::new(VirtioGpuDrmDrvier)) {
             warn!(
                 "failed to register virtio-gpu device into gpu subsystem: {:?}",
@@ -316,6 +316,44 @@ impl GpuDevice for VirtioGpuDevice {
 impl VirtioGpuDevice {
     fn alloc_fence_id(&self) -> u64 {
         self.next_fence_id.fetch_add(1, Ordering::Relaxed)
+    }
+
+    fn submit_control_dma_buffers(
+        &self,
+        req_buffers: &[&Slice<Arc<DmaStream>>],
+        resp_buffers: &[&Slice<Arc<DmaStream>>],
+    ) -> Result<(), VirtioGpuCommandError> {
+        let needed_desc = req_buffers.len() + resp_buffers.len();
+
+        let token = loop {
+            let mut queue = self.control_queue.disable_irq().lock();
+            if queue.available_desc() >= needed_desc {
+                let token = queue
+                    .add_dma_buf(req_buffers, resp_buffers)
+                    .map_err(VirtioGpuCommandError::Queue)?;
+                if queue.should_notify() {
+                    queue.notify();
+                }
+                break token;
+            }
+            drop(queue);
+            spin_loop();
+        };
+
+        loop {
+            let mut queue = self.control_queue.disable_irq().lock();
+            if !queue.can_pop() {
+                drop(queue);
+                spin_loop();
+                continue;
+            }
+            queue
+                .pop_used_with_token(token)
+                .map_err(VirtioGpuCommandError::Queue)?;
+            break;
+        }
+
+        Ok(())
     }
 
     fn stamp_fence(&self, req_slice: &Slice<Arc<DmaStream>>, fence_id: u64) {
@@ -437,33 +475,7 @@ impl VirtioGpuDevice {
         let fence_id = self.alloc_fence_id();
         self.stamp_fence(&req_slice, fence_id);
 
-        let token = loop {
-            let mut queue = self.control_queue.disable_irq().lock();
-            if queue.available_desc() >= 2 {
-                let token = queue
-                    .add_dma_buf(&[&req_slice], &[&resp_slice])
-                    .map_err(VirtioGpuCommandError::Queue)?;
-                if queue.should_notify() {
-                    queue.notify();
-                }
-                break token;
-            }
-            drop(queue);
-            spin_loop();
-        };
-
-        loop {
-            let mut queue = self.control_queue.disable_irq().lock();
-            if !queue.can_pop() {
-                drop(queue);
-                spin_loop();
-                continue;
-            }
-            queue
-                .pop_used_with_token(token)
-                .map_err(VirtioGpuCommandError::Queue)?;
-            break;
-        }
+        self.submit_control_dma_buffers(&[&req_slice], &[&resp_slice])?;
 
         resp_slice.sync_from_device().unwrap();
         let resp_hdr: VirtioGpuCtrlHdr = resp_slice.read_val(0).unwrap();
@@ -628,33 +640,7 @@ impl VirtioGpuDevice {
             .unwrap();
         resp_slice.sync_to_device().unwrap();
 
-        let token = loop {
-            let mut queue = self.control_queue.disable_irq().lock();
-            if queue.available_desc() >= 2 {
-                let token = queue
-                    .add_dma_buf(&[&req_slice], &[&resp_slice])
-                    .map_err(VirtioGpuCommandError::Queue)?;
-                if queue.should_notify() {
-                    queue.notify();
-                }
-                break token;
-            }
-            drop(queue);
-            spin_loop();
-        };
-
-        loop {
-            let mut queue = self.control_queue.disable_irq().lock();
-            if !queue.can_pop() {
-                drop(queue);
-                spin_loop();
-                continue;
-            }
-            queue
-                .pop_used_with_token(token)
-                .map_err(VirtioGpuCommandError::Queue)?;
-            break;
-        }
+        self.submit_control_dma_buffers(&[&req_slice], &[&resp_slice])?;
 
         resp_slice.sync_from_device().unwrap();
         let resp_hdr: VirtioGpuCtrlHdr = resp_slice.read_val(0).unwrap();
@@ -722,33 +708,7 @@ impl VirtioGpuDevice {
             .unwrap();
         resp_slice.sync_to_device().unwrap();
 
-        let token = loop {
-            let mut queue = self.control_queue.disable_irq().lock();
-            if queue.available_desc() >= 2 {
-                let token = queue
-                    .add_dma_buf(&[&req_slice], &[&resp_slice])
-                    .map_err(VirtioGpuCommandError::Queue)?;
-                if queue.should_notify() {
-                    queue.notify();
-                }
-                break token;
-            }
-            drop(queue);
-            spin_loop();
-        };
-
-        loop {
-            let mut queue = self.control_queue.disable_irq().lock();
-            if !queue.can_pop() {
-                drop(queue);
-                spin_loop();
-                continue;
-            }
-            queue
-                .pop_used_with_token(token)
-                .map_err(VirtioGpuCommandError::Queue)?;
-            break;
-        }
+        self.submit_control_dma_buffers(&[&req_slice], &[&resp_slice])?;
 
         resp_slice.sync_from_device().unwrap();
         let resp_hdr: VirtioGpuCtrlHdr = resp_slice.read_val(0).unwrap();
@@ -926,33 +886,7 @@ impl VirtioGpuDevice {
         resp_slice.write_val(0, &VirtioGpuCtrlHdr::default()).unwrap();
         resp_slice.sync_to_device().unwrap();
 
-        let token = loop {
-            let mut queue = self.control_queue.disable_irq().lock();
-            if queue.available_desc() >= 3 {
-                let token = queue
-                    .add_dma_buf(&[&req_slice, &cmd_slice], &[&resp_slice])
-                    .map_err(VirtioGpuCommandError::Queue)?;
-                if queue.should_notify() {
-                    queue.notify();
-                }
-                break token;
-            }
-            drop(queue);
-            spin_loop();
-        };
-
-        loop {
-            let mut queue = self.control_queue.disable_irq().lock();
-            if !queue.can_pop() {
-                drop(queue);
-                spin_loop();
-                continue;
-            }
-            queue
-                .pop_used_with_token(token)
-                .map_err(VirtioGpuCommandError::Queue)?;
-            break;
-        }
+        self.submit_control_dma_buffers(&[&req_slice, &cmd_slice], &[&resp_slice])?;
 
         resp_slice.sync_from_device().unwrap();
         let resp_hdr: VirtioGpuCtrlHdr = resp_slice.read_val(0).unwrap();
@@ -1086,33 +1020,7 @@ impl VirtioGpuDevice {
 
         let req_fence_id: u64 = req_slice.read_val::<VirtioGpuCtrlHdr>(0).unwrap().fence_id;
 
-        let token = loop {
-            let mut queue = self.control_queue.disable_irq().lock();
-            if queue.available_desc() >= 2 {
-                let token = queue
-                    .add_dma_buf(&[&req_slice], &[&resp_slice])
-                    .map_err(VirtioGpuCommandError::Queue)?;
-                if queue.should_notify() {
-                    queue.notify();
-                }
-                break token;
-            }
-            drop(queue);
-            spin_loop();
-        };
-
-        loop {
-            let mut queue = self.control_queue.disable_irq().lock();
-            if !queue.can_pop() {
-                drop(queue);
-                spin_loop();
-                continue;
-            }
-            queue
-                .pop_used_with_token(token)
-                .map_err(VirtioGpuCommandError::Queue)?;
-            break;
-        }
+        self.submit_control_dma_buffers(&[&req_slice], &[&resp_slice])?;
 
         self.id_allocator.dealloc(id);
 

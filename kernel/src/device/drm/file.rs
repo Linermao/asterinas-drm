@@ -538,16 +538,9 @@ impl DrmFile {
             virtio_gpu_drm::VIRTGPU_PARAM_CONTEXT_INIT => {
                 u64::from(virtio_gpu.has_context_init() && virtio_gpu.has_virgl_3d())
             }
-            virtio_gpu_drm::VIRTGPU_PARAM_SUPPORTED_CAPSET_IDS => virtio_gpu
-                .capset_infos()
-                .into_iter()
-                .fold(0u64, |supported, capset| {
-                    if capset.capset_id < u64::BITS {
-                        supported | (1u64 << capset.capset_id)
-                    } else {
-                        supported
-                    }
-                }),
+            virtio_gpu_drm::VIRTGPU_PARAM_SUPPORTED_CAPSET_IDS => {
+                self.virtio_gpu_supported_capset_mask(&virtio_gpu)
+            }
             virtio_gpu_drm::VIRTGPU_PARAM_EXPLICIT_DEBUG_NAME => {
                 u64::from(virtio_gpu.has_context_init() && virtio_gpu.has_virgl_3d())
             }
