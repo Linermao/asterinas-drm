@@ -35,6 +35,7 @@ pub(super) const CMD_GET_EDID: u32 = 0x010a;
 pub(super) const CMD_RESOURCE_CREATE_BLOB: u32 = 0x010c;
 pub(super) const CMD_CTX_CREATE: u32 = 0x0200;
 pub(super) const CMD_CTX_DESTROY: u32 = 0x0201;
+pub(super) const CMD_RESOURCE_CREATE_3D: u32 = 0x0204;
 pub(super) const CMD_TRANSFER_TO_HOST_3D: u32 = 0x0205;
 pub(super) const CMD_TRANSFER_FROM_HOST_3D: u32 = 0x0206;
 pub(super) const CMD_SUBMIT_3D: u32 = 0x0207;
@@ -192,6 +193,24 @@ pub struct VirtioGpuResourceCreate2d {
     pub format: u32,
     pub width: u32,
     pub height: u32,
+}
+
+#[derive(Debug, Clone, Copy, Default, Pod)]
+#[repr(C)]
+pub struct VirtioGpuResourceCreate3d {
+    pub hdr: VirtioGpuCtrlHdr,
+    pub resource_id: u32,
+    pub target: u32,
+    pub format: u32,
+    pub bind: u32,
+    pub width: u32,
+    pub height: u32,
+    pub depth: u32,
+    pub array_size: u32,
+    pub last_level: u32,
+    pub nr_samples: u32,
+    pub flags: u32,
+    pub padding: u32,
 }
 
 #[derive(Debug, Clone, Copy, Default, Pod)]

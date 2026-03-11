@@ -17,9 +17,9 @@ use ostd::sync::WaitQueue;
 use ostd::Pod;
 use crate::vm::vmo::{CommitFlags};
 use aster_virtio::device::gpu::drm::gem::{
-    VirtioGpuSgEntry, VirtioGpuSgTable, virtio_gpu_blob_object_create, virtio_gpu_mode_dumb_create_with_sg,
-    virtio_gpu_blob_state_by_gem, virtio_gpu_obj_resource_id, virtio_gpu_object_create,
-    virtio_gpu_object_unref, virtio_gpu_resource_info_by_gem, virtio_gpu_resource_info_by_hw_res,
+    VirtioGpuObjectParams, VirtioGpuSgEntry, VirtioGpuSgTable, virtio_gpu_blob_object_create, virtio_gpu_mode_dumb_create_with_sg,
+    virtio_gpu_blob_state_by_gem, virtio_gpu_create_hdr_by_gem, virtio_gpu_obj_resource_id, virtio_gpu_object_create,
+    virtio_gpu_object_unref, virtio_gpu_resource_info_by_hw_res,
 };
 
 use crate::{
@@ -2111,6 +2111,21 @@ impl FileIo for DrmFile {
                     user_data.size as u64
                 };
 
+                let params = VirtioGpuObjectParams {
+                    virgl: virtio_gpu.has_virgl_3d(),
+                    target: user_data.target,
+                    format: user_data.format,
+                    bind: user_data.bind,
+                    width: user_data.width,
+                    height: user_data.height,
+                    depth: user_data.depth,
+                    array_size: user_data.array_size,
+                    last_level: user_data.last_level,
+                    nr_samples: user_data.nr_samples,
+                    flags: user_data.flags,
+                    ..Default::default()
+                };
+
                 let backend = memfd_object_create("virtio-gpu-resource", size)?;
                 let sg = self.virtio_gpu_sg_from_backend(&backend)?;
 
@@ -2123,16 +2138,27 @@ impl FileIo for DrmFile {
                     user_data.height,
                     Some(&sg),
                     backend,
+                    &params,
                 )?;
+
+                // Linux allocates and attaches a fence to resource creation.
+                // Our create path is synchronous, but we still capture and consume
+                // the virtio fence metadata for parity with that model.
+                let create_hdr =
+                    virtio_gpu_create_hdr_by_gem(&gem_obj).map_err(|_| Error::new(Errno::EINVAL))?;
+                if create_hdr.fence_id == 0 {
+                    return_errno!(Errno::EIO);
+                }
 
                 let handle = self.next_handle();
                 self.insert_gem(handle, gem_obj.clone());
 
-                let (_, _, _, _, resource_id) =
-                    virtio_gpu_resource_info_by_gem(&gem_obj).map_err(|_| Error::new(Errno::EINVAL))?;
+                // Linux returns qobj->hw_res_handle as res_handle.
+                let hw_res_handle =
+                    virtio_gpu_obj_resource_id(&gem_obj).map_err(|_| Error::new(Errno::EINVAL))?;
 
                 user_data.bo_handle = handle;
-                user_data.res_handle = resource_id;
+                user_data.res_handle = hw_res_handle;
                 user_data.size = u32::try_from(size).map_err(|_| Error::new(Errno::EOVERFLOW))?;
 
                 cmd.write(&user_data)?;
