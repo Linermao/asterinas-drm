@@ -777,6 +777,9 @@ impl FileIo for DrmFile {
                         current_userspace!()
                             .write_bytes(user_data.name as usize, name.as_bytes())?;
                     } else {
+                        if user_data.name_len == 0 {
+                            return Ok(0);
+                        }
                         return_errno!(Errno::EINVAL);
                     }
 
@@ -784,6 +787,9 @@ impl FileIo for DrmFile {
                         current_userspace!()
                             .write_bytes(user_data.desc as usize, desc.as_bytes())?;
                     } else {
+                        if user_data.desc_len == 0 {
+                            return Ok(0);
+                        }
                         return_errno!(Errno::EINVAL);
                     }
 
@@ -791,6 +797,9 @@ impl FileIo for DrmFile {
                         current_userspace!()
                             .write_bytes(user_data.date as usize, date.as_bytes())?;
                     } else {
+                        if user_data.date_len == 0 {
+                            return Ok(0);
+                        }
                         return_errno!(Errno::EINVAL);
                     }
                 }
