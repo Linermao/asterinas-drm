@@ -16,7 +16,7 @@ use ostd::{
 use ostd::prelude::println;
 use super::{CMD_CTX_CREATE, CMD_CTX_DESTROY, CMD_GET_CAPSET, CMD_GET_CAPSET_INFO,
     CMD_GET_DISPLAY_INFO, CMD_GET_EDID, CMD_RESOURCE_ATTACH_BACKING,
-    CMD_RESOURCE_CREATE_2D, CMD_RESOURCE_CREATE_BLOB, CMD_RESOURCE_UNREF,
+    CMD_RESOURCE_CREATE_2D, CMD_RESOURCE_CREATE_3D, CMD_RESOURCE_CREATE_BLOB, CMD_RESOURCE_UNREF,
     CMD_RESOURCE_DETACH_BACKING, CMD_RESOURCE_FLUSH, CMD_TRANSFER_FROM_HOST_3D,
     CMD_TRANSFER_TO_HOST_2D, CMD_TRANSFER_TO_HOST_3D, CMD_SET_SCANOUT, CMD_SUBMIT_3D,
     DEVICE_NAME, GpuFeatures, QUEUE_CONTROL,
@@ -24,7 +24,7 @@ use super::{CMD_CTX_CREATE, CMD_CTX_DESTROY, CMD_GET_CAPSET, CMD_GET_CAPSET_INFO
     VirtioGpuConfig, VirtioGpuCtrlHdr, VirtioGpuDisplayOne, VirtioGpuFormat, VirtioGpuGetCapset, VirtioGpuGetCapsetInfo,
     VirtioGpuCtxCreate, VirtioGpuCtxDestroy, VirtioGpuGetEdid, VirtioGpuMemEntry, VirtioGpuRect, VirtioGpuResourceAttachBacking,
     VirtioGpuResourceUnref, VirtioGpuResourceDetachBacking,
-    VirtioGpuResourceCreate2d, VirtioGpuResourceCreateBlob, VirtioGpuRespCapsetInfo, VirtioGpuRespDisplayInfo,
+    VirtioGpuResourceCreate2d, VirtioGpuResourceCreate3d, VirtioGpuResourceCreateBlob, VirtioGpuRespCapsetInfo, VirtioGpuRespDisplayInfo,
     VirtioGpuRespEdid, VirtioGpuResourceFlush, VirtioGpuTransferHost3d, VirtioGpuTransferToHost2d, VirtioGpuSetScanout, VirtioGpuCmdSubmit,
 };
 use crate::{
@@ -48,6 +48,9 @@ const CTRL_REQ_STRIDE: usize = {
     }
     if size_of::<VirtioGpuResourceCreate2d>() > max {
         max = size_of::<VirtioGpuResourceCreate2d>();
+    }
+    if size_of::<VirtioGpuResourceCreate3d>() > max {
+        max = size_of::<VirtioGpuResourceCreate3d>();
     }
     if size_of::<VirtioGpuResourceUnref>() > max {
         max = size_of::<VirtioGpuResourceUnref>();
@@ -516,25 +519,108 @@ impl VirtioGpuDevice {
     pub fn resource_create_2d(
         &self,
         resource_id: u32,
+        format: u32,
         width: u32,
         height: u32,
     ) -> Result<(), VirtioGpuCommandError> {
+        let _ = self.resource_create_2d_with_fence(resource_id, format, width, height)?;
+        Ok(())
+    }
+
+    pub fn resource_create_2d_with_fence(
+        &self,
+        resource_id: u32,
+        format: u32,
+        width: u32,
+        height: u32,
+    ) -> Result<VirtioGpuCtrlHdr, VirtioGpuCommandError> {
         let req = VirtioGpuResourceCreate2d {
             hdr: VirtioGpuCtrlHdr {
                 type_: CMD_RESOURCE_CREATE_2D,
                 ..Default::default()
             },
             resource_id,
-            format: VirtioGpuFormat::B8G8R8X8Unorm as u32,
+            format,
             width,
             height,
         };
-        let _: VirtioGpuCtrlHdr =
-            self.submit_control_command::<VirtioGpuResourceCreate2d, VirtioGpuCtrlHdr>(
+        let (resp, _) = self
+            .submit_control_command_with_fence::<VirtioGpuResourceCreate2d, VirtioGpuCtrlHdr>(
                 &req,
                 RESP_OK_NODATA,
             )?;
+        Ok(resp)
+    }
+
+    pub fn resource_create_3d(
+        &self,
+        resource_id: u32,
+        target: u32,
+        format: u32,
+        bind: u32,
+        width: u32,
+        height: u32,
+        depth: u32,
+        array_size: u32,
+        last_level: u32,
+        nr_samples: u32,
+        flags: u32,
+    ) -> Result<(), VirtioGpuCommandError> {
+        let _ = self.resource_create_3d_with_fence(
+            resource_id,
+            target,
+            format,
+            bind,
+            width,
+            height,
+            depth,
+            array_size,
+            last_level,
+            nr_samples,
+            flags,
+        )?;
         Ok(())
+    }
+
+    pub fn resource_create_3d_with_fence(
+        &self,
+        resource_id: u32,
+        target: u32,
+        format: u32,
+        bind: u32,
+        width: u32,
+        height: u32,
+        depth: u32,
+        array_size: u32,
+        last_level: u32,
+        nr_samples: u32,
+        flags: u32,
+    ) -> Result<VirtioGpuCtrlHdr, VirtioGpuCommandError> {
+        let req = VirtioGpuResourceCreate3d {
+            hdr: VirtioGpuCtrlHdr {
+                type_: CMD_RESOURCE_CREATE_3D,
+                ..Default::default()
+            },
+            resource_id,
+            target,
+            format,
+            bind,
+            width,
+            height,
+            depth,
+            array_size,
+            last_level,
+            nr_samples,
+            flags,
+            padding: 0,
+        };
+
+        let (resp, _) = self
+            .submit_control_command_with_fence::<VirtioGpuResourceCreate3d, VirtioGpuCtrlHdr>(
+                &req,
+                RESP_OK_NODATA,
+            )?;
+        Ok(resp)
     }
 
     pub fn resource_attach_backing(
@@ -673,6 +759,28 @@ impl VirtioGpuDevice {
         ctx_id: u32,
         entries: &[VirtioGpuMemEntry],
     ) -> Result<(), VirtioGpuCommandError> {
+        let _ = self.resource_create_blob_with_fence(
+            resource_id,
+            blob_mem,
+            blob_flags,
+            blob_id,
+            size,
+            ctx_id,
+            entries,
+        )?;
+        Ok(())
+    }
+
+    pub fn resource_create_blob_with_fence(
+        &self,
+        resource_id: u32,
+        blob_mem: u32,
+        blob_flags: u32,
+        blob_id: u64,
+        size: u64,
+        ctx_id: u32,
+        entries: &[VirtioGpuMemEntry],
+    ) -> Result<VirtioGpuCtrlHdr, VirtioGpuCommandError> {
         let nr_entries =
             u32::try_from(entries.len()).map_err(|_| VirtioGpuCommandError::InvalidParameter)?;
 
@@ -728,7 +836,7 @@ impl VirtioGpuDevice {
             });
         }
 
-        Ok(())
+        Ok(resp_hdr)
     }
 
     pub fn resource_flush(&self, resource_id: u32, rect: VirtioGpuRect) -> Result<(), VirtioGpuCommandError> {
