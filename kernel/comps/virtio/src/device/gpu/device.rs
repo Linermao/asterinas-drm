@@ -73,6 +73,12 @@ const CTRL_REQ_STRIDE: usize = {
     if size_of::<VirtioGpuCmdSubmit>() > max {
         max = size_of::<VirtioGpuCmdSubmit>();
     }
+    if size_of::<VirtioGpuCtxCreate>() > max {
+        max = size_of::<VirtioGpuCtxCreate>();
+    }
+    if size_of::<VirtioGpuCtxDestroy>() > max {
+        max = size_of::<VirtioGpuCtxDestroy>();
+    }
     max
 };
 const CTRL_RESP_STRIDE: usize = size_of::<VirtioGpuRespEdid>();
