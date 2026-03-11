@@ -883,16 +883,18 @@ impl VirtioGpuDevice {
 
     pub fn transfer_from_host_3d(
         &self,
+        ctx_id: u32,
         resource_id: u32,
         box_: super::VirtioGpuBox,
         level: u32,
         offset: u64,
         stride: u32,
         layer_stride: u32,
-    ) -> Result<(), VirtioGpuCommandError> {
+    ) -> Result<u64, VirtioGpuCommandError> {
         let req = VirtioGpuTransferHost3d {
             hdr: VirtioGpuCtrlHdr {
                 type_: CMD_TRANSFER_FROM_HOST_3D,
+                ctx_id,
                 ..Default::default()
             },
             box_,
@@ -902,26 +904,28 @@ impl VirtioGpuDevice {
             stride,
             layer_stride,
         };
-        let _: VirtioGpuCtrlHdr = self
-            .submit_control_command::<VirtioGpuTransferHost3d, VirtioGpuCtrlHdr>(
+        let (_resp, fence_id) = self
+            .submit_control_command_with_fence::<VirtioGpuTransferHost3d, VirtioGpuCtrlHdr>(
                 &req,
                 RESP_OK_NODATA,
             )?;
-        Ok(())
+        Ok(fence_id)
     }
 
     pub fn transfer_to_host_3d(
         &self,
+        ctx_id: u32,
         resource_id: u32,
         box_: super::VirtioGpuBox,
         level: u32,
         offset: u64,
         stride: u32,
         layer_stride: u32,
-    ) -> Result<(), VirtioGpuCommandError> {
+    ) -> Result<u64, VirtioGpuCommandError> {
         let req = VirtioGpuTransferHost3d {
             hdr: VirtioGpuCtrlHdr {
                 type_: CMD_TRANSFER_TO_HOST_3D,
+                ctx_id,
                 ..Default::default()
             },
             box_,
@@ -931,12 +935,12 @@ impl VirtioGpuDevice {
             stride,
             layer_stride,
         };
-        let _: VirtioGpuCtrlHdr = self
-            .submit_control_command::<VirtioGpuTransferHost3d, VirtioGpuCtrlHdr>(
+        let (_resp, fence_id) = self
+            .submit_control_command_with_fence::<VirtioGpuTransferHost3d, VirtioGpuCtrlHdr>(
                 &req,
                 RESP_OK_NODATA,
             )?;
-        Ok(())
+        Ok(fence_id)
     }
 
     pub fn set_scanout(

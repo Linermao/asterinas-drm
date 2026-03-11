@@ -354,6 +354,16 @@ impl DrmFile {
         self.gem_table.lock().get(handle).cloned()
     }
 
+    fn gem_map_offset(&self, handle: u32) -> Result<u64> {
+        let gem_obj = self
+            .lookup_gem(&handle)
+            .ok_or_else(|| Error::new(Errno::ENOENT))?;
+
+        // TODO: Track imported GEM objects and reject them here, matching
+        // drm_gem_dumb_map_offset() semantics in Linux.
+        Ok(self.device.create_offset(gem_obj))
+    }
+
     fn lookup_gem_wait_point(&self, handle: &u32) -> Option<Arc<DrmSyncPoint>> {
         self.gem_wait_table.lock().get(handle).cloned()
     }
@@ -1467,14 +1477,8 @@ impl FileIo for DrmFile {
                     return_errno!(Errno::ENOSYS);
                 }
 
-                if let Some(gem_obj) = self.lookup_gem(&handle) {
-                    // TODO: Don't allow imported objects to be mapped
-                    user_data.offset = self.device.create_offset(gem_obj);
-
-                    cmd.write(&user_data)?;
-                } else {
-                    return_errno!(Errno::ENOENT)
-                }
+                user_data.offset = self.gem_map_offset(handle)?;
+                cmd.write(&user_data)?;
 
                 Ok(0)
             }
@@ -2389,14 +2393,8 @@ impl FileIo for DrmFile {
             cmd @ DrmIoctlVirtioGpuMap => {
                 let mut user_data: aster_virtio::device::gpu::drm::VirtioGpuMap = cmd.read()?;
 
-                let handle = user_data.handle;
-
-                if let Some(gem_obj) = self.lookup_gem(&handle) {
-                    user_data.addr = self.device.create_offset(gem_obj) as u64;
-                    cmd.write(&user_data)?;
-                } else {
-                    return_errno!(Errno::ENOENT);
-                }
+                user_data.offset = self.gem_map_offset(user_data.handle)?;
+                cmd.write(&user_data)?;
 
                 Ok(0)
             }
@@ -2455,6 +2453,8 @@ impl FileIo for DrmFile {
                 let resource_id =
                     virtio_gpu_obj_resource_id(&gem_obj).map_err(|_| Error::new(Errno::EINVAL))?;
 
+                let ctx_id = self.ensure_virtio_gpu_context(&virtio_gpu)?;
+
                 self.reset_gem_wait_point(&user_data.bo_handle);
 
                 let transfer_box = aster_virtio::device::gpu::VirtioGpuBox {
@@ -2468,6 +2468,7 @@ impl FileIo for DrmFile {
 
                 let transfer_result = virtio_gpu
                     .transfer_from_host_3d(
+                        ctx_id,
                         resource_id,
                         transfer_box,
                         user_data.level,
@@ -2520,6 +2521,8 @@ impl FileIo for DrmFile {
                     self.signal_gem_wait_point(&user_data.bo_handle);
                     transfer_result?;
                 } else {
+                    let ctx_id = self.ensure_virtio_gpu_context(&virtio_gpu)?;
+
                     if !host3d_blob && (user_data.stride != 0 || user_data.layer_stride != 0) {
                         self.signal_gem_wait_point(&user_data.bo_handle);
                         return_errno!(Errno::EINVAL);
@@ -2536,6 +2539,7 @@ impl FileIo for DrmFile {
 
                     let transfer_result = virtio_gpu
                         .transfer_to_host_3d(
+                            ctx_id,
                             resource_id,
                             transfer_box,
                             user_data.level,
