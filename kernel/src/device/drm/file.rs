@@ -705,6 +705,24 @@ impl DrmFile {
         self.gem_wait_table.lock().remove(handle);
         self.gem_table.lock().remove(handle)
     }
+
+    fn close_gem_handle(&self, handle: u32) -> Result<()> {
+        let driver = self.device.driver();
+        let driver_name = driver.name();
+
+        let Some(gem_obj) = self.remove_gem(&handle) else {
+            return_errno!(Errno::ENOENT);
+        };
+
+        // Keep virtio resource lifetime in sync with GEM handle lifetime.
+        if driver_name == "virtio_gpu" {
+            let _ = virtio_gpu_object_unref(&gem_obj);
+        }
+
+        let _ = gem_obj.release();
+        self.device.remove_offset(&gem_obj);
+        Ok(())
+    }
 }
 
 impl InodeIo for DrmFile {
@@ -957,6 +975,11 @@ impl FileIo for DrmFile {
                     }
                 }
 
+                Ok(0)
+            }
+            cmd @ DrmIoctlGemClose => {
+                let user_data: DrmGemClose = cmd.read()?;
+                self.close_gem_handle(user_data.handle)?;
                 Ok(0)
             }
             _cmd @ DrmIoctlSetMaster => {
@@ -1468,20 +1491,7 @@ impl FileIo for DrmFile {
                 }
 
                 let user_data: DrmModeDestroyDumb = cmd.read()?;
-                let handle = user_data.handle;
-                let driver = self.device.driver();
-                let driver_name = driver.name();
-
-                if let Some(gem_obj) = self.remove_gem(&handle) {
-                    if driver_name == "virtio_gpu" {
-                        let _ = virtio_gpu_object_unref(&gem_obj);
-                    }
-                    // TODO: handle the error
-                    let _ = gem_obj.release();
-                    self.device.remove_offset(&gem_obj);
-                } else {
-                    return_errno!(Errno::EINVAL)
-                }
+                self.close_gem_handle(user_data.handle)?;
 
                 Ok(0)
             }
