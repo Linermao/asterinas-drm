@@ -333,6 +333,13 @@ pub struct DrmModeDestroyDumb {
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod)]
+pub struct DrmGemClose {
+    pub handle: u32,
+    pub pad: u32,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod)]
 pub struct DrmModeGetPlaneRes {
     pub plane_id_ptr: u64,
     pub count_planes: u32,

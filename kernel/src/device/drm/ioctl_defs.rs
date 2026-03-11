@@ -14,6 +14,7 @@ use crate::util::ioctl::{InData, InOutData, NoData, ioc};
 pub(super) type DrmIoctlVersion                 = ioc!(DRM_IOCTL_VERSION,                   b'd', 0x00, InOutData<DrmVersion>);
 pub(super) type DrmIoctlGetCap                  = ioc!(DRM_IOCTL_GET_CAP,                   b'd', 0x0c, InOutData<DrmGetCap>);
 pub(super) type DrmIoctlSetClientCap            = ioc!(DRM_IOCTL_SET_CLIENT_CAP,            b'd', 0x0d, InData<DrmSetClientCap>);
+pub(super) type DrmIoctlGemClose               = ioc!(DRM_IOCTL_GEM_CLOSE,                 b'd', 0x09, InData<DrmGemClose>);
 pub(super) type DrmIoctlSetMaster               = ioc!(DRM_IOCTL_SET_MASTER,                b'd', 0x1e, NoData);
 pub(super) type DrmIoctlDropMaster              = ioc!(DRM_IOCTL_DROP_MASTER,               b'd', 0x1f, NoData);
 pub(super) type DrmIoctlModeGetResources        = ioc!(DRM_IOCTL_MODE_GETRESOURCES,         b'd', 0xa0, InOutData<DrmModeGetResources>);
