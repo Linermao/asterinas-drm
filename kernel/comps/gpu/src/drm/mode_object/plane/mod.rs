@@ -9,28 +9,30 @@ pub mod property;
 
 pub trait DrmPlane: Debug + Send + Sync {
     fn state(&self) -> &Mutex<PlaneState>;
+}
 
-    fn fb_id(&self) -> u32 {
+impl dyn DrmPlane {
+    pub fn fb_id(&self) -> u32 {
         self.state().lock().fb_id
     }
 
-    fn src_x(&self) -> u32 {
+    pub fn src_x(&self) -> u32 {
         self.state().lock().src_x
     }
 
-    fn src_y(&self) -> u32 {
+    pub fn src_y(&self) -> u32 {
         self.state().lock().src_y
     }
 
-    fn possible_crtcs(&self) -> u32 {
+    pub fn possible_crtcs(&self) -> u32 {
         self.state().lock().possible_crtcs
     }
 
-    fn count_props(&self) -> u32 {
+    pub fn count_props(&self) -> u32 {
         self.state().lock().properties.iter().count() as u32
     }
 
-    fn get_properties(&self) -> PropertyObject {
+    pub fn get_properties(&self) -> PropertyObject {
         self.state().lock().properties.clone()
     }
 }

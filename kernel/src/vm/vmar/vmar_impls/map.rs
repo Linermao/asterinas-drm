@@ -2,6 +2,8 @@
 
 use core::num::NonZeroUsize;
 
+use device_id::{DeviceId, MajorId};
+
 use super::{MappedMemory, MappedVmo, RssDelta, VmMapping, Vmar};
 use crate::{
     fs::{
@@ -226,7 +228,7 @@ impl<'a> VmarMapOptions<'a> {
     ///
     /// This function returns an error if the file does not have a corresponding
     /// mappable object of [`Mappable`].
-    pub fn mappable(mut self, file: &dyn FileLike) -> Result<Self> {
+    pub fn mappable(mut self, file: &dyn FileLike, offset: usize) -> Result<Self> {
         if self.mappable.is_some() {
             panic!("Cannot set `mappable` when `mappable` is already set");
         }
@@ -234,9 +236,17 @@ impl<'a> VmarMapOptions<'a> {
             panic!("Cannot set `mappable` when `path` is already set");
         }
 
-        let mappable = file.mappable()?;
+        let rdev = file.path().inode().metadata().rdev;
+        let device_id = DeviceId::from_encoded_u64(rdev);
+        let mappable = if rdev != 0 && device_id.is_some_and(|d| d.major() == MajorId::new(226)) {
+            self = self.vmo_offset(0);
+            file.mappable_with_offset(offset)?
+        } else {
+            self.path = Some(file.path().clone());
+            file.mappable()?
+        };
+
         self.mappable = Some(mappable);
-        self.path = Some(file.path().clone());
 
         Ok(self)
     }

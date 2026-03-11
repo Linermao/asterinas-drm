@@ -10,6 +10,7 @@ use crate::{
 
 mod file;
 mod ioctl_defs;
+mod memfd;
 mod minor;
 
 pub(super) fn init_in_first_kthread() -> Result<()> {

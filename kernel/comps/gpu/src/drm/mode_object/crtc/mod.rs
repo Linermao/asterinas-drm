@@ -1,38 +1,54 @@
-use alloc::sync::Arc;
+use alloc::{sync::Arc, vec::Vec};
 use core::fmt::Debug;
 
 use ostd::sync::Mutex;
 
 use crate::drm::{
+    DrmError,
     drm_modes::DrmDisplayMode,
-    mode_object::{DrmObject, DrmObjectCast, plane::DrmPlane, property::PropertyObject},
+    mode_object::{
+        DrmObject, DrmObjectCast, connector::DrmConnector, framebuffer::DrmFramebuffer,
+        plane::DrmPlane, property::PropertyObject,
+    },
 };
 
 pub mod property;
 
 pub trait DrmCrtc: Debug + Send + Sync {
     fn state(&self) -> &Mutex<CrtcState>;
-
     fn primary_plane(&self) -> Arc<dyn DrmPlane>;
     fn cursor_plane(&self) -> Option<Arc<dyn DrmPlane>>;
+    fn set_config(
+        &self,
+        x: u32,
+        y: u32,
+        fb: Arc<dyn DrmFramebuffer>,
+        connectors: Vec<Arc<dyn DrmConnector>>,
+    ) -> Result<(), DrmError>;
+}
 
-    fn gamma_size(&self) -> u32 {
+impl dyn DrmCrtc {
+    pub fn gamma_size(&self) -> u32 {
         self.state().lock().gamma_size
     }
 
-    fn enable(&self) -> bool {
+    pub fn enable(&self) -> bool {
         self.state().lock().enable
     }
 
-    fn display_mode(&self) -> Option<DrmDisplayMode> {
+    pub fn set_display_mode(&self, display_mode: DrmDisplayMode) {
+        self.state().lock().display_mode = Some(display_mode);
+    }
+
+    pub fn display_mode(&self) -> Option<DrmDisplayMode> {
         self.state().lock().display_mode
     }
 
-    fn count_props(&self) -> u32 {
+    pub fn count_props(&self) -> u32 {
         self.state().lock().properties.iter().count() as u32
     }
 
-    fn get_properties(&self) -> PropertyObject {
+    pub fn get_properties(&self) -> PropertyObject {
         self.state().lock().properties.clone()
     }
 }

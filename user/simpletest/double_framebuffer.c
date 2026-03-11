@@ -316,26 +316,6 @@ int main(int argc, char **argv) {
         fprintf(stderr, "mode for connector %u is %ux%u\n",
 		    conn->connector_id, dev->bufs[0].width, dev->bufs[0].height);
 
-        drmModeObjectProperties *props;
-        drmModePropertyRes **props_info;
-
-        props = drmModeObjectGetProperties(fd, 
-            conn->connector_id, 0xc0c0c0c0);
-        if (!props) {
-            fprintf(stderr,	"could not get conn properties: %s\n",
-					strerror(errno));
-        }
-        props_info = calloc(props->count_props, sizeof(props_info));
-        for (int j=0; j<props->count_props; ++j) {
-            props_info[j] = drmModeGetProperty(fd, props->props[j]);
-            for (int k=0; k<props_info[j]->count_values; ++k) {
-                printf("%lu\n", props_info[j]->values[k]);
-            }
-            for (int k=0; k<props_info[j]->count_enums; ++k) {
-                printf("%s %llu\n", props_info[j]->enums[k].name, props_info[j]->enums[k].value);
-            }
-        }
-
         /* find a crtc for this connector */
         ret = modeset_find_crtc(fd, res, conn, dev);
         if (ret) {

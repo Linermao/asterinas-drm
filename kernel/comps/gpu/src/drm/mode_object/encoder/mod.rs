@@ -1,10 +1,9 @@
 use alloc::sync::Arc;
-use hashbrown::HashMap;
 use core::fmt::Debug;
 
 use ostd::sync::Mutex;
 
-use crate::drm::mode_object::{DrmObject, DrmObjectCast, property::PropertyObject};
+use crate::drm::mode_object::{DrmObject, DrmObjectCast};
 
 #[repr(u32)]
 #[derive(Debug, Clone, Copy)]
@@ -23,10 +22,13 @@ pub enum EncoderType {
 pub trait DrmEncoder: Debug + Send + Sync {
     fn type_(&self) -> EncoderType;
     fn state(&self) -> &Mutex<EncoderState>;
-    fn possible_crtcs(&self) -> u32 {
+}
+
+impl dyn DrmEncoder {
+    pub fn possible_crtcs(&self) -> u32 {
         self.state().lock().possible_crtcs
     }
-    fn possible_clones(&self) -> u32 {
+    pub fn possible_clones(&self) -> u32 {
         self.state().lock().possible_clones
     }
 }

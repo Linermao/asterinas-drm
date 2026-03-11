@@ -1,9 +1,12 @@
-use alloc::sync::Arc;
+use alloc::{sync::Arc, vec::Vec};
 
+use aster_framebuffer::FRAMEBUFFER;
 use aster_gpu::drm::{
-    DrmDevice, DrmError, DrmFeatures,
+    DrmDevice, DrmDeviceCaps, DrmError, DrmFeatures, MemfdallocatorType, VmaOffsetManager,
     drm_modes::DrmDisplayMode,
-    mode_config::DrmModeConfig,
+    gem::DrmGemObject,
+    ioctl::{DrmModeCreateDumb, DrmModeFbCmd},
+    mode_config::{DrmModeConfig, ObjectId},
     mode_object::{
         DrmObject,
         connector::{
@@ -11,15 +14,18 @@ use aster_gpu::drm::{
         },
         crtc::{CrtcState, DrmCrtc},
         encoder::{DrmEncoder, EncoderState, EncoderType},
+        framebuffer::DrmFramebuffer,
         plane::{DrmPlane, PlaneState},
         property::PropertyObject,
     },
 };
 use hashbrown::HashMap;
-use ostd::{boot::boot_info, sync::Mutex};
+use ostd::{boot::boot_info, mm::io_util::HasVmReaderWriter, sync::Mutex};
 
 const SIMPLEDRM_FEATURES: DrmFeatures =
     DrmFeatures::from_bits_truncate(DrmFeatures::GEM.bits() | DrmFeatures::MODESET.bits());
+const SIMPLEDRM_CAPABILITIES: DrmDeviceCaps =
+    DrmDeviceCaps::from_bits_truncate(DrmDeviceCaps::DUMB_CREATE.bits());
 const SIMPLEDRM_NAME: &'static str = "simpledrm";
 const SIMPLEDRM_DESC: &'static str = "DRM driver for simple-framebuffer platform devices";
 const SIMPLEDRM_DATE: &'static str = "0";
@@ -32,6 +38,7 @@ const MAX_HEIGHT: u32 = 4096;
 #[derive(Debug)]
 pub(crate) struct SimpleDrmDevice {
     mode_config: Mutex<DrmModeConfig>,
+    vma_offset_manager: Mutex<VmaOffsetManager>,
 }
 
 impl SimpleDrmDevice {
@@ -42,6 +49,7 @@ impl SimpleDrmDevice {
 
         Self {
             mode_config: Mutex::new(mode_config),
+            vma_offset_manager: Mutex::new(VmaOffsetManager::new()),
         }
     }
 
@@ -86,8 +94,43 @@ impl DrmDevice for SimpleDrmDevice {
         SIMPLEDRM_FEATURES
     }
 
+    fn capbilities(&self) -> DrmDeviceCaps {
+        SIMPLEDRM_CAPABILITIES
+    }
+
     fn mode_config(&self) -> &Mutex<DrmModeConfig> {
         &self.mode_config
+    }
+
+    fn vma_offset_manager(&self) -> &Mutex<VmaOffsetManager> {
+        &self.vma_offset_manager
+    }
+
+    fn create_dumb(
+        &self,
+        args: &DrmModeCreateDumb,
+        memfd_allocator: MemfdallocatorType,
+    ) -> Result<Arc<dyn DrmGemObject>, DrmError> {
+        let pitch = args.width * (args.bpp / 8);
+        let size = (pitch * args.height) as u64;
+
+        memfd_allocator("simpledrm-dumb", pitch, size)
+    }
+
+    fn map_dumb(&self, handle: u32) -> Result<u64, DrmError> {
+        self.vma_offset_manager.lock().alloc(handle)
+    }
+
+    fn fb_create(
+        &self,
+        _fb_cmd: &DrmModeFbCmd,
+        gem_object: Arc<dyn DrmGemObject>,
+    ) -> Result<ObjectId, DrmError> {
+        let fb = Arc::new(SimpleDrmFramebuffer::new(gem_object));
+
+        let handle = self.mode_config.lock().add_framebuffer(fb);
+
+        Ok(handle)
     }
 }
 
@@ -133,6 +176,25 @@ impl DrmCrtc for SimpleDrmCrtc {
 
     fn cursor_plane(&self) -> Option<Arc<dyn DrmPlane>> {
         self.cursor.clone()
+    }
+
+    fn set_config(
+        &self,
+        _x: u32,
+        _y: u32,
+        fb: Arc<dyn DrmFramebuffer>,
+        _connectors: Vec<Arc<dyn DrmConnector>>,
+    ) -> Result<(), DrmError> {
+        // TODO:
+        if let Some(framebuffer) = FRAMEBUFFER.get() {
+            let iomem = framebuffer.io_mem();
+            let mut writer = iomem.writer().to_fallible();
+            fb.gem_object().read(0, &mut writer)?;
+        } else {
+            return Err(DrmError::NotFound);
+        }
+
+        Ok(())
     }
 }
 
@@ -252,5 +314,22 @@ impl SimpleDrmConnector {
 
     fn set_possible_encoders(&self, encoder_indices: &[usize]) {
         self.state.lock().set_possible_encoders(encoder_indices);
+    }
+}
+
+#[derive(Debug)]
+struct SimpleDrmFramebuffer {
+    gem_object: Arc<dyn DrmGemObject>,
+}
+
+impl DrmFramebuffer for SimpleDrmFramebuffer {
+    fn gem_object(&self) -> Arc<dyn DrmGemObject> {
+        self.gem_object.clone()
+    }
+}
+
+impl SimpleDrmFramebuffer {
+    fn new(gem_object: Arc<dyn DrmGemObject>) -> Self {
+        Self { gem_object }
     }
 }

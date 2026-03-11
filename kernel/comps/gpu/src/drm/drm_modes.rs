@@ -248,3 +248,24 @@ pub struct DrmModeModeInfo {
 
     pub name: [u8; DRM_DISPLAY_MODE_LEN],
 }
+
+impl Into<DrmDisplayMode> for DrmModeModeInfo {
+    fn into(self) -> DrmDisplayMode {
+        DrmDisplayMode {
+            clock: self.clock,
+            hdisplay: self.hdisplay,
+            hsync_start: self.hsync_start,
+            hsync_end: self.hsync_end,
+            htotal: self.htotal,
+            hskew: self.hskew,
+            vdisplay: self.vdisplay,
+            vsync_start: self.vsync_start,
+            vsync_end: self.vsync_end,
+            vtotal: self.vtotal,
+            vscan: self.vscan,
+            flags: self.flags,
+            type_: self.type_,
+            name: self.name,
+        }
+    }
+}

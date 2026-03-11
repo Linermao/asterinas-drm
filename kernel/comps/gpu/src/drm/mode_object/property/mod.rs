@@ -1,9 +1,7 @@
-use alloc::{
-    sync::Arc,
-    vec::Vec,
-};
-use hashbrown::HashMap;
+use alloc::{sync::Arc, vec::Vec};
 use core::{any::Any, fmt::Debug};
+
+use hashbrown::HashMap;
 
 use crate::drm::mode_object::{DrmObject, DrmObjectCast};
 
@@ -62,9 +60,7 @@ pub struct DrmModeBlob {
 
 impl DrmModeBlob {
     pub fn new(data: Vec<u8>) -> Self {
-        Self {
-            data
-        }
+        Self { data }
     }
 
     pub fn data(&self) -> Vec<u8> {
@@ -139,7 +135,7 @@ impl DrmProperty {
         match &self.kind {
             PropertyKind::Range { .. } => 2,
             PropertyKind::SignedRange { .. } => 2,
-            _ => 0
+            _ => 0,
         }
     }
 

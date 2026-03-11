@@ -60,44 +60,46 @@ pub trait DrmConnector: Debug + Send + Sync {
     fn get_modes(&self) -> Result<(), DrmError>;
 
     fn detect(&self) -> Result<ConnectorStatus, DrmError>;
+}
 
-    fn possible_encoders(&self) -> u32 {
+impl dyn DrmConnector {
+    pub fn possible_encoders(&self) -> u32 {
         self.state().lock().possible_encoders
     }
 
-    fn count_encoders(&self) -> u32 {
+    pub fn count_encoders(&self) -> u32 {
         self.state().lock().possible_encoders.count_ones()
     }
 
-    fn count_modes(&self) -> u32 {
+    pub fn count_modes(&self) -> u32 {
         self.state().lock().display_modes.iter().count() as u32
     }
 
-    fn count_props(&self) -> u32 {
+    pub fn count_props(&self) -> u32 {
         self.state().lock().properties.iter().count() as u32
     }
 
-    fn modes(&self) -> Vec<DrmDisplayMode> {
+    pub fn modes(&self) -> Vec<DrmDisplayMode> {
         self.state().lock().display_modes.clone()
     }
 
-    fn get_properties(&self) -> PropertyObject {
+    pub fn get_properties(&self) -> PropertyObject {
         self.state().lock().properties.clone()
     }
 
-    fn status(&self) -> ConnectorStatus {
+    pub fn status(&self) -> ConnectorStatus {
         self.state().lock().status
     }
 
-    fn mm_width(&self) -> u32 {
+    pub fn mm_width(&self) -> u32 {
         self.state().lock().display_info.mm_width()
     }
 
-    fn mm_height(&self) -> u32 {
+    pub fn mm_height(&self) -> u32 {
         self.state().lock().display_info.mm_height()
     }
 
-    fn subpixel(&self) -> u32 {
+    pub fn subpixel(&self) -> u32 {
         self.state().lock().display_info.subpixel_order()
     }
 }

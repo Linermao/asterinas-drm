@@ -1,6 +1,6 @@
 use aster_gpu::drm::ioctl::*;
 
-use crate::{device::drm::file::DrmFile, prelude::*, util::ioctl::InOutData};
+use crate::{device::drm::file::DrmFile, prelude::*, util::ioctl::{InData, InOutData}};
 
 #[derive(Debug)]
 pub(crate) enum DrmIoctlFlags {
@@ -91,6 +91,8 @@ drm_ioc!(DrmIoctlModeGetResources,   DRM_IOCTL_MODE_GETRESOURCES,      b'd', 0xa
     DrmIoctlFlags::ANY);
 drm_ioc!(DrmIoctlModeGetCrtc,        DRM_IOCTL_MODE_GETCRTC,           b'd', 0xa1, InOutData<DrmModeCrtc>, 
     DrmIoctlFlags::ANY);
+drm_ioc!(DrmIoctlModeSetCrtc,        DRM_IOCTL_MODE_SETCRTC,           b'd', 0xa2, InOutData<DrmModeCrtc>, 
+    DrmIoctlFlags::ANY);
 drm_ioc!(DrmIoctlModeGetEncoder,     DRM_IOCTL_MODE_GETENCODER,        b'd', 0xa6, InOutData<DrmModeGetEncoder>, 
     DrmIoctlFlags::ANY);
 drm_ioc!(DrmIoctlModeGetConnector,   DRM_IOCTL_MODE_GETCONNECTOR,      b'd', 0xa7, InOutData<DrmModeGetConnector>, 
@@ -99,8 +101,19 @@ drm_ioc!(DrmIoctlModeGetProperty,    DRM_IOCTL_MODE_GETPROPERTY,       b'd', 0xa
     DrmIoctlFlags::ANY);
 drm_ioc!(DrmIoctlModeGetPropBlob,    DRM_IOCTL_MODE_GETPROPBLOB,       b'd', 0xac, InOutData<DrmModeGetBlob>,
     DrmIoctlFlags::ANY);
+drm_ioc!(DrmIoctlModeAddFB,          DRM_IOCTL_MODE_ADDFB,             b'd', 0xae, InOutData<DrmModeFbCmd>,
+    DrmIoctlFlags::ANY);
+drm_ioc!(DrmIoctlModeRmFB,           DRM_IOCTL_MODE_RMFB,              b'd', 0xaf, InData<DrmModeFbCmd>,
+    DrmIoctlFlags::ANY);
+drm_ioc!(DrmIoctlModeCreateDumb,     DRM_IOCTL_MODE_CREATE_DUMB,       b'd', 0xb2, InOutData<DrmModeCreateDumb>,
+    DrmIoctlFlags::ANY);
+drm_ioc!(DrmIoctlModeMapDumb,        DRM_IOCTL_MODE_MAP_DUMB,          b'd', 0xb3, InOutData<DrmModeMapDumb>,
+    DrmIoctlFlags::ANY);
+drm_ioc!(DrmIoctlModeDestroyDumb,    DRM_IOCTL_MODE_DESTROY_DUMB,      b'd', 0xb4, InData<DrmModeDestroyDumb>,
+    DrmIoctlFlags::ANY);
 drm_ioc!(DrmIoctlModeObjectGetProps, DRM_IOCTL_MODE_OBJ_GETPROPERTIES, b'd', 0xb9, InOutData<DrmModeObjectGetProps>,
     DrmIoctlFlags::ANY);
 drm_ioc!(DrmIoctlModeCreatePropBlob, DRM_IOCTL_MODE_CREATEPROPBLOB,    b'd', 0xbd, InOutData<DrmModeCreateBlob>,
     DrmIoctlFlags::ANY);
     
+

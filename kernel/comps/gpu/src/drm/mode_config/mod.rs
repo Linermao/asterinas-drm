@@ -1,13 +1,16 @@
 use alloc::{sync::Arc, vec, vec::Vec};
 use core::sync::atomic::{AtomicU32, Ordering};
 
-use hashbrown::HashMap;
+use hashbrown::{HashMap, hash_map::Entry};
 
 use crate::drm::mode_object::{
-    DrmObject, DrmObjectCast, DrmObjectType, connector::ConnectorType, property::{DrmModeBlob, PropertySpec},
+    DrmObject, DrmObjectCast, DrmObjectType,
+    connector::ConnectorType,
+    framebuffer::DrmFramebuffer,
+    property::{DrmModeBlob, PropertySpec},
 };
 
-type ObjectId = u32;
+pub type ObjectId = u32;
 
 #[derive(Debug)]
 pub struct DrmModeConfig {
@@ -92,9 +95,13 @@ impl DrmModeConfig {
         index_or_id
     }
 
-    pub fn add_blob(&mut self, data: Vec<u8>) -> usize {
+    pub fn add_blob(&mut self, data: Vec<u8>) -> ObjectId {
         let blob = Arc::new(DrmModeBlob::new(data));
-        self.add_object(DrmObject::Blob(blob))
+        self.add_object(DrmObject::Blob(blob)) as ObjectId
+    }
+
+    pub fn add_framebuffer(&mut self, fb: Arc<dyn DrmFramebuffer>) -> ObjectId {
+        self.add_object(DrmObject::Framebuffer(fb)) as ObjectId
     }
 
     pub fn count_objects(&self, type_: DrmObjectType) -> usize {
@@ -109,12 +116,12 @@ impl DrmModeConfig {
         }
     }
 
-    pub fn attach_property(&mut self, property_spec: &dyn PropertySpec) -> u32 {
+    pub fn attach_property(&mut self, property_spec: &dyn PropertySpec) -> ObjectId {
         let property = Arc::new(property_spec.build());
-        self.add_object(DrmObject::Property(property)) as u32
+        self.add_object(DrmObject::Property(property)) as ObjectId
     }
 
-    pub fn get_object_ids(&self, type_: DrmObjectType, mask: Option<u32>) -> Vec<u32> {
+    pub fn get_object_ids(&self, type_: DrmObjectType, mask: Option<ObjectId>) -> Vec<ObjectId> {
         let res = match type_ {
             DrmObjectType::Crtc => &self.crtcs,
             DrmObjectType::Connector => &self.connectors,
@@ -134,15 +141,34 @@ impl DrmModeConfig {
             .collect()
     }
 
-    pub fn get_object_with<T: DrmObjectCast + ?Sized>(&self, id: u32) -> Option<Arc<T>> {
+    pub fn get_object_with<T: DrmObjectCast + ?Sized>(&self, id: ObjectId) -> Option<Arc<T>> {
         let obj = self.objects.get(&id)?;
         T::cast(obj).cloned()
     }
 
-    pub fn get_object(&self, id: u32, type_: DrmObjectType) -> Option<&DrmObject> {
+    pub fn get_object(&self, id: ObjectId, type_: DrmObjectType) -> Option<&DrmObject> {
         self.objects
             .get(&id)
             .filter(|obj| type_ == DrmObjectType::Any || obj.type_() == type_)
+    }
+
+    pub fn remove_object_with<T: DrmObjectCast + ?Sized>(
+        &mut self,
+        id: ObjectId,
+    ) -> Option<Arc<T>> {
+        match self.objects.entry(id) {
+            Entry::Occupied(entry) => {
+                let obj = entry.get();
+
+                if let Some(casted) = T::cast(obj).cloned() {
+                    let _ = entry.remove();
+                    Some(casted)
+                } else {
+                    None
+                }
+            }
+            Entry::Vacant(_) => None,
+        }
     }
 
     pub fn max_width(&self) -> u32 {

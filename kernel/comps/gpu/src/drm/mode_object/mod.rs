@@ -9,6 +9,7 @@ use crate::drm::{
         connector::DrmConnector,
         crtc::DrmCrtc,
         encoder::DrmEncoder,
+        framebuffer::DrmFramebuffer,
         plane::DrmPlane,
         property::{DrmModeBlob, DrmProperty, PropertyObject},
     },
@@ -17,6 +18,7 @@ use crate::drm::{
 pub mod connector;
 pub mod crtc;
 pub mod encoder;
+pub mod framebuffer;
 pub mod plane;
 pub mod property;
 
@@ -26,6 +28,7 @@ pub enum DrmObject {
     Crtc(Arc<dyn DrmCrtc>),
     Encoder(Arc<dyn DrmEncoder>),
     Connector(Arc<dyn DrmConnector>),
+    Framebuffer(Arc<dyn DrmFramebuffer>),
     Property(Arc<DrmProperty>),
     Blob(Arc<DrmModeBlob>),
 }
@@ -41,6 +44,7 @@ impl DrmObject {
             DrmObject::Crtc(_) => DrmObjectType::Crtc,
             DrmObject::Encoder(_) => DrmObjectType::Encoder,
             DrmObject::Connector(_) => DrmObjectType::Connector,
+            DrmObject::Framebuffer(_) => DrmObjectType::Framebuffer,
             DrmObject::Property(_) => DrmObjectType::Property,
             DrmObject::Blob(_) => DrmObjectType::Blob,
         }

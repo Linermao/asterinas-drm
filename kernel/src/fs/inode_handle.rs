@@ -341,6 +341,18 @@ impl FileLike for InodeHandle {
         }
     }
 
+    fn mappable_with_offset(&self, offset: usize) -> Result<Mappable> {
+        if self.rights.is_empty() {
+            return_errno_with_message!(Errno::EBADF, "the file is opened as a path");
+        }
+
+        if let Some(ref file_io) = self.file_io {
+            file_io.mappable_with_offset(offset)
+        } else {
+            return_errno_with_message!(Errno::ENODEV, "the file is not mappable");
+        }
+    }
+
     fn resize(&self, new_size: usize) -> Result<()> {
         if self.rights.is_empty() {
             return_errno_with_message!(Errno::EBADF, "the file is opened as a path");
@@ -514,6 +526,10 @@ pub trait FileIo: Pollable + InodeIo + Any + Send + Sync + 'static {
     // See `FileLike::mappable`.
     fn mappable(&self) -> Result<Mappable> {
         return_errno_with_message!(Errno::EINVAL, "the file is not mappable");
+    }
+
+    fn mappable_with_offset(&self, _offset: usize) -> Result<Mappable> {
+        self.mappable()
     }
 
     fn ioctl(&self, _raw_ioctl: RawIoctl) -> Result<i32> {
