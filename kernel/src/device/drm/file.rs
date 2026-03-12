@@ -101,7 +101,7 @@ impl DrmSyncPoint {
 }
 
 struct DrmSyncObj {
-    binary: Mutex<Arc<DrmSyncPoint>>,
+    binary: Mutex<Option<Arc<DrmSyncPoint>>>,
     timeline: Mutex<HashMap<u64, Arc<DrmSyncPoint>>>,
     timeline_available_listeners: Mutex<HashMap<u64, Vec<Arc<dyn FileLike>>>>,
 }
@@ -109,34 +109,55 @@ struct DrmSyncObj {
 impl DrmSyncObj {
     fn new(initially_signaled: bool) -> Self {
         Self {
-            binary: Mutex::new(Arc::new(DrmSyncPoint::new(initially_signaled))),
+            binary: Mutex::new(initially_signaled.then(|| Arc::new(DrmSyncPoint::new(true)))),
             timeline: Mutex::new(HashMap::new()),
             timeline_available_listeners: Mutex::new(HashMap::new()),
         }
     }
 
-    fn binary_point(&self) -> Arc<DrmSyncPoint> {
+    fn binary_point(&self) -> Option<Arc<DrmSyncPoint>> {
         self.binary.lock().clone()
     }
 
+    fn binary_point_or_create(&self) -> Arc<DrmSyncPoint> {
+        let mut guard = self.binary.lock();
+        if let Some(point) = guard.as_ref() {
+            return point.clone();
+        }
+
+        let point = Arc::new(DrmSyncPoint::new(false));
+        *guard = Some(point.clone());
+        point
+    }
+
     fn binary_signal(&self) {
-        self.binary_point().signal();
+        self.binary_point_or_create().signal();
     }
 
     fn binary_reset(&self) {
-        self.binary_point().reset();
+        // Match drm_syncobj_replace_fence(syncobj, NULL): install a fresh,
+        // absent fence by clearing the binary point.
+        self.replace_binary_point(None);
     }
 
     /// Linux-like syncobj fence replacement hook.  We replace the current
     /// binary point and trigger wait/eventfd callbacks tied to the old one.
-    fn replace_binary_point(&self, new_point: Arc<DrmSyncPoint>) {
+    fn replace_binary_point(&self, new_point: Option<Arc<DrmSyncPoint>>) {
         let old_point = {
             let mut guard = self.binary.lock();
             core::mem::replace(&mut *guard, new_point.clone())
         };
 
-        if !Arc::ptr_eq(&old_point, &new_point) {
-            old_point.signal();
+        let same_point = match (&old_point, &new_point) {
+            (Some(old), Some(new)) => Arc::ptr_eq(old, new),
+            (None, None) => true,
+            _ => false,
+        };
+
+        if !same_point {
+            if let Some(old_point) = old_point {
+                old_point.signal();
+            }
         }
     }
 
@@ -521,7 +542,7 @@ impl DrmFile {
         // the backing fence when needed.
         let syncobj = Arc::new(DrmSyncObj::new(false));
         if (flags & DRM_SYNCOBJ_CREATE_SIGNALED) != 0 {
-            syncobj.replace_binary_point(Arc::new(DrmSyncPoint::new(true)));
+            syncobj.replace_binary_point(Some(Arc::new(DrmSyncPoint::new(true))));
         }
         Ok(syncobj)
     }
@@ -1801,10 +1822,12 @@ impl FileIo for DrmFile {
                         .lookup_syncobj(&sync.handle)
                         .ok_or_else(|| Error::new(Errno::ENOENT))?;
                     if sync.point == 0 {
-                        let point = syncobj.binary_point();
+                        let point = syncobj
+                            .binary_point()
+                            .ok_or_else(|| Error::new(Errno::EINVAL))?;
                         let _ = self.syncobj_wait_common(&[point.clone()], true, u64::MAX)?;
                         if (sync.flags & virtio_gpu_drm::VIRTGPU_EXECBUF_SYNCOBJ_RESET) != 0 {
-                            point.reset();
+                            syncobj.binary_reset();
                         }
                     } else {
                         let point = self.syncobj_timeline_point(&syncobj, sync.point, true)?;
@@ -1911,7 +1934,9 @@ impl FileIo for DrmFile {
 
                 if (user_data.flags & DRM_SYNCOBJ_HANDLE_TO_FD_FLAGS_EXPORT_SYNC_FILE) != 0 {
                     let sync_point = if point == 0 {
-                        syncobj.binary_point()
+                        syncobj
+                            .binary_point()
+                            .ok_or_else(|| Error::new(Errno::EINVAL))?
                     } else {
                         syncobj
                             .timeline_point(point, false)
@@ -1973,7 +1998,7 @@ impl FileIo for DrmFile {
                         if user_data.point != 0 {
                             return_errno!(Errno::EINVAL);
                         }
-                        dst_syncobj.replace_binary_point(imported_point);
+                        dst_syncobj.replace_binary_point(Some(imported_point));
                     }
 
                     self.syncobj_wait_queue.wake_all();
@@ -2027,6 +2052,8 @@ impl FileIo for DrmFile {
                 };
 
                 let handles: Vec<u32> = self.read_user_array(user_data.handles, user_data.count_handles)?;
+                let wait_for_submit =
+                    (user_data.flags & DRM_SYNCOBJ_WAIT_FLAGS_WAIT_FOR_SUBMIT) != 0;
 
                 let points = handles
                     .iter()
@@ -2034,7 +2061,13 @@ impl FileIo for DrmFile {
                         let syncobj = self
                             .lookup_syncobj(handle)
                             .ok_or_else(|| Error::new(Errno::ENOENT))?;
-                        Ok(syncobj.binary_point())
+                        if wait_for_submit {
+                            Ok(syncobj.binary_point_or_create())
+                        } else {
+                            syncobj
+                                .binary_point()
+                                .ok_or_else(|| Error::new(Errno::EINVAL))
+                        }
                     })
                     .collect::<Result<Vec<_>>>()?;
 
@@ -2054,11 +2087,23 @@ impl FileIo for DrmFile {
                 }
 
                 let user_data: DrmSyncobjArray = cmd.read()?;
+                if user_data.pad != 0 {
+                    return_errno!(Errno::EINVAL);
+                }
+                if user_data.count_handles == 0 {
+                    return_errno!(Errno::EINVAL);
+                }
+
                 let handles: Vec<u32> = self.read_user_array(user_data.handles, user_data.count_handles)?;
-                for handle in handles {
-                    let syncobj = self
-                        .lookup_syncobj(&handle)
-                        .ok_or_else(|| Error::new(Errno::ENOENT))?;
+                let syncobjs = handles
+                    .iter()
+                    .map(|handle| {
+                        self.lookup_syncobj(handle)
+                            .ok_or_else(|| Error::new(Errno::ENOENT))
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+
+                for syncobj in syncobjs {
                     syncobj.binary_reset();
                 }
 
@@ -2277,7 +2322,10 @@ impl FileIo for DrmFile {
                 }
 
                 if user_data.point == 0 {
-                    syncobj.binary_point().register_eventfd(eventfd);
+                    syncobj
+                        .binary_point()
+                        .ok_or_else(|| Error::new(Errno::EINVAL))?
+                        .register_eventfd(eventfd);
                 } else {
                     let point = syncobj
                         .timeline_point(user_data.point, true)
