@@ -1,4 +1,4 @@
-use core::{fmt::Display, sync::atomic::{AtomicBool, AtomicU32, Ordering}, time::Duration};
+use core::{fmt::Display, sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering}, time::Duration};
 
 use aster_framebuffer::FRAMEBUFFER;
 use aster_gpu::drm::{
@@ -201,8 +201,21 @@ struct DrmSyncobjFdFile {
     syncobj: Arc<DrmSyncObj>,
 }
 
+static DMA_FENCE_CONTEXT_ALLOC: AtomicU64 = AtomicU64::new(1);
+static DMA_FENCE_SEQNO_ALLOC: AtomicU64 = AtomicU64::new(1);
+
+/// Minimal in-kernel dma_fence-like abstraction.
+///
+/// This intentionally models only the essentials needed by syncobj import/
+/// export paths today: identity (context/seqno) and signaling state.
+struct DmaFence {
+    context: u64,
+    seqno: u64,
+    sync_point: Arc<DrmSyncPoint>,
+}
+
 struct DrmSyncFile {
-    point: Arc<DrmSyncPoint>,
+    fence: Arc<DmaFence>,
 }
 
 const VIRTGPU_MAX_CAPSET_ID: u64 = 63;
@@ -253,12 +266,40 @@ impl DrmSyncobjFdFile {
 }
 
 impl DrmSyncFile {
-    fn new(point: Arc<DrmSyncPoint>) -> Self {
-        Self { point }
+    fn new(fence: Arc<DmaFence>) -> Self {
+        Self { fence }
     }
 
-    fn point(&self) -> Arc<DrmSyncPoint> {
-        self.point.clone()
+    fn fence(&self) -> Arc<DmaFence> {
+        self.fence.clone()
+    }
+}
+
+impl DmaFence {
+    fn from_sync_point(sync_point: Arc<DrmSyncPoint>) -> Self {
+        Self {
+            context: DMA_FENCE_CONTEXT_ALLOC.fetch_add(1, Ordering::Relaxed),
+            seqno: DMA_FENCE_SEQNO_ALLOC.fetch_add(1, Ordering::Relaxed),
+            sync_point,
+        }
+    }
+
+    fn is_signaled(&self) -> bool {
+        self.sync_point.is_signaled()
+    }
+
+    fn sync_point(&self) -> Arc<DrmSyncPoint> {
+        self.sync_point.clone()
+    }
+
+    #[allow(dead_code)]
+    fn context(&self) -> u64 {
+        self.context
+    }
+
+    #[allow(dead_code)]
+    fn seqno(&self) -> u64 {
+        self.seqno
     }
 }
 
@@ -295,7 +336,7 @@ impl FileLike for DrmSyncobjFdFile {
 
 impl Pollable for DrmSyncFile {
     fn poll(&self, mask: IoEvents, _poller: Option<&mut PollHandle>) -> IoEvents {
-        let ready = if self.point.is_signaled() {
+        let ready = if self.fence.is_signaled() {
             IoEvents::IN | IoEvents::OUT
         } else {
             IoEvents::empty()
@@ -1877,7 +1918,8 @@ impl FileIo for DrmFile {
                             .ok_or_else(|| Error::new(Errno::EINVAL))?
                     };
 
-                    let fd_file: Arc<dyn FileLike> = Arc::new(DrmSyncFile::new(sync_point));
+                    let fence = Arc::new(DmaFence::from_sync_point(sync_point));
+                    let fd_file: Arc<dyn FileLike> = Arc::new(DrmSyncFile::new(fence));
                     user_data.fd = self.install_current_fd(fd_file, true)?;
                     cmd.write(&user_data)?;
                     return Ok(0);
@@ -1921,7 +1963,7 @@ impl FileIo for DrmFile {
                         .lookup_syncobj(&user_data.handle)
                         .ok_or_else(|| Error::new(Errno::ENOENT))?;
 
-                    let imported_point = sync_file.point();
+                    let imported_point = sync_file.fence().sync_point();
                     if timeline {
                         if user_data.point == 0 {
                             return_errno!(Errno::EINVAL);
