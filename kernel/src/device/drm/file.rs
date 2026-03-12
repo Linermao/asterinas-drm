@@ -101,7 +101,7 @@ impl DrmSyncPoint {
 }
 
 struct DrmSyncObj {
-    binary: Arc<DrmSyncPoint>,
+    binary: Mutex<Arc<DrmSyncPoint>>,
     timeline: Mutex<HashMap<u64, Arc<DrmSyncPoint>>>,
     timeline_available_listeners: Mutex<HashMap<u64, Vec<Arc<dyn FileLike>>>>,
 }
@@ -109,14 +109,35 @@ struct DrmSyncObj {
 impl DrmSyncObj {
     fn new(initially_signaled: bool) -> Self {
         Self {
-            binary: Arc::new(DrmSyncPoint::new(initially_signaled)),
+            binary: Mutex::new(Arc::new(DrmSyncPoint::new(initially_signaled))),
             timeline: Mutex::new(HashMap::new()),
             timeline_available_listeners: Mutex::new(HashMap::new()),
         }
     }
 
     fn binary_point(&self) -> Arc<DrmSyncPoint> {
-        self.binary.clone()
+        self.binary.lock().clone()
+    }
+
+    fn binary_signal(&self) {
+        self.binary_point().signal();
+    }
+
+    fn binary_reset(&self) {
+        self.binary_point().reset();
+    }
+
+    /// Linux-like syncobj fence replacement hook.  We replace the current
+    /// binary point and trigger wait/eventfd callbacks tied to the old one.
+    fn replace_binary_point(&self, new_point: Arc<DrmSyncPoint>) {
+        let old_point = {
+            let mut guard = self.binary.lock();
+            core::mem::replace(&mut *guard, new_point.clone())
+        };
+
+        if !Arc::ptr_eq(&old_point, &new_point) {
+            old_point.signal();
+        }
     }
 
     fn timeline_point(&self, point: u64, create: bool) -> Option<Arc<DrmSyncPoint>> {
@@ -164,10 +185,24 @@ impl DrmSyncObj {
             .or_default()
             .push(eventfd);
     }
+
+    fn import_timeline_point(&self, point: u64, sync_point: Arc<DrmSyncPoint>) {
+        self.timeline.lock().insert(point, sync_point);
+        let listeners = self.timeline_available_listeners.lock().remove(&point);
+        if let Some(listeners) = listeners {
+            for eventfd in listeners {
+                signal_eventfd(&eventfd);
+            }
+        }
+    }
 }
 
 struct DrmSyncobjFdFile {
     syncobj: Arc<DrmSyncObj>,
+}
+
+struct DrmSyncFile {
+    point: Arc<DrmSyncPoint>,
 }
 
 const VIRTGPU_MAX_CAPSET_ID: u64 = 63;
@@ -217,6 +252,16 @@ impl DrmSyncobjFdFile {
     }
 }
 
+impl DrmSyncFile {
+    fn new(point: Arc<DrmSyncPoint>) -> Self {
+        Self { point }
+    }
+
+    fn point(&self) -> Arc<DrmSyncPoint> {
+        self.point.clone()
+    }
+}
+
 impl Pollable for DrmSyncobjFdFile {
     fn poll(&self, mask: IoEvents, _poller: Option<&mut PollHandle>) -> IoEvents {
         (IoEvents::IN | IoEvents::OUT) & mask
@@ -224,6 +269,42 @@ impl Pollable for DrmSyncobjFdFile {
 }
 
 impl FileLike for DrmSyncobjFdFile {
+    fn inode(&self) -> &Arc<dyn Inode> {
+        AnonInodeFs::shared_inode()
+    }
+
+    fn dump_proc_fdinfo(self: Arc<Self>, _fd_flags: FdFlags) -> Box<dyn Display> {
+        struct FdInfo {
+            ino: u64,
+        }
+
+        impl Display for FdInfo {
+            fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+                writeln!(f, "pos:\t0")?;
+                writeln!(f, "flags:\t02")?;
+                writeln!(f, "mnt_id:\t{}", RESERVED_MOUNT_ID)?;
+                writeln!(f, "ino:\t{}", self.ino)
+            }
+        }
+
+        Box::new(FdInfo {
+            ino: self.inode().ino(),
+        })
+    }
+}
+
+impl Pollable for DrmSyncFile {
+    fn poll(&self, mask: IoEvents, _poller: Option<&mut PollHandle>) -> IoEvents {
+        let ready = if self.point.is_signaled() {
+            IoEvents::IN | IoEvents::OUT
+        } else {
+            IoEvents::empty()
+        };
+        ready & mask
+    }
+}
+
+impl FileLike for DrmSyncFile {
     fn inode(&self) -> &Arc<dyn Inode> {
         AnonInodeFs::shared_inode()
     }
@@ -387,6 +468,29 @@ impl DrmFile {
 
     fn insert_syncobj(&self, handle: u32, syncobj: Arc<DrmSyncObj>) {
         self.syncobj_table.lock().insert(handle, syncobj);
+    }
+
+    fn syncobj_create(&self, flags: u32) -> Result<Arc<DrmSyncObj>> {
+        // Linux currently only accepts DRM_SYNCOBJ_CREATE_SIGNALED.
+        if flags & !DRM_SYNCOBJ_CREATE_SIGNALED != 0 {
+            return_errno!(Errno::EINVAL);
+        }
+
+        // Mirror Linux create path: initialize object, then assign/replace
+        // the backing fence when needed.
+        let syncobj = Arc::new(DrmSyncObj::new(false));
+        if (flags & DRM_SYNCOBJ_CREATE_SIGNALED) != 0 {
+            syncobj.replace_binary_point(Arc::new(DrmSyncPoint::new(true)));
+        }
+        Ok(syncobj)
+    }
+
+    fn syncobj_create_as_handle(&self, flags: u32) -> Result<u32> {
+        // Mirror Linux: create syncobj, then install it in the per-file handle table.
+        let syncobj = self.syncobj_create(flags)?;
+        let handle = self.next_syncobj_handle();
+        self.insert_syncobj(handle, syncobj);
+        Ok(handle)
     }
 
     fn lookup_syncobj(&self, handle: &u32) -> Option<Arc<DrmSyncObj>> {
@@ -772,6 +876,7 @@ impl FileIo for DrmFile {
     fn ioctl(&self, raw_ioctl: RawIoctl) -> Result<i32> {
         // TODO: Call GpuDevice.handle_command() if it needs device specific ioctl handling.
         // TODO: drm_file permit flags check (master, root, render ...)
+        println!("drm_file: ioctl cmd={:#x}", raw_ioctl.cmd());
         dispatch_ioctl!(match raw_ioctl {
             cmd @ DrmIoctlVersion => {
                 let mut user_data: DrmVersion = cmd.read()?;
@@ -1707,7 +1812,7 @@ impl FileIo for DrmFile {
                         syncobj.timeline.lock().insert(fence_id, point.clone());
                     }
                     if sync.point == 0 {
-                        syncobj.binary.signal();
+                        syncobj.binary_signal();
                     }
                 }
                 self.syncobj_wait_queue.wake_all();
@@ -1721,16 +1826,8 @@ impl FileIo for DrmFile {
                 }
 
                 let mut user_data: DrmSyncobjCreate = cmd.read()?;
-                if user_data.flags & !DRM_SYNCOBJ_CREATE_SIGNALED != 0 {
-                    return_errno!(Errno::EINVAL);
-                }
-
-                let handle = self.next_syncobj_handle();
-                let initially_signaled =
-                    (user_data.flags & DRM_SYNCOBJ_CREATE_SIGNALED) != 0;
-                self.insert_syncobj(handle, Arc::new(DrmSyncObj::new(initially_signaled)));
-
-                user_data.handle = handle;
+                user_data.handle = self.syncobj_create_as_handle(user_data.flags)?;
+                /* echo back the flags verbatim (Linux does the same) */
                 cmd.write(&user_data)?;
                 Ok(0)
             }
@@ -1741,7 +1838,7 @@ impl FileIo for DrmFile {
 
                 let user_data: DrmSyncobjDestroy = cmd.read()?;
                 if self.remove_syncobj(&user_data.handle).is_none() {
-                    return_errno!(Errno::ENOENT);
+                    return_errno!(Errno::EINVAL);
                 }
 
                 Ok(0)
@@ -1752,20 +1849,46 @@ impl FileIo for DrmFile {
                 }
 
                 let mut user_data: DrmSyncobjHandle = cmd.read()?;
-                let known_flags = DRM_SYNCOBJ_HANDLE_TO_FD_FLAGS_EXPORT_SYNC_FILE
-                    | CreationFlags::O_CLOEXEC.bits();
-                if user_data.flags & !known_flags != 0 {
+                let valid_flags = DRM_SYNCOBJ_HANDLE_TO_FD_FLAGS_TIMELINE |
+                                    DRM_SYNCOBJ_HANDLE_TO_FD_FLAGS_EXPORT_SYNC_FILE;
+
+                if user_data.pad != 0 {
                     return_errno!(Errno::EINVAL);
+                }
+                if user_data.flags & !valid_flags != 0 {
+                    return_errno!(Errno::EINVAL);
+                }
+
+                let mut point: u64 = 0;
+                if (user_data.flags & DRM_SYNCOBJ_HANDLE_TO_FD_FLAGS_TIMELINE) != 0 {
+                    point = user_data.point;
                 }
 
                 let syncobj = self
                     .lookup_syncobj(&user_data.handle)
                     .ok_or_else(|| Error::new(Errno::ENOENT))?;
-                let fd_file: Arc<dyn FileLike> = Arc::new(DrmSyncobjFdFile::new(syncobj));
 
-                let cloexec = (user_data.flags & CreationFlags::O_CLOEXEC.bits()) != 0;
-                let fd = self.install_current_fd(fd_file, cloexec)?;
-                user_data.fd = fd;
+                if (user_data.flags & DRM_SYNCOBJ_HANDLE_TO_FD_FLAGS_EXPORT_SYNC_FILE) != 0 {
+                    let sync_point = if point == 0 {
+                        syncobj.binary_point()
+                    } else {
+                        syncobj
+                            .timeline_point(point, false)
+                            .ok_or_else(|| Error::new(Errno::EINVAL))?
+                    };
+
+                    let fd_file: Arc<dyn FileLike> = Arc::new(DrmSyncFile::new(sync_point));
+                    user_data.fd = self.install_current_fd(fd_file, true)?;
+                    cmd.write(&user_data)?;
+                    return Ok(0);
+                }
+
+                if user_data.point != 0 {
+                    return_errno!(Errno::EINVAL);
+                }
+
+                let fd_file: Arc<dyn FileLike> = Arc::new(DrmSyncobjFdFile::new(syncobj));
+                user_data.fd = self.install_current_fd(fd_file, true)?;
                 cmd.write(&user_data)?;
 
                 Ok(0)
@@ -1776,12 +1899,50 @@ impl FileIo for DrmFile {
                 }
 
                 let mut user_data: DrmSyncobjHandle = cmd.read()?;
-                let known_flags = DRM_SYNCOBJ_FD_TO_HANDLE_FLAGS_IMPORT_SYNC_FILE;
+                let known_flags = DRM_SYNCOBJ_FD_TO_HANDLE_FLAGS_IMPORT_SYNC_FILE |
+                    DRM_SYNCOBJ_FD_TO_HANDLE_FLAGS_TIMELINE;
+                if user_data.pad != 0 {
+                    return_errno!(Errno::EINVAL);
+                }
                 if user_data.flags & !known_flags != 0 {
                     return_errno!(Errno::EINVAL);
                 }
 
                 let file = self.current_file_by_fd(user_data.fd)?;
+                let import_sync_file =
+                    (user_data.flags & DRM_SYNCOBJ_FD_TO_HANDLE_FLAGS_IMPORT_SYNC_FILE) != 0;
+                let timeline = (user_data.flags & DRM_SYNCOBJ_FD_TO_HANDLE_FLAGS_TIMELINE) != 0;
+
+                if import_sync_file {
+                    let sync_file = file
+                        .downcast_ref::<DrmSyncFile>()
+                        .ok_or_else(|| Error::new(Errno::EINVAL))?;
+                    let dst_syncobj = self
+                        .lookup_syncobj(&user_data.handle)
+                        .ok_or_else(|| Error::new(Errno::ENOENT))?;
+
+                    let imported_point = sync_file.point();
+                    if timeline {
+                        if user_data.point == 0 {
+                            return_errno!(Errno::EINVAL);
+                        }
+                        dst_syncobj.import_timeline_point(user_data.point, imported_point);
+                    } else {
+                        if user_data.point != 0 {
+                            return_errno!(Errno::EINVAL);
+                        }
+                        dst_syncobj.replace_binary_point(imported_point);
+                    }
+
+                    self.syncobj_wait_queue.wake_all();
+                    cmd.write(&user_data)?;
+                    return Ok(0);
+                }
+
+                if timeline || user_data.point != 0 {
+                    return_errno!(Errno::EINVAL);
+                }
+
                 let syncobj_file = file
                     .downcast_ref::<DrmSyncobjFdFile>()
                     .ok_or_else(|| Error::new(Errno::EINVAL))?;
@@ -1800,15 +1961,30 @@ impl FileIo for DrmFile {
 
                 let mut user_data: DrmSyncobjWait = cmd.read()?;
                 let known_flags =
-                    DRM_SYNCOBJ_WAIT_FLAGS_WAIT_ALL | DRM_SYNCOBJ_WAIT_FLAGS_WAIT_FOR_SUBMIT;
+                    DRM_SYNCOBJ_WAIT_FLAGS_WAIT_ALL | 
+                    DRM_SYNCOBJ_WAIT_FLAGS_WAIT_FOR_SUBMIT | 
+                    DRM_SYNCOBJ_WAIT_FLAGS_WAIT_DEADLINE;
                 if user_data.flags & !known_flags != 0 {
                     return_errno!(Errno::EINVAL);
                 }
 
-                let handles: Vec<u32> = self.read_user_array(user_data.handles, user_data.count_handles)?;
-                if handles.is_empty() {
-                    return_errno!(Errno::EINVAL);
+                // Linux returns success for an empty wait list.
+                if user_data.count_handles == 0 {
+                    cmd.write(&user_data)?;
+                    return Ok(0);
                 }
+
+                // WAIT_DEADLINE in Linux provides an additional per-fence
+                // scheduling hint via deadline_nsec. Our sync-point model has
+                // no fence-level deadline API, so timeout_nsec remains the
+                // effective wait bound.
+                let _deadline_hint = if (user_data.flags & DRM_SYNCOBJ_WAIT_FLAGS_WAIT_DEADLINE) != 0 {
+                    Some(user_data.deadline_nsec)
+                } else {
+                    None
+                };
+
+                let handles: Vec<u32> = self.read_user_array(user_data.handles, user_data.count_handles)?;
 
                 let points = handles
                     .iter()
@@ -1841,7 +2017,7 @@ impl FileIo for DrmFile {
                     let syncobj = self
                         .lookup_syncobj(&handle)
                         .ok_or_else(|| Error::new(Errno::ENOENT))?;
-                    syncobj.binary.reset();
+                    syncobj.binary_reset();
                 }
 
                 Ok(0)
@@ -1857,7 +2033,7 @@ impl FileIo for DrmFile {
                     let syncobj = self
                         .lookup_syncobj(&handle)
                         .ok_or_else(|| Error::new(Errno::ENOENT))?;
-                    syncobj.binary.signal();
+                    syncobj.binary_signal();
                 }
                 self.syncobj_wait_queue.wake_all();
 
