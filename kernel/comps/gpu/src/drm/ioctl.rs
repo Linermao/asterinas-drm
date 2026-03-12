@@ -398,11 +398,14 @@ impl DrmModeObjectGetProps {
 pub const DRM_SYNCOBJ_CREATE_SIGNALED: u32 = 0x1;
 
 pub const DRM_SYNCOBJ_FD_TO_HANDLE_FLAGS_IMPORT_SYNC_FILE: u32 = 0x1;
+pub const DRM_SYNCOBJ_FD_TO_HANDLE_FLAGS_TIMELINE: u32 = 0x2;
 pub const DRM_SYNCOBJ_HANDLE_TO_FD_FLAGS_EXPORT_SYNC_FILE: u32 = 0x1;
+pub const DRM_SYNCOBJ_HANDLE_TO_FD_FLAGS_TIMELINE: u32 = 0x2;
 
 pub const DRM_SYNCOBJ_WAIT_FLAGS_WAIT_ALL: u32 = 0x1;
 pub const DRM_SYNCOBJ_WAIT_FLAGS_WAIT_FOR_SUBMIT: u32 = 0x2;
 pub const DRM_SYNCOBJ_WAIT_FLAGS_WAIT_AVAILABLE: u32 = 0x4;
+pub const DRM_SYNCOBJ_WAIT_FLAGS_WAIT_DEADLINE: u32 = 0x8;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod)]
@@ -424,6 +427,8 @@ pub struct DrmSyncobjHandle {
     pub handle: u32,
     pub flags: u32,
     pub fd: i32,
+    pub pad: u32,
+    pub point: u64,
 }
 
 #[repr(C)]
@@ -435,6 +440,7 @@ pub struct DrmSyncobjWait {
     pub flags: u32,
     pub first_signaled: u32,
     pub pad: u32,
+    pub deadline_nsec: u64,
 }
 
 #[repr(C)]
