@@ -224,6 +224,7 @@ struct DrmSyncobjFdFile {
 
 static DMA_FENCE_CONTEXT_ALLOC: AtomicU64 = AtomicU64::new(1);
 static DMA_FENCE_SEQNO_ALLOC: AtomicU64 = AtomicU64::new(1);
+static DRM_MAGIC_ALLOC: AtomicU32 = AtomicU32::new(1);
 
 /// Minimal in-kernel dma_fence-like abstraction.
 ///
@@ -940,6 +941,53 @@ impl FileIo for DrmFile {
         // TODO: drm_file permit flags check (master, root, render ...)
         println!("drm_file: ioctl cmd={:#x}", raw_ioctl.cmd());
         dispatch_ioctl!(match raw_ioctl {
+            cmd @ DrmIoctlGetUnique => {
+                let mut user_data: DrmUnique = cmd.read()?;
+                if user_data.unique_len < 0 {
+                    return_errno!(Errno::EINVAL);
+                }
+
+                // Asterinas currently exposes a single virtio-gpu DRM device
+                // without Linux sysfs/PCI bus metadata, so report an empty
+                // unique bus-id string for compatibility.
+                user_data.unique_len = 0;
+                cmd.write(&user_data)?;
+                Ok(0)
+            }
+            cmd @ DrmIoctlGetMagic => {
+                let mut user_data: DrmAuth = cmd.read()?;
+                user_data.magic = DRM_MAGIC_ALLOC.fetch_add(1, Ordering::Relaxed);
+                if user_data.magic == 0 {
+                    user_data.magic = DRM_MAGIC_ALLOC.fetch_add(1, Ordering::Relaxed);
+                }
+                cmd.write(&user_data)?;
+                Ok(0)
+            }
+            cmd @ DrmIoctlSetVersion => {
+                let mut user_data: DrmSetVersion = cmd.read()?;
+
+                // Follow Linux behavior loosely: accept user request and
+                // return the effective negotiated interface/driver versions.
+                user_data.drm_di_major = 1;
+                user_data.drm_di_minor = 4;
+                /* Userspace typically treats drm_dd_major/dd_minor as driver
+                 * version numbers; libdrm often passes -1 to mean "don't care".
+                 * We don't expose per-driver numeric version fields on the
+                 * `DrmDriver` trait, so return -1 (don't care) to keep
+                 * userspace compatibility.
+                 */
+                user_data.drm_dd_major = -1;
+                user_data.drm_dd_minor = -1;
+
+                cmd.write(&user_data)?;
+                Ok(0)
+            }
+            cmd @ DrmIoctlAuthMagic => {
+                let _user_data: DrmAuth = cmd.read()?;
+                // We currently do not enforce master-auth tables per file.
+                // Accepting AUTH_MAGIC keeps libdrm/KMS user-space paths working.
+                Ok(0)
+            }
             cmd @ DrmIoctlVersion => {
                 let mut user_data: DrmVersion = cmd.read()?;
 
