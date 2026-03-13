@@ -88,11 +88,25 @@ impl DrmCrtc {
             None => format!("crtc-{}", id),
         };
 
+        let mut properties = HashMap::new();
+        if let Some(prop_id) = res.find_property_id_by_name("MODE_ID") {
+            properties.insert(prop_id, 0);
+        }
+        if let Some(prop_id) = res.find_property_id_by_name("ACTIVE") {
+            properties.insert(prop_id, 0);
+        }
+        if let Some(prop_id) = res.find_property_id_by_name("OUT_FENCE_PTR") {
+            properties.insert(prop_id, 0);
+        }
+        if let Some(prop_id) = res.find_property_id_by_name("VRR_ENABLED") {
+            properties.insert(prop_id, 0);
+        }
+
         let crtc = Self {
             id,
             name,
             index: res.crtc_index.fetch_add(1, Ordering::SeqCst),
-            properties: HashMap::new(),
+            properties,
             gamma_size: 0,
             primary_plane,
             cursor_plane,

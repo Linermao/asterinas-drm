@@ -105,11 +105,22 @@ impl DrmConnector {
         funcs: Box<dyn ConnectorFuncs>,
     ) -> Result<Arc<Self>, DrmError> {
         let id = res.next_object_id();
+        let mut properties = HashMap::new();
+        if let Some(prop_id) = res.find_property_id_by_name("DPMS") {
+            properties.insert(prop_id, 1);
+        }
+        if let Some(prop_id) = res.find_property_id_by_name("CRTC_ID") {
+            properties.insert(prop_id, 0);
+        }
+        if let Some(prop_id) = res.find_property_id_by_name("non-desktop") {
+            properties.insert(prop_id, 0);
+        }
+
         let mut conn = Self {
             id,
             encoder: None,
             modes: Mutex::new(HashSet::new()),
-            properties: HashMap::new(),
+            properties,
             possible_encoders_id: HashSet::new(),
             possible_encoders_mask: 0,
 
@@ -135,11 +146,7 @@ impl DrmConnector {
             conn.possible_encoders_mask |= 1u32 << e.index();
         });
 
-        let conn = Arc::new(conn);
-        res.connectors.insert(id, conn.clone());
-        res.objects.insert(id, conn.clone());
-
-        Ok(conn)
+        Ok(Arc::new(conn))
     }
 
     pub fn attach_property(&mut self, property_id: u32, value: u64) {

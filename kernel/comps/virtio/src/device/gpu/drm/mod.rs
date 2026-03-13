@@ -257,11 +257,11 @@ impl VirtioDrmDevice {
             Box::new(VirtioGpuModeConfigFuncs {}),
         );
 
+        mode_config.init_standard_properties();
+
         for scanout in 0..num_scanout {
             virtio_gpu_output_init(scanout, &mut mode_config, vgpu.clone())?;
         }
-
-        mode_config.init_standard_properties();
 
         let driver = Arc::new(VirtioGpuDrmDrvier {});
         let driver_features = driver.driver_features();
