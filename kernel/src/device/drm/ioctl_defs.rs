@@ -10,8 +10,35 @@ use aster_virtio::device::gpu::drm::{
 };
 
 use crate::util::ioctl::{InData, InOutData, NoData, ioc};
+use ostd::Pod;
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod)]
+pub(super) struct DrmAuth {
+    pub magic: u32,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod)]
+pub(super) struct DrmUnique {
+    pub unique_len: i32,
+    pub unique: u64,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod)]
+pub(super) struct DrmSetVersion {
+    pub drm_di_major: i32,
+    pub drm_di_minor: i32,
+    pub drm_dd_major: i32,
+    pub drm_dd_minor: i32,
+}
 
 pub(super) type DrmIoctlVersion                 = ioc!(DRM_IOCTL_VERSION,                   b'd', 0x00, InOutData<DrmVersion>);
+pub(super) type DrmIoctlGetUnique               = ioc!(DRM_IOCTL_GET_UNIQUE,                b'd', 0x01, InOutData<DrmUnique>);
+pub(super) type DrmIoctlGetMagic                = ioc!(DRM_IOCTL_GET_MAGIC,                 b'd', 0x02, InOutData<DrmAuth>);
+pub(super) type DrmIoctlSetVersion              = ioc!(DRM_IOCTL_SET_VERSION,               b'd', 0x07, InOutData<DrmSetVersion>);
+pub(super) type DrmIoctlAuthMagic               = ioc!(DRM_IOCTL_AUTH_MAGIC,                b'd', 0x11, InData<DrmAuth>);
 pub(super) type DrmIoctlGetCap                  = ioc!(DRM_IOCTL_GET_CAP,                   b'd', 0x0c, InOutData<DrmGetCap>);
 pub(super) type DrmIoctlSetClientCap            = ioc!(DRM_IOCTL_SET_CLIENT_CAP,            b'd', 0x0d, InData<DrmSetClientCap>);
 pub(super) type DrmIoctlGemClose               = ioc!(DRM_IOCTL_GEM_CLOSE,                 b'd', 0x09, InData<DrmGemClose>);
