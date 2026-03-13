@@ -426,6 +426,30 @@ impl DrmModeObjectGetProps {
     }
 }
 
+pub const DRM_MODE_PAGE_FLIP_EVENT: u32 = 0x1;
+pub const DRM_MODE_PAGE_FLIP_ASYNC: u32 = 0x2;
+pub const DRM_MODE_ATOMIC_TEST_ONLY: u32 = 0x0100;
+pub const DRM_MODE_ATOMIC_NONBLOCK: u32 = 0x0200;
+pub const DRM_MODE_ATOMIC_ALLOW_MODESET: u32 = 0x0400;
+pub const DRM_MODE_ATOMIC_FLAGS: u32 = DRM_MODE_PAGE_FLIP_EVENT
+    | DRM_MODE_PAGE_FLIP_ASYNC
+    | DRM_MODE_ATOMIC_TEST_ONLY
+    | DRM_MODE_ATOMIC_NONBLOCK
+    | DRM_MODE_ATOMIC_ALLOW_MODESET;
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod)]
+pub struct DrmModeAtomic {
+    pub flags: u32,
+    pub count_objs: u32,
+    pub objs_ptr: u64,
+    pub count_props_ptr: u64,
+    pub props_ptr: u64,
+    pub prop_values_ptr: u64,
+    pub reserved: u64,
+    pub user_data: u64,
+}
+
 pub const DRM_SYNCOBJ_CREATE_SIGNALED: u32 = 0x1;
 
 pub const DRM_SYNCOBJ_FD_TO_HANDLE_FLAGS_IMPORT_SYNC_FILE: u32 = 0x1;
