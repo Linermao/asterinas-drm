@@ -2199,11 +2199,19 @@ impl FileIo for DrmFile {
                             match obj_kind {
                                 AtomicObjKind::Connector => {
                                     if prop_name == "CRTC_ID" {
+                                        let current_crtc = mode_config
+                                            .get_connector(obj_id)
+                                            .and_then(|connector| connector.encoder())
+                                            .and_then(|enc_id| mode_config.get_encoder(&enc_id))
+                                            .map(|enc| enc.crtc_id())
+                                            .unwrap_or(0);
                                         pending_connectors
                                             .entry(*obj_id)
                                             .or_default()
                                             .crtc_id = Some(prop_value as u32);
-                                        requires_modeset = true;
+                                        if current_crtc != prop_value as u32 {
+                                            requires_modeset = true;
+                                        }
                                     }
                                 }
                                 AtomicObjKind::Crtc => {
@@ -2211,9 +2219,15 @@ impl FileIo for DrmFile {
                                         if prop_value > 1 {
                                             return_errno!(Errno::EINVAL);
                                         }
+                                        let current_active = mode_config
+                                            .get_crtc(obj_id)
+                                            .map(|crtc| crtc.fb_id() != 0)
+                                            .unwrap_or(false);
                                         pending_crtcs.entry(*obj_id).or_default().active =
                                             Some(prop_value != 0);
-                                        requires_modeset = true;
+                                        if current_active != (prop_value != 0) {
+                                            requires_modeset = true;
+                                        }
                                     } else if prop_name == "MODE_ID" {
                                         let mode_id = prop_value as u32;
                                         if mode_id != 0 && mode_config.get_blob(&mode_id).is_none() {
@@ -2221,7 +2235,18 @@ impl FileIo for DrmFile {
                                         }
                                         pending_crtcs.entry(*obj_id).or_default().mode_id =
                                             Some(mode_id);
-                                        requires_modeset = true;
+                                        // MODE_ID appears on both initial modesets and regular
+                                        // page-flip commits. Treat it as a modeset request only
+                                        // when disabling the mode or when enabling a previously
+                                        // inactive CRTC.
+                                        if mode_id == 0
+                                            || mode_config
+                                                .get_crtc(obj_id)
+                                                .map(|crtc| crtc.fb_id() == 0)
+                                                .unwrap_or(true)
+                                        {
+                                            requires_modeset = true;
+                                        }
                                     } else if prop_name == "OUT_FENCE_PTR" {
                                         pending_crtcs
                                             .entry(*obj_id)
@@ -2231,9 +2256,15 @@ impl FileIo for DrmFile {
                                 }
                                 AtomicObjKind::Plane => {
                                     if prop_name == "CRTC_ID" {
+                                        let current_crtc = mode_config
+                                            .get_plane(obj_id)
+                                            .map(|plane| plane.crtc_id())
+                                            .unwrap_or(0);
                                         pending_planes.entry(*obj_id).or_default().crtc_id =
                                             Some(prop_value as u32);
-                                        requires_modeset = true;
+                                        if current_crtc != prop_value as u32 {
+                                            requires_modeset = true;
+                                        }
                                     } else if prop_name == "FB_ID" {
                                         pending_planes.entry(*obj_id).or_default().fb_id =
                                             Some(prop_value as u32);
