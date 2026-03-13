@@ -451,6 +451,7 @@ pub(super) struct DrmFile {
     next_syncobj_handle: AtomicU32,
     syncobj_table: Mutex<HashMap<u32, Arc<DrmSyncObj>>>,
     syncobj_wait_queue: WaitQueue,
+    property_blobs: Mutex<BTreeSet<u32>>,
 
     virtio_gpu_context: Mutex<VirtioGpuContextState>,
 }
@@ -482,6 +483,7 @@ impl DrmFile {
             next_syncobj_handle: AtomicU32::new(1),
             syncobj_table: Mutex::new(HashMap::new()),
             syncobj_wait_queue: WaitQueue::new(),
+            property_blobs: Mutex::new(BTreeSet::new()),
 
             virtio_gpu_context: Mutex::new(VirtioGpuContextState::new()),
         }
@@ -1598,16 +1600,71 @@ impl FileIo for DrmFile {
                 Ok(0)
             }
             cmd @ DrmIoctlModeGetPropBlob => {
-                // TODO: implement property blob lookup and data copy.
-                //
-                // In the Linux DRM implementation, MODE_GETPROPBLOB needs to:
-                //   * lookup the blob object by id (drm_property_blob_lookup_blob())
-                //   * copy the blob data to userspace if the provided buffer is large enough
-                //   * update the returned length field to reflect actual blob size
-                //
-                // This is required to correctly support blob-type properties exposed to userspace (e.g., IN_FORMATS).
-                // Currently this is a stub and does not perform any blob resolution or data transfer.
-                let _user_data: DrmModeGetBlob = cmd.read()?;
+                if !self.device.check_feature(DrmDriverFeatures::MODESET) {
+                    return_errno!(Errno::EOPNOTSUPP);
+                }
+
+                let mut user_data: DrmModeGetBlob = cmd.read()?;
+                let Some(blob) = self
+                    .device
+                    .resources()
+                    .lock()
+                    .get_blob(&user_data.blob_id)
+                else {
+                    return_errno!(Errno::ENOENT);
+                };
+
+                if user_data.length >= blob.len() as u32 {
+                    current_userspace!().write_bytes(user_data.data as usize, &blob)?;
+                }
+                user_data.length = blob.len() as u32;
+                cmd.write(&user_data)?;
+                Ok(0)
+            }
+            cmd @ DrmIoctlModeCreatePropBlob => {
+                if !self.device.check_feature(DrmDriverFeatures::MODESET) {
+                    return_errno!(Errno::EOPNOTSUPP);
+                }
+
+                let mut user_data: DrmModeCreateBlob = cmd.read()?;
+                if user_data.length == 0 {
+                    return_errno!(Errno::EINVAL);
+                }
+                if user_data.data == 0 {
+                    return_errno!(Errno::EFAULT);
+                }
+
+                let mut data = vec![0u8; user_data.length as usize];
+                current_userspace!().read_bytes(user_data.data as usize, &mut data)?;
+
+                let blob_id = self
+                    .device
+                    .resources()
+                    .lock()
+                    .create_blob(Arc::<[u8]>::from(data.into_boxed_slice()));
+                self.property_blobs.lock().insert(blob_id);
+
+                user_data.blob_id = blob_id;
+                cmd.write(&user_data)?;
+                Ok(0)
+            }
+            cmd @ DrmIoctlModeDestroyPropBlob => {
+                if !self.device.check_feature(DrmDriverFeatures::MODESET) {
+                    return_errno!(Errno::EOPNOTSUPP);
+                }
+
+                let user_data: DrmModeDestroyBlob = cmd.read()?;
+                let blob_id = user_data.blob_id;
+
+                if self.device.resources().lock().get_blob(&blob_id).is_none() {
+                    return_errno!(Errno::ENOENT);
+                }
+
+                if !self.property_blobs.lock().remove(&blob_id) {
+                    return_errno!(Errno::EPERM);
+                }
+
+                self.device.resources().lock().remove_blob(&blob_id);
                 Ok(0)
             }
             cmd @ DrmIoctlModeAddFB => {
@@ -3050,6 +3107,13 @@ impl FileIo for DrmFile {
 
 impl Drop for DrmFile {
     fn drop(&mut self) {
+        // Drop any user-created property blobs owned by this file.
+        let blob_ids = core::mem::take(&mut *self.property_blobs.lock());
+        let mut resources = self.device.resources().lock();
+        for blob_id in blob_ids {
+            resources.remove_blob(&blob_id);
+        }
+
         let Some(virtio_gpu) = self.virtio_gpu_device() else {
             return;
         };

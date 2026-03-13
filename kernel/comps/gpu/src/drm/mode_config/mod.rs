@@ -83,6 +83,8 @@ pub struct DrmModeConfig {
     objects: HashMap<u32, Arc<dyn DrmModeObject>>,
     next_prop_id: AtomicU32,
     properties: HashMap<u32, Arc<DrmProperty>>,
+    next_blob_id: AtomicU32,
+    blobs: HashMap<u32, Arc<[u8]>>,
 
     crtc_index: AtomicU8,
     encoder_index: AtomicU8,
@@ -127,6 +129,8 @@ impl DrmModeConfig {
             objects: HashMap::new(),
             next_prop_id: AtomicU32::new(1),
             properties: HashMap::new(),
+            next_blob_id: AtomicU32::new(1),
+            blobs: HashMap::new(),
 
             crtc_index: AtomicU8::new(0),
             encoder_index: AtomicU8::new(0),
@@ -170,6 +174,30 @@ impl DrmModeConfig {
     }
     pub fn next_prop_id(&self) -> u32 {
         self.next_prop_id.fetch_add(1, Ordering::SeqCst)
+    }
+
+    pub fn next_blob_id(&self) -> u32 {
+        self.next_blob_id.fetch_add(1, Ordering::SeqCst)
+    }
+
+    pub fn create_property(&mut self, property: DrmProperty) -> u32 {
+        let id = self.next_prop_id();
+        self.properties.insert(id, Arc::new(property));
+        id
+    }
+
+    pub fn create_blob(&mut self, data: Arc<[u8]>) -> u32 {
+        let id = self.next_blob_id();
+        self.blobs.insert(id, data);
+        id
+    }
+
+    pub fn get_blob(&self, id: &u32) -> Option<Arc<[u8]>> {
+        self.blobs.get(id).cloned()
+    }
+
+    pub fn remove_blob(&mut self, id: &u32) -> Option<Arc<[u8]>> {
+        self.blobs.remove(id)
     }
 
     pub fn create_framebuffer(

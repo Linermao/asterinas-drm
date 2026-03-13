@@ -277,6 +277,20 @@ pub struct DrmModeGetBlob {
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod)]
+pub struct DrmModeCreateBlob {
+    pub data: u64,
+    pub length: u32,
+    pub blob_id: u32,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod)]
+pub struct DrmModeDestroyBlob {
+    pub blob_id: u32,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod)]
 pub struct DrmModeFBCmd {
     pub fb_id: u32,
     pub width: u32,

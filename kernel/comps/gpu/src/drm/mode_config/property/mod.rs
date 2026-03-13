@@ -81,11 +81,14 @@ impl DrmProperty {
     }
 
     pub fn create(name: &str, flags: PropertyFlags) -> Self {
-        let name = str_to_u8_32(name);
+        Self::create_blob(name, flags, 0)
+    }
+
+    pub fn create_blob(name: &str, flags: PropertyFlags, blob_id: u32) -> Self {
         Self {
-            name,
-            flags,
-            kind: PropertyKind::Blob(1), // TODO: use tree blob id
+            name: str_to_u8_32(name),
+            flags: flags | PropertyFlags::BLOB,
+            kind: PropertyKind::Blob(blob_id),
         }
     }
 
