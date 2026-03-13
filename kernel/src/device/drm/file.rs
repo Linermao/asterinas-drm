@@ -245,6 +245,7 @@ struct DrmSyncFile {
 const VIRTGPU_MAX_CAPSET_ID: u64 = 63;
 const VIRTGPU_MAX_RINGS: u32 = 64;
 const VIRTGPU_DEBUG_NAME_MAX_LEN: usize = 65;
+const DRM_FORMAT_XRGB8888: u32 = 0x3432_5258;
 
 #[derive(Debug)]
 struct VirtioGpuContextState {
@@ -1227,59 +1228,60 @@ impl FileIo for DrmFile {
 
                 let res = self.device.resources().lock();
 
-                let count_crtcs = res.count_crtcs();
-                let count_encoders = res.count_encoders();
-                let count_connectors = res.count_connectors();
-                let count_fbs = res.count_framebuffers();
+                let requested_fbs = user_data.count_fbs;
+                let requested_crtcs = user_data.count_crtcs;
+                let requested_connectors = user_data.count_connectors;
+                let requested_encoders = user_data.count_encoders;
 
-                if user_data.is_first_call() {
-                    user_data.count_crtcs = count_crtcs;
-                    user_data.count_encoders = count_encoders;
-                    user_data.count_connectors = count_connectors;
-                    user_data.count_fbs = count_fbs;
-
-                    cmd.write(&user_data)?;
-                } else {
-                    if user_data.count_connectors >= count_connectors {
-                        for (i, id) in res.connectors_id().enumerate() {
-                            let offset = user_data.connector_id_ptr as usize
-                                + i * core::mem::size_of::<u32>();
-                            current_userspace!().write_val(offset, &id)?;
-                        }
-                    } else {
-                        return_errno!(Errno::EFAULT);
-                    }
-
-                    if user_data.count_crtcs >= count_crtcs {
-                        for (i, id) in res.crtcs_id().enumerate() {
-                            let offset =
-                                user_data.crtc_id_ptr as usize + i * core::mem::size_of::<u32>();
-                            current_userspace!().write_val(offset, &id)?;
-                        }
-                    } else {
-                        return_errno!(Errno::EFAULT);
-                    }
-
-                    if user_data.count_encoders >= count_encoders {
-                        for (i, id) in res.encoders_id().enumerate() {
-                            let offset =
-                                user_data.encoder_id_ptr as usize + i * core::mem::size_of::<u32>();
-                            current_userspace!().write_val(offset, &id)?;
-                        }
-                    } else {
-                        return_errno!(Errno::EFAULT);
-                    }
-
-                    if user_data.count_fbs >= count_fbs {
-                        for (i, id) in res.framebuffer_id().enumerate() {
-                            let offset =
-                                user_data.encoder_id_ptr as usize + i * core::mem::size_of::<u32>();
-                            current_userspace!().write_val(offset, &id)?;
-                        }
-                    } else {
-                        return_errno!(Errno::EFAULT);
+                if user_data.connector_id_ptr != 0 {
+                    for (i, id) in res
+                        .connectors_id()
+                        .take(requested_connectors as usize)
+                        .enumerate()
+                    {
+                        let offset = user_data.connector_id_ptr as usize
+                            + i * core::mem::size_of::<u32>();
+                        current_userspace!().write_val(offset, &id)?;
                     }
                 }
+
+                if user_data.crtc_id_ptr != 0 {
+                    for (i, id) in res.crtcs_id().take(requested_crtcs as usize).enumerate() {
+                        let offset =
+                            user_data.crtc_id_ptr as usize + i * core::mem::size_of::<u32>();
+                        current_userspace!().write_val(offset, &id)?;
+                    }
+                }
+
+                if user_data.encoder_id_ptr != 0 {
+                    for (i, id) in res
+                        .encoders_id()
+                        .take(requested_encoders as usize)
+                        .enumerate()
+                    {
+                        let offset =
+                            user_data.encoder_id_ptr as usize + i * core::mem::size_of::<u32>();
+                        current_userspace!().write_val(offset, &id)?;
+                    }
+                }
+
+                if user_data.fb_id_ptr != 0 {
+                    for (i, id) in res.framebuffer_id().take(requested_fbs as usize).enumerate() {
+                        let offset = user_data.fb_id_ptr as usize + i * core::mem::size_of::<u32>();
+                        current_userspace!().write_val(offset, &id)?;
+                    }
+                }
+
+                user_data.count_crtcs = res.count_crtcs();
+                user_data.count_encoders = res.count_encoders();
+                user_data.count_connectors = res.count_connectors();
+                user_data.count_fbs = res.count_framebuffers();
+                user_data.min_width = res.min_width;
+                user_data.max_width = res.max_width;
+                user_data.min_height = res.min_height;
+                user_data.max_height = res.max_height;
+
+                cmd.write(&user_data)?;
 
                 Ok(0)
             }
@@ -1290,7 +1292,8 @@ impl FileIo for DrmFile {
 
                 let mut user_data: DrmModeCrtc = cmd.read()?;
                 let crtc_id = user_data.crtc_id;
-                let crtc = match self.device.resources().lock().get_crtc(&crtc_id) {
+                let mode_config = self.device.resources().lock();
+                let crtc = match mode_config.get_crtc(&crtc_id) {
                     Some(c) => c,
                     None => {
                         return_errno!(Errno::ENOENT)
@@ -1306,6 +1309,43 @@ impl FileIo for DrmFile {
                 user_data.gamma_size = crtc.gamma_size();
                 user_data.fb_id = crtc.fb_id();
                 (user_data.x, user_data.y) = crtc.xy();
+
+                // Legacy userspace (e.g. kms-quads) computes refresh from mode totals.
+                // Return a non-zero mode whenever we can resolve one from the bound
+                // connector/encoder path, otherwise explicitly mark mode invalid.
+                let mut selected_mode: Option<DrmModeModeInfo> = None;
+                for connector_id in mode_config.connectors_id() {
+                    let Some(connector) = mode_config.get_connector(&connector_id) else {
+                        continue;
+                    };
+                    let Some(encoder_id) = connector.encoder() else {
+                        continue;
+                    };
+                    let Some(encoder) = mode_config.get_encoder(&encoder_id) else {
+                        continue;
+                    };
+                    if encoder.crtc_id() != crtc_id {
+                        continue;
+                    }
+
+                    let modes = connector.modes();
+                    selected_mode = modes
+                        .iter()
+                        .find(|m| m.clock != 0 && m.htotal != 0 && m.vtotal != 0)
+                        .copied()
+                        .or_else(|| modes.first().copied());
+                    if selected_mode.is_some() {
+                        break;
+                    }
+                }
+
+                if let Some(mode) = selected_mode {
+                    user_data.mode = mode;
+                    user_data.mode_valid = 1;
+                } else {
+                    user_data.mode = DrmModeModeInfo::default();
+                    user_data.mode_valid = 0;
+                }
 
                 cmd.write(&user_data)?;
 
@@ -1336,6 +1376,7 @@ impl FileIo for DrmFile {
 
                 crtc.funcs
                     .set_config(crtc.clone(), drm_framebuffer, &crtc_req)?;
+                crtc.update_primary_plane_state(fb_id);
 
                 Ok(0)
             }
@@ -1375,16 +1416,9 @@ impl FileIo for DrmFile {
                     }
                 };
 
-                // TODO: implement proper encoder state resolution including lease support.
-                //
-                // A lease allows a different DRM client (lessee) to take exclusive
-                // control of certain objects. When querying the encoder’s current CRTC,
-                // the core checks whether the file descriptor holds a lease on that CRTC.
-                // If so, it returns the leased crtc_id;
-                // otherwise it may return 0 (no binding).
-
                 user_data.encoder_type = encoder.type_() as u32;
                 user_data.encoder_id = encoder.id();
+                user_data.crtc_id = encoder.crtc_id();
                 user_data.possible_crtcs = encoder.possible_crtcs();
                 user_data.possible_clones = encoder.possible_clones();
 
@@ -1407,57 +1441,58 @@ impl FileIo for DrmFile {
                     }
                 };
 
-                let count_modes = conn.count_modes();
-                let count_props = conn.count_props();
-                let count_encoders = conn.count_encoders();
+                let requested_mode_slots = user_data.count_modes;
+                let requested_encoder_slots = user_data.count_encoders;
+                let requested_prop_slots = user_data.count_props;
 
-                if user_data.is_first_call() {
+                // Linux only forces a fresh probe on the first query call
+                // (count_modes == 0). Subsequent calls mostly copy out data.
+                if requested_mode_slots == 0 {
                     let mode_config = self.device.resources().lock();
                     let max_x = mode_config.max_width;
                     let max_y = mode_config.max_height;
                     drop(mode_config);
                     conn.funcs.fill_modes(max_x, max_y, conn.clone())?;
+                }
 
-                    // update new infomation
-                    let count_modes = conn.count_modes();
-                    let count_encoders = conn.count_encoders();
-                    user_data.count_modes = count_modes;
-                    user_data.connection = conn.status() as u32;
+                let modes = conn.modes();
+                let count_modes = modes.len() as u32;
+                let count_props = conn.count_props();
+                let count_encoders = conn.count_encoders();
 
-                    user_data.count_props = count_props;
-                    user_data.count_encoders = count_encoders;
+                user_data.count_modes = count_modes;
+                user_data.count_props = count_props;
+                user_data.count_encoders = count_encoders;
+                user_data.connection = conn.status() as u32;
+                user_data.connector_id = conn.id();
+                user_data.connector_type = conn.type_() as u32;
+                user_data.connector_type_id = conn.type_id_();
+                user_data.mm_width = conn.mm_width();
+                user_data.mm_height = conn.mm_height();
+                user_data.subpixel = conn.subpixel_order();
+                user_data.encoder_id = conn.encoder().unwrap_or(0);
+                user_data.pad = 0;
 
-                    user_data.connector_type = conn.type_() as u32;
-                    user_data.connector_type_id = conn.type_id_();
-
-                    user_data.mm_width = conn.mm_width();
-                    user_data.mm_height = conn.mm_height();
-                    user_data.subpixel = conn.subpixel_order();
-                    user_data.pad = 0;
-
+                if user_data.is_first_call() {
                     cmd.write(&user_data)?;
                 } else {
-                    if user_data.count_modes >= count_modes {
-                        for (i, mode) in conn.modes().iter().enumerate() {
+                    if requested_mode_slots >= count_modes && count_modes != 0 {
+                        for (i, mode) in modes.iter().enumerate() {
                             let offset = user_data.modes_ptr as usize
                                 + i * core::mem::size_of::<DrmModeModeInfo>();
                             current_userspace!().write_val(offset, mode)?;
                         }
-                    } else {
-                        return_errno!(Errno::EFAULT);
                     }
 
-                    if user_data.count_encoders >= count_encoders as u32 {
+                    if requested_encoder_slots >= count_encoders && count_encoders != 0 {
                         for (i, id) in conn.possible_encoders_id().enumerate() {
                             let offset =
                                 user_data.encoders_ptr as usize + i * core::mem::size_of::<u32>();
                             current_userspace!().write_val(offset, id)?;
                         }
-                    } else {
-                        return_errno!(Errno::EFAULT);
                     }
 
-                    if user_data.count_props >= count_props {
+                    if requested_prop_slots >= count_props && count_props != 0 {
                         for (i, (id, value)) in conn.properties().enumerate() {
                             let id_offset =
                                 user_data.props_ptr as usize + i * core::mem::size_of::<u32>();
@@ -1466,9 +1501,10 @@ impl FileIo for DrmFile {
                             current_userspace!().write_val(id_offset, id)?;
                             current_userspace!().write_val(value_offset, value)?;
                         }
-                    } else {
-                        return_errno!(Errno::EFAULT);
                     }
+
+                    // Linux returns updated scalar fields as well on the second call.
+                    cmd.write(&user_data)?;
                 }
 
                 Ok(0)
@@ -1723,30 +1759,24 @@ impl FileIo for DrmFile {
                 }
 
                 let mut user_data: DrmModeGetPlaneRes = cmd.read()?;
-                let count_planes = self.device.resources().lock().count_planes();
+                let requested_planes = user_data.count_planes;
+                let mode_config = self.device.resources().lock();
+                let count_planes = mode_config.count_planes();
 
-                if user_data.is_first_call() {
-                    user_data.count_planes = count_planes;
-                    cmd.write(&user_data)?;
-                } else {
-                    // TODO: apply legacy plane filtering per client capabilities.
-                    //
-                    // Linux DRM only advertises overlay planes by default for legacy userspace.
-                    // If the client has enabled the `DRM_CLIENT_CAP_UNIVERSAL_PLANES` cap (or
-                    // supports atomic), primary and cursor planes should also be exposed.
-                    // See drm_for_each_plane() and the handling of `file_priv->universal_planes`
-                    // in the C implementation.
-
-                    if user_data.count_planes >= count_planes {
-                        for (i, id) in self.device.resources().lock().planes_id().enumerate() {
-                            let offset =
-                                user_data.plane_id_ptr as usize + i * core::mem::size_of::<u32>();
-                            current_userspace!().write_val(offset, &id)?;
-                        }
-                    } else {
-                        return_errno!(Errno::EFAULT);
+                if user_data.plane_id_ptr != 0 {
+                    for (i, id) in mode_config
+                        .planes_id()
+                        .take(requested_planes as usize)
+                        .enumerate()
+                    {
+                        let offset =
+                            user_data.plane_id_ptr as usize + i * core::mem::size_of::<u32>();
+                        current_userspace!().write_val(offset, &id)?;
                     }
                 }
+
+                user_data.count_planes = count_planes;
+                cmd.write(&user_data)?;
 
                 Ok(0)
             }
@@ -1758,7 +1788,7 @@ impl FileIo for DrmFile {
                 let mut user_data: DrmModeGetPlane = cmd.read()?;
                 let plane_id = user_data.plane_id;
 
-                let _plane = match self.device.resources().lock().get_plane(&plane_id) {
+                let plane = match self.device.resources().lock().get_plane(&plane_id) {
                     Some(plane) => plane,
                     None => {
                         return_errno!(Errno::ENOENT);
@@ -1777,7 +1807,21 @@ impl FileIo for DrmFile {
                 // At minimum, atomic state lookup must be done to fill `crtc_id`, `fb_id`,
                 // and format lists per current plane state. This stub only zeroes gamma_size.
 
+                let requested_formats = user_data.count_format_types;
+                let format_count = 1u32;
+
+                user_data.crtc_id = plane.crtc_id();
+                user_data.fb_id = plane.fb_id();
+                user_data.possible_crtcs = plane.possible_crtcs();
                 user_data.gamma_size = 0;
+                user_data.count_format_types = format_count;
+
+                if user_data.format_type_ptr != 0 && requested_formats != 0 {
+                    current_userspace!().write_val(
+                        user_data.format_type_ptr as usize,
+                        &DRM_FORMAT_XRGB8888,
+                    )?;
+                }
                 cmd.write(&user_data)?;
 
                 Ok(0)

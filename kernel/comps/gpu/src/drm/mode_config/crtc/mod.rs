@@ -64,6 +64,10 @@ impl DrmCrtc {
         self.gamma_size
     }
 
+    pub fn update_primary_plane_state(&self, fb_id: u32) {
+        self.primary_plane.set_state(self.id, fb_id);
+    }
+
     /// Get vblank state
     ///
     /// Returns Arc<Mutex<>> which allows access even through Arc<DrmCrtc>
@@ -98,6 +102,12 @@ impl DrmCrtc {
             vblank: Arc::new(Mutex::new(DrmVblankState::new())),
             funcs,
         };
+
+        // Plane-to-CRTC compatibility masks are consumed by GETPLANE.
+        crtc.primary_plane.add_possible_crtc(crtc.index);
+        if let Some(cursor_plane) = crtc.cursor_plane.as_ref() {
+            cursor_plane.add_possible_crtc(crtc.index);
+        }
 
         // TODO: get x, y, gamma_size
 

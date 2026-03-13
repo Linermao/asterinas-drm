@@ -94,7 +94,7 @@ pub struct DrmConnector {
     type_id: u32,
     status: Mutex<ConnectorStatus>,
 
-    display_info: DrmDisplayInfo,
+    display_info: Mutex<DrmDisplayInfo>,
     pub funcs: Box<dyn ConnectorFuncs>,
 }
 
@@ -119,15 +119,18 @@ impl DrmConnector {
             status: Mutex::new(ConnectorStatus::Unknownconnection),
 
             // TODO: use true data
-            display_info: DrmDisplayInfo {
+            display_info: Mutex::new(DrmDisplayInfo {
                 mm_width: 384,
                 mm_height: 240,
                 subpixel_order: SubpixelOrder { bits: 0 },
-            },
+            }),
             funcs,
         };
 
         encoder.iter().for_each(|e| {
+            if conn.encoder.is_none() {
+                conn.encoder = Some(e.id());
+            }
             conn.possible_encoders_id.insert(e.id());
             conn.possible_encoders_mask |= 1u32 << e.index();
         });
@@ -151,6 +154,11 @@ impl DrmConnector {
         self.type_id
     }
 
+    pub fn set_connector_identity(&mut self, type_: DrmModeConnType, type_id: u32) {
+        self.type_ = type_;
+        self.type_id = type_id;
+    }
+
     pub fn status(&self) -> ConnectorStatus {
         self.status.lock().clone()
     }
@@ -162,15 +170,27 @@ impl DrmConnector {
     }
 
     pub fn mm_width(&self) -> u32 {
-        self.display_info.mm_width()
+        self.display_info.lock().mm_width()
     }
 
     pub fn mm_height(&self) -> u32 {
-        self.display_info.mm_height()
+        self.display_info.lock().mm_height()
     }
 
     pub fn subpixel_order(&self) -> u32 {
-        self.display_info.subpixel_order()
+        self.display_info.lock().subpixel_order()
+    }
+
+    pub fn update_display_info(
+        &self,
+        mm_width: u32,
+        mm_height: u32,
+        subpixel_order_bits: u32,
+    ) {
+        let mut display_info = self.display_info.lock();
+        display_info.mm_width = mm_width;
+        display_info.mm_height = mm_height;
+        display_info.subpixel_order = SubpixelOrder::from_bits_truncate(subpixel_order_bits);
     }
 
     pub fn encoder(&self) -> Option<u32> {

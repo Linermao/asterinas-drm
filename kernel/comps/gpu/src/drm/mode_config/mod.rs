@@ -123,7 +123,7 @@ impl DrmModeConfig {
             preferred_depth,
             prefer_shadow: 0,
 
-            next_object_id: AtomicU32::new(0),
+            next_object_id: AtomicU32::new(1),
             objects: HashMap::new(),
             next_prop_id: AtomicU32::new(1),
             properties: HashMap::new(),

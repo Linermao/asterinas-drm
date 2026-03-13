@@ -1,4 +1,5 @@
-use alloc::{boxed::Box, format, sync::Arc};
+use alloc::{boxed::Box, format, sync::Arc, vec::Vec};
+use core::cmp::min;
 
 use aster_gpu::drm::{
     DrmError,
@@ -7,7 +8,7 @@ use aster_gpu::drm::{
     mode_config::{
         DrmModeConfig, DrmModeModeInfo,
         connector::{
-            ConnectorStatus, DrmConnector,
+            ConnectorStatus, DrmConnector, DrmModeConnType,
             funcs::{ConnectorFuncs, drm_helper_probe_single_connector_modes},
         },
         crtc::{DrmCrtc, funcs::CrtcFuncs, helper::drm_atomic_helper_page_flip},
@@ -17,11 +18,8 @@ use aster_gpu::drm::{
     },
     vblank::DrmPendingVblankEvent,
 };
-use ostd::prelude::println;
-
 use crate::device::gpu::device::VirtioGpuDevice;
-use crate::device::gpu::drm::gem::{virtio_gpu_obj_resource_id};
-use crate::device::gpu::{DEVICE_NAME, VirtioGpuRect};
+use crate::device::gpu::VirtioGpuRect;
 
 pub fn virtio_gpu_output_init(
     scanout: u32,
@@ -42,23 +40,33 @@ pub fn virtio_gpu_output_init(
     let encoder = DrmEncoder::init_with_crtcs(
         mode_config,
         EncoderType::VIRTUAL,
-        &[crtc],
+        &[crtc.clone()],
         Box::new(VirtioEncoderFuncs),
     )?;
 
-    let connector =
-        DrmConnector::init_with_encoder(mode_config, &[encoder], Box::new(VirtioConnectorFuncs))?;
-
-    // TODO: connector.funcs.get_modes()
-    let infos = vgpu.display_infos();
-    if let Some(info) = infos.get(scanout as usize) {
-        if info.enabled != 0 && info.rect.width != 0 && info.rect.height != 0 {
-            let mode = mode_from_size(info.rect.width, info.rect.height);
-            connector.update_modes(&[mode])?;
-        }
+    let mut connector = DrmConnector::init_with_encoder(
+        mode_config,
+        &[encoder],
+        Box::new(VirtioConnectorFuncs {
+            vgpu,
+            scanout,
+        }),
+    )?;
+    if let Some(connector_mut) = Arc::get_mut(&mut connector) {
+        connector_mut.set_connector_identity(DrmModeConnType::VIRTUAL, scanout + 1);
     }
 
-    // TODO: if (vgdev->has_edid)
+    // Prime connector state/modes once during init, then userspace-triggered
+    // fill_modes() will refresh through the same callback path.
+    connector.funcs.detect(false, connector.clone())?;
+    connector.funcs.get_modes(connector.clone())?;
+
+    // Legacy userspace (e.g. kms-quads) expects at least one active CRTC/fb
+    // routing to bootstrap. We expose a synthetic non-zero fb binding that is
+    // replaced on the first real MODE_SETCRTC/atomic commit.
+    if matches!(connector.status(), ConnectorStatus::Connected) {
+        crtc.update_primary_plane_state(1);
+    }
 
     Ok(())
 }
@@ -72,10 +80,34 @@ struct VirtioCrtcFuncs {
 }
 
 #[derive(Debug)]
+struct VirtioConnectorFuncs {
+    vgpu: Arc<VirtioGpuDevice>,
+    scanout: u32,
+}
+
+#[derive(Debug)]
 struct VirtioEncoderFuncs;
 
 #[derive(Debug)]
-struct VirtioConnectorFuncs;
+struct ParsedEdid {
+    preferred_mode: DrmModeModeInfo,
+    mm_width: u32,
+    mm_height: u32,
+}
+
+impl VirtioConnectorFuncs {
+    fn scanout_info(&self) -> Option<crate::device::gpu::VirtioGpuDisplayOne> {
+        self.vgpu.display_infos().get(self.scanout as usize).copied()
+    }
+
+    fn scanout_edid(&self) -> Option<crate::device::gpu::VirtioGpuRespEdid> {
+        self.vgpu
+            .edids()
+            .get(self.scanout as usize)
+            .cloned()
+            .flatten()
+    }
+}
 
 impl PlaneFuncs for VirtioPlaneFuncs {}
 
@@ -152,13 +184,147 @@ impl ConnectorFuncs for VirtioConnectorFuncs {
     }
 
     fn detect(&self, _force: bool, connector: Arc<DrmConnector>) -> Result<(), DrmError> {
-        connector.update_status(ConnectorStatus::Connected)
+        let connected = self
+            .scanout_info()
+            .map(|info| info.enabled != 0)
+            .unwrap_or(false);
+        if connected {
+            connector.update_status(ConnectorStatus::Connected)
+        } else {
+            connector.update_status(ConnectorStatus::Disconnected)
+        }
     }
 
-    fn get_modes(&self, _connector: Arc<DrmConnector>) -> Result<(), DrmError> {
-        // TODO
+    fn get_modes(&self, connector: Arc<DrmConnector>) -> Result<(), DrmError> {
+        let info = match self.scanout_info() {
+            Some(info) => info,
+            None => {
+                connector.update_status(ConnectorStatus::Disconnected)?;
+                connector.update_modes(&[])?;
+                return Ok(());
+            }
+        };
+
+        if info.enabled == 0 {
+            connector.update_status(ConnectorStatus::Disconnected)?;
+            connector.update_modes(&[])?;
+            return Ok(());
+        }
+
+        connector.update_status(ConnectorStatus::Connected)?;
+
+        let mut modes: Vec<DrmModeModeInfo> = Vec::new();
+
+        // Linux virtio-gpu prefers EDID-derived modes and only falls back to
+        // scanout geometry when EDID does not provide usable timings.
+        if let Some(parsed_edid) = self.scanout_edid().and_then(parse_preferred_edid_mode) {
+            connector.update_display_info(parsed_edid.mm_width, parsed_edid.mm_height, 0);
+            modes.push(parsed_edid.preferred_mode);
+        }
+
+        if info.rect.width != 0 && info.rect.height != 0 {
+            let fallback = mode_from_size(info.rect.width, info.rect.height);
+            if !modes
+                .iter()
+                .any(|mode| mode.hdisplay as u32 == info.rect.width && mode.vdisplay as u32 == info.rect.height)
+            {
+                modes.push(fallback);
+            }
+        }
+
+        if modes.is_empty() {
+            modes.push(mode_from_size(1024, 768));
+        }
+
+        connector.update_modes(&modes)?;
         Ok(())
     }
+}
+
+fn parse_preferred_edid_mode(resp: crate::device::gpu::VirtioGpuRespEdid) -> Option<ParsedEdid> {
+    let size = min(resp.size as usize, resp.edid.len());
+    if size < 128 {
+        return None;
+    }
+    let edid = &resp.edid[..size];
+    if edid[0..8] != [0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00] {
+        return None;
+    }
+
+    // Detailed timing descriptors are in bytes 54..126. Use the first valid
+    // one as the preferred timing for now.
+    for dtd in (54..=108).step_by(18) {
+        let pixclk_10khz = u16::from_le_bytes([edid[dtd], edid[dtd + 1]]) as u32;
+        if pixclk_10khz == 0 {
+            continue;
+        }
+
+        let hactive = (edid[dtd + 2] as u32) | (((edid[dtd + 4] as u32) & 0xF0) << 4);
+        let hblank = (edid[dtd + 3] as u32) | (((edid[dtd + 4] as u32) & 0x0F) << 8);
+        let vactive = (edid[dtd + 5] as u32) | (((edid[dtd + 7] as u32) & 0xF0) << 4);
+        let vblank = (edid[dtd + 6] as u32) | (((edid[dtd + 7] as u32) & 0x0F) << 8);
+
+        if hactive == 0 || vactive == 0 {
+            continue;
+        }
+
+        let hsync_offset = (edid[dtd + 8] as u32) | (((edid[dtd + 11] as u32) & 0xC0) << 2);
+        let hsync_pulse = (edid[dtd + 9] as u32) | (((edid[dtd + 11] as u32) & 0x30) << 4);
+        let vsync_offset = (((edid[dtd + 10] as u32) >> 4) & 0x0F)
+            | (((edid[dtd + 11] as u32) & 0x0C) << 2);
+        let vsync_pulse = ((edid[dtd + 10] as u32) & 0x0F)
+            | (((edid[dtd + 11] as u32) & 0x03) << 4);
+
+        let hdisplay = hactive.min(u16::MAX as u32) as u16;
+        let vdisplay = vactive.min(u16::MAX as u32) as u16;
+        let htotal = (hactive + hblank).min(u16::MAX as u32) as u16;
+        let vtotal = (vactive + vblank).min(u16::MAX as u32) as u16;
+        let hsync_start = (hactive + hsync_offset).min(u16::MAX as u32) as u16;
+        let hsync_end = (hactive + hsync_offset + hsync_pulse).min(u16::MAX as u32) as u16;
+        let vsync_start = (vactive + vsync_offset).min(u16::MAX as u32) as u16;
+        let vsync_end = (vactive + vsync_offset + vsync_pulse).min(u16::MAX as u32) as u16;
+
+        let clock = pixclk_10khz.saturating_mul(10);
+        let vrefresh = if htotal != 0 && vtotal != 0 {
+            ((clock.saturating_mul(1000)) / ((htotal as u32).saturating_mul(vtotal as u32))).max(1)
+        } else {
+            60
+        };
+
+        let mut name = [0u8; 32];
+        let s = format!("{}x{}", hactive, vactive);
+        let bytes = s.as_bytes();
+        let len = bytes.len().min(32);
+        name[..len].copy_from_slice(&bytes[..len]);
+
+        let mode = DrmModeModeInfo {
+            clock,
+            hdisplay,
+            hsync_start,
+            hsync_end,
+            htotal,
+            hskew: 0,
+            vdisplay,
+            vsync_start,
+            vsync_end,
+            vtotal,
+            vscan: 0,
+            vrefresh,
+            // Keep sync flags conservative for now; many userspace stacks only
+            // require valid geometry/clock for basic modesetting.
+            flags: 0,
+            type_: 0x60,
+            name,
+        };
+
+        return Some(ParsedEdid {
+            preferred_mode: mode,
+            mm_width: edid[21] as u32,
+            mm_height: edid[22] as u32,
+        });
+    }
+
+    None
 }
 
 // TODO: dirty
