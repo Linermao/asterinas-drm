@@ -288,6 +288,23 @@ pub struct DrmModeFBCmd {
     pub handle: u32,
 }
 
+pub const DRM_MODE_FB_INTERLACED: u32 = 1 << 0;
+pub const DRM_MODE_FB_MODIFIERS: u32 = 1 << 1;
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod)]
+pub struct DrmModeFbCmd2 {
+    pub fb_id: u32,
+    pub width: u32,
+    pub height: u32,
+    pub pixel_format: u32,
+    pub flags: u32,
+    pub handles: [u32; 4],
+    pub pitches: [u32; 4],
+    pub offsets: [u32; 4],
+    pub modifier: [u64; 4],
+}
+
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod)]
 pub struct DrmModeFbDirtyCmd {
