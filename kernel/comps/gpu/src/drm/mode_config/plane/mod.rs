@@ -38,13 +38,39 @@ impl DrmPlane {
         funcs: Box<dyn PlaneFuncs>,
     ) -> Result<Arc<Self>, DrmError> {
         let id = res.next_object_id();
+        let mut properties = HashMap::new();
+        if let Some(prop_id) = res.find_property_id_by_name("type") {
+            properties.insert(prop_id, type_ as u64);
+        }
+        for name in [
+            "SRC_X",
+            "SRC_Y",
+            "SRC_W",
+            "SRC_H",
+            "CRTC_X",
+            "CRTC_Y",
+            "CRTC_W",
+            "CRTC_H",
+            "FB_ID",
+            "CRTC_ID",
+            "IN_FORMATS",
+        ] {
+            if let Some(prop_id) = res.find_property_id_by_name(name) {
+                properties.insert(prop_id, 0);
+            }
+        }
+        if let Some(prop_id) = res.find_property_id_by_name("IN_FENCE_FD") {
+            // Linux default is -1 for IN_FENCE_FD.
+            properties.insert(prop_id, u64::MAX);
+        }
+
         let plane = Self {
             id,
             type_,
             fb_id: AtomicU32::new(0),
             crtc_id: AtomicU32::new(0),
             possible_crtcs: AtomicU32::new(0),
-            properties: HashMap::new(),
+            properties,
             funcs,
         };
 

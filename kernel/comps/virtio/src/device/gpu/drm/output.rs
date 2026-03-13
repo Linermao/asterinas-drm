@@ -15,7 +15,6 @@ use aster_gpu::drm::{
         encoder::{DrmEncoder, EncoderType, funcs::EncoderFuncs},
         framebuffer::DrmFramebuffer,
         plane::{DrmPlane, PlaneType, funcs::PlaneFuncs},
-        property::{DrmProperty, PropertyFlags},
     },
     vblank::DrmPendingVblankEvent,
 };
@@ -56,22 +55,27 @@ pub fn virtio_gpu_output_init(
     if let Some(connector_mut) = Arc::get_mut(&mut connector) {
         connector_mut.set_connector_identity(DrmModeConnType::VIRTUAL, scanout + 1);
 
-        // Expose EDID through the standard connector blob property so
-        // userspace can query it with GETPROPBLOB/drmModeGetPropertyBlob().
-        if let Some(edid) = vgpu.edids().get(scanout as usize).cloned().flatten() {
-            let size = min(edid.size as usize, edid.edid.len());
-            if size != 0 {
-                let blob_data = Arc::<[u8]>::from(edid.edid[..size].to_vec().into_boxed_slice());
-                let blob_id = mode_config.create_blob(blob_data);
-                let prop_id = mode_config.create_property(DrmProperty::create_blob(
-                    "EDID",
-                    PropertyFlags::IMMUTABLE,
-                    blob_id,
-                ));
-                connector_mut.attach_property(prop_id, blob_id as u64);
+        // Linux virtio-gpu attaches the EDID property only when the feature is
+        // advertised by the device. Start with value 0 and update it if an
+        // EDID blob is available for this scanout.
+        if vgpu.has_edid() {
+            if let Some(prop_id) = mode_config.find_property_id_by_name("EDID") {
+                connector_mut.attach_property(prop_id, 0);
+
+                if let Some(edid) = vgpu.edids().get(scanout as usize).cloned().flatten() {
+                    let size = min(edid.size as usize, edid.edid.len());
+                    if size != 0 {
+                        let blob_data =
+                            Arc::<[u8]>::from(edid.edid[..size].to_vec().into_boxed_slice());
+                        let blob_id = mode_config.create_blob(blob_data);
+                        connector_mut.attach_property(prop_id, blob_id as u64);
+                    }
+                }
             }
         }
     }
+
+    mode_config.register_connector(connector.clone());
 
     // Prime connector state/modes once during init, then userspace-triggered
     // fill_modes() will refresh through the same callback path.

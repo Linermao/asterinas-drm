@@ -1530,61 +1530,82 @@ impl FileIo for DrmFile {
                 let count_values = property.count_values();
                 let count_enum_blobs = property.count_enum_blobs();
 
-                if user_data.is_first_call() {
-                    user_data.name = property.name();
-                    user_data.flags = property.flags();
-                    user_data.count_values = count_values;
-                    user_data.count_enum_blobs = count_enum_blobs;
+                // Linux always returns property metadata regardless of pointer fields.
+                let requested_value_slots = user_data.count_values;
+                let requested_enum_slots = user_data.count_enum_blobs;
 
-                    cmd.write(&user_data)?;
-                } else {
-                    if user_data.count_values < count_values
-                        || user_data.count_enum_blobs < count_enum_blobs
-                    {
-                        return_errno!(Errno::EINVAL);
+                user_data.name = property.name();
+                user_data.flags = property.flags();
+
+                match property.kind() {
+                    PropertyKind::Range { min, max } => {
+                        let values = [*min, *max];
+                        if user_data.values_ptr != 0 {
+                            for (i, val) in values
+                                .iter()
+                                .take(requested_value_slots as usize)
+                                .enumerate()
+                            {
+                                let offset =
+                                    user_data.values_ptr as usize + i * core::mem::size_of::<u64>();
+                                current_userspace!().write_val(offset, val)?;
+                            }
+                        }
                     }
-
-                    match property.kind() {
-                        PropertyKind::Range { min, max } => {
-                            let values = [*min, *max];
-                            for (i, val) in values.iter().enumerate() {
+                    PropertyKind::SignedRange { min, max } => {
+                        let values = [*min as u64, *max as u64];
+                        if user_data.values_ptr != 0 {
+                            for (i, val) in values
+                                .iter()
+                                .take(requested_value_slots as usize)
+                                .enumerate()
+                            {
                                 let offset =
                                     user_data.values_ptr as usize + i * core::mem::size_of::<u64>();
                                 current_userspace!().write_val(offset, val)?;
                             }
                         }
-                        PropertyKind::SignedRange { min, max } => {
-                            let values = [*min, *max];
-                            for (i, val) in values.iter().enumerate() {
-                                let offset =
-                                    user_data.values_ptr as usize + i * core::mem::size_of::<i64>();
-                                current_userspace!().write_val(offset, val)?;
-                            }
-                        }
-                        PropertyKind::Enum(items) | PropertyKind::Bitmask(items) => {
-                            for (i, (val, name)) in items.iter().enumerate() {
-                                // set value
+                    }
+                    PropertyKind::Enum(items) | PropertyKind::Bitmask(items) => {
+                        if user_data.values_ptr != 0 {
+                            for (i, (val, _)) in items
+                                .iter()
+                                .take(requested_value_slots as usize)
+                                .enumerate()
+                            {
                                 let offset =
                                     user_data.values_ptr as usize + i * core::mem::size_of::<u64>();
                                 current_userspace!().write_val(offset, val)?;
+                            }
+                        }
 
-                                // set enum
+                        if user_data.enum_blob_ptr != 0 {
+                            for (i, (val, name)) in items
+                                .iter()
+                                .take(requested_enum_slots as usize)
+                                .enumerate()
+                            {
                                 let prop_enum = PropertyEnum::new(*val, name);
                                 let enum_offset = user_data.enum_blob_ptr as usize
                                     + i * core::mem::size_of::<PropertyEnum>();
                                 current_userspace!().write_val(enum_offset, &prop_enum)?;
                             }
                         }
-                        PropertyKind::Blob(blob_id) => {
-                            current_userspace!()
-                                .write_val(user_data.values_ptr as usize, blob_id)?;
-                        }
-                        PropertyKind::Object(obj_type) => {
-                            current_userspace!()
-                                .write_val(user_data.values_ptr as usize, &(*obj_type as u32))?;
+                    }
+                    PropertyKind::Blob => {}
+                    PropertyKind::Object(obj_type) => {
+                        if user_data.values_ptr != 0 && requested_value_slots != 0 {
+                            current_userspace!().write_val(
+                                user_data.values_ptr as usize,
+                                &(*obj_type as u32 as u64),
+                            )?;
                         }
                     }
                 }
+
+                user_data.count_values = count_values;
+                user_data.count_enum_blobs = count_enum_blobs;
+                cmd.write(&user_data)?;
 
                 Ok(0)
             }
