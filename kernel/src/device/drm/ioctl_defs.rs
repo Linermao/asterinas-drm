@@ -55,6 +55,7 @@ pub(super) type DrmIoctlModeGetProperty         = ioc!(DRM_IOCTL_MODE_GETPROPERT
 pub(super) type DrmIoctlModeSetProperty         = ioc!(DRM_IOCTL_MODE_SETPROPERTY,          b'd', 0xab, InOutData<DrmModeConnectorSetProperty>);
 pub(super) type DrmIoctlModeGetPropBlob         = ioc!(DRM_IOCTL_MODE_GETPROPBLOB,          b'd', 0xac, InOutData<DrmModeGetBlob>);
 pub(super) type DrmIoctlModeAddFB               = ioc!(DRM_IOCTL_MODE_ADDFB,                b'd', 0xae, InOutData<DrmModeFBCmd>);
+pub(super) type DrmIoctlModeAddFB2              = ioc!(DRM_IOCTL_MODE_ADDFB2,               b'd', 0xb8, InOutData<DrmModeFbCmd2>);
 pub(super) type DrmIoctlModeRmFB                = ioc!(DRM_IOCTL_MODE_RMFB,                 b'd', 0xaf, InData<DrmModeFBCmd>);
 pub(super) type DrmIoctlModeDirtyFb             = ioc!(DRM_IOCTL_MODE_DIRTYFB,              b'd', 0xb1, InOutData<DrmModeFbDirtyCmd>);
 pub(super) type DrmIoctlModeCreateDumb          = ioc!(DRM_IOCTL_MODE_CREATE_DUMB,          b'd', 0xb2, InOutData<DrmModeCreateDumb>);

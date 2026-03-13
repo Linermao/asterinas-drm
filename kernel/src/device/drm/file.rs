@@ -246,6 +246,7 @@ const VIRTGPU_MAX_CAPSET_ID: u64 = 63;
 const VIRTGPU_MAX_RINGS: u32 = 64;
 const VIRTGPU_DEBUG_NAME_MAX_LEN: usize = 65;
 const DRM_FORMAT_XRGB8888: u32 = 0x3432_5258;
+const DRM_FORMAT_ARGB8888: u32 = 0x3432_5241;
 
 #[derive(Debug)]
 struct VirtioGpuContextState {
@@ -942,7 +943,7 @@ impl FileIo for DrmFile {
     fn ioctl(&self, raw_ioctl: RawIoctl) -> Result<i32> {
         // TODO: Call GpuDevice.handle_command() if it needs device specific ioctl handling.
         // TODO: drm_file permit flags check (master, root, render ...)
-        println!("drm_file: ioctl cmd={:#x}", raw_ioctl.cmd());
+        // println!("drm_file: ioctl cmd={:#x}", raw_ioctl.cmd());
         dispatch_ioctl!(match raw_ioctl {
             cmd @ DrmIoctlGetUnique => {
                 let mut user_data: DrmUnique = cmd.read()?;
@@ -1637,6 +1638,77 @@ impl FileIo for DrmFile {
                 } else {
                     return_errno!(Errno::EINVAL)
                 }
+
+                Ok(0)
+            }
+            cmd @ DrmIoctlModeAddFB2 => {
+                if !self.device.check_feature(DrmDriverFeatures::MODESET) {
+                    return_errno!(Errno::EOPNOTSUPP);
+                }
+
+                let mut user_data: DrmModeFbCmd2 = cmd.read()?;
+
+                // Linux only allows these two flag bits for ADDFB2.
+                let valid_flags = DRM_MODE_FB_INTERLACED | DRM_MODE_FB_MODIFIERS;
+                if user_data.flags & !valid_flags != 0 {
+                    return_errno!(Errno::EINVAL);
+                }
+
+                let mode_config = self.device.resources().lock();
+                if user_data.width < mode_config.min_width
+                    || user_data.width > mode_config.max_width
+                    || user_data.height < mode_config.min_height
+                    || user_data.height > mode_config.max_height
+                {
+                    return_errno!(Errno::EINVAL);
+                }
+
+                if (user_data.flags & DRM_MODE_FB_MODIFIERS) != 0
+                    && mode_config.fb_modifiers_not_supported
+                {
+                    return_errno!(Errno::EINVAL);
+                }
+                drop(mode_config);
+
+                // We currently support only a single plane in Asterinas mode_config.
+                if user_data.handles[0] == 0 || user_data.pitches[0] == 0 {
+                    return_errno!(Errno::EINVAL);
+                }
+                if user_data.handles[1..].iter().any(|&v| v != 0)
+                    || user_data.pitches[1..].iter().any(|&v| v != 0)
+                    || user_data.offsets[1..].iter().any(|&v| v != 0)
+                    || user_data.modifier[1..].iter().any(|&v| v != 0)
+                {
+                    return_errno!(Errno::EINVAL);
+                }
+
+                // If modifiers are not enabled by flag, all modifiers must be zero.
+                if (user_data.flags & DRM_MODE_FB_MODIFIERS) == 0
+                    && user_data.modifier.iter().any(|&v| v != 0)
+                {
+                    return_errno!(Errno::EINVAL);
+                }
+
+                let bpp = match user_data.pixel_format {
+                    DRM_FORMAT_XRGB8888 | DRM_FORMAT_ARGB8888 => 32,
+                    _ => return_errno!(Errno::EINVAL),
+                };
+
+                let handle = user_data.handles[0];
+                let Some(gem_obj) = self.lookup_gem(&handle) else {
+                    return_errno!(Errno::EINVAL);
+                };
+
+                let mut mode_config = self.device.resources().lock();
+                let fb_id = mode_config.create_framebuffer(
+                    user_data.width,
+                    user_data.height,
+                    user_data.pitches[0],
+                    bpp,
+                    gem_obj,
+                )?;
+                user_data.fb_id = fb_id;
+                cmd.write(&user_data)?;
 
                 Ok(0)
             }
