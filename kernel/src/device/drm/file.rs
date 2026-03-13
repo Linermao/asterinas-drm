@@ -12,6 +12,7 @@ use aster_gpu::drm::{
     },
 };
 use hashbrown::HashMap;
+use alloc::collections::BTreeSet;
 use ostd::mm::{VmIo, io_util::HasVmReaderWriter, HasPaddr, HasSize};
 use ostd::sync::WaitQueue;
 use ostd::Pod;
@@ -225,6 +226,7 @@ struct DrmSyncobjFdFile {
 static DMA_FENCE_CONTEXT_ALLOC: AtomicU64 = AtomicU64::new(1);
 static DMA_FENCE_SEQNO_ALLOC: AtomicU64 = AtomicU64::new(1);
 static DRM_MAGIC_ALLOC: AtomicU32 = AtomicU32::new(1);
+static DRM_MAGIC_TABLE: Mutex<BTreeSet<u32>> = Mutex::new(BTreeSet::new());
 
 /// Minimal in-kernel dma_fence-like abstraction.
 ///
@@ -955,10 +957,14 @@ impl FileIo for DrmFile {
                 Ok(0)
             }
             cmd @ DrmIoctlGetMagic => {
-                let mut user_data: DrmAuth = cmd.read()?;
+                let mut user_data = DrmAuth { magic: 0 };
                 user_data.magic = DRM_MAGIC_ALLOC.fetch_add(1, Ordering::Relaxed);
                 if user_data.magic == 0 {
                     user_data.magic = DRM_MAGIC_ALLOC.fetch_add(1, Ordering::Relaxed);
+                }
+                {
+                    let mut table = DRM_MAGIC_TABLE.lock();
+                    table.insert(user_data.magic);
                 }
                 cmd.write(&user_data)?;
                 Ok(0)
@@ -983,10 +989,14 @@ impl FileIo for DrmFile {
                 Ok(0)
             }
             cmd @ DrmIoctlAuthMagic => {
-                let _user_data: DrmAuth = cmd.read()?;
-                // We currently do not enforce master-auth tables per file.
-                // Accepting AUTH_MAGIC keeps libdrm/KMS user-space paths working.
-                Ok(0)
+                let user_data: DrmAuth = cmd.read()?;
+                let mut table = DRM_MAGIC_TABLE.lock();
+                if table.remove(&user_data.magic) {
+                    // Consider the magic authenticated for the purpose of userspace.
+                    Ok(0)
+                } else {
+                    return_errno!(Errno::EINVAL);
+                }
             }
             cmd @ DrmIoctlVersion => {
                 let mut user_data: DrmVersion = cmd.read()?;
