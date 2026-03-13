@@ -15,6 +15,7 @@ use aster_gpu::drm::{
         encoder::{DrmEncoder, EncoderType, funcs::EncoderFuncs},
         framebuffer::DrmFramebuffer,
         plane::{DrmPlane, PlaneType, funcs::PlaneFuncs},
+        property::{DrmProperty, PropertyFlags},
     },
     vblank::DrmPendingVblankEvent,
 };
@@ -48,12 +49,28 @@ pub fn virtio_gpu_output_init(
         mode_config,
         &[encoder],
         Box::new(VirtioConnectorFuncs {
-            vgpu,
+            vgpu: vgpu.clone(),
             scanout,
         }),
     )?;
     if let Some(connector_mut) = Arc::get_mut(&mut connector) {
         connector_mut.set_connector_identity(DrmModeConnType::VIRTUAL, scanout + 1);
+
+        // Expose EDID through the standard connector blob property so
+        // userspace can query it with GETPROPBLOB/drmModeGetPropertyBlob().
+        if let Some(edid) = vgpu.edids().get(scanout as usize).cloned().flatten() {
+            let size = min(edid.size as usize, edid.edid.len());
+            if size != 0 {
+                let blob_data = Arc::<[u8]>::from(edid.edid[..size].to_vec().into_boxed_slice());
+                let blob_id = mode_config.create_blob(blob_data);
+                let prop_id = mode_config.create_property(DrmProperty::create_blob(
+                    "EDID",
+                    PropertyFlags::IMMUTABLE,
+                    blob_id,
+                ));
+                connector_mut.attach_property(prop_id, blob_id as u64);
+            }
+        }
     }
 
     // Prime connector state/modes once during init, then userspace-triggered
