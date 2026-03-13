@@ -1,4 +1,5 @@
 use alloc::{boxed::Box, sync::Arc};
+use core::sync::atomic::{AtomicU32, Ordering};
 
 use hashbrown::HashMap;
 
@@ -22,7 +23,9 @@ pub enum PlaneType {
 pub struct DrmPlane {
     id: u32,
     type_: PlaneType,
-    fb_id: u32,
+    fb_id: AtomicU32,
+    crtc_id: AtomicU32,
+    possible_crtcs: AtomicU32,
 
     properties: HashMap<u32, u64>,
     funcs: Box<dyn PlaneFuncs>,
@@ -38,7 +41,9 @@ impl DrmPlane {
         let plane = Self {
             id,
             type_,
-            fb_id: 0,
+            fb_id: AtomicU32::new(0),
+            crtc_id: AtomicU32::new(0),
+            possible_crtcs: AtomicU32::new(0),
             properties: HashMap::new(),
             funcs,
         };
@@ -54,7 +59,25 @@ impl DrmPlane {
         self.type_
     }
     pub fn fb_id(&self) -> u32 {
-        self.fb_id
+        self.fb_id.load(Ordering::Acquire)
+    }
+
+    pub fn crtc_id(&self) -> u32 {
+        self.crtc_id.load(Ordering::Acquire)
+    }
+
+    pub fn possible_crtcs(&self) -> u32 {
+        self.possible_crtcs.load(Ordering::Acquire)
+    }
+
+    pub fn add_possible_crtc(&self, crtc_index: u8) {
+        self.possible_crtcs
+            .fetch_or(1u32 << crtc_index, Ordering::AcqRel);
+    }
+
+    pub fn set_state(&self, crtc_id: u32, fb_id: u32) {
+        self.crtc_id.store(crtc_id, Ordering::Release);
+        self.fb_id.store(fb_id, Ordering::Release);
     }
 }
 
