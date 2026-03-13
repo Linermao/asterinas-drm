@@ -45,7 +45,7 @@ use crate::{
         signal::{PollHandle, Pollable, Pollee},
     },
     time::{clocks::MonotonicClock, wait::WaitTimeout},
-    util::ioctl::{RawIoctl, dispatch_ioctl},
+    util::ioctl::{InOutData, RawIoctl, dispatch_ioctl, ioc},
 };
 use aster_virtio::device::gpu::{
     device::VirtioGpuDevice,
@@ -54,14 +54,54 @@ use aster_virtio::device::gpu::{
 
 struct DrmSyncPoint {
     signaled: AtomicBool,
+    signaled_timestamp_ns: AtomicU64,
     wait_queue: WaitQueue,
     eventfd_listeners: Mutex<Vec<Arc<dyn FileLike>>>,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, Pod)]
+struct SyncFileInfo {
+    name: [u8; 32],
+    status: i32,
+    flags: u32,
+    num_fences: u32,
+    pad: u32,
+    sync_fence_info: u64,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, Pod)]
+struct SyncFenceInfo {
+    obj_name: [u8; 32],
+    driver_name: [u8; 32],
+    status: i32,
+    flags: u32,
+    timestamp_ns: u64,
+}
+
+type SyncIoctlFileInfo = ioc!(SYNC_IOC_FILE_INFO, b'>', 4, InOutData<SyncFileInfo>);
+
+fn sync_status_from_signaled(signaled: bool) -> i32 {
+    if signaled { 0 } else { 1 }
+}
+
+fn fixed_c_string(bytes: &[u8]) -> [u8; 32] {
+    let mut out = [0u8; 32];
+    let len = bytes.len().min(out.len().saturating_sub(1));
+    out[..len].copy_from_slice(&bytes[..len]);
+    out
 }
 
 impl DrmSyncPoint {
     fn new(signaled: bool) -> Self {
         Self {
             signaled: AtomicBool::new(signaled),
+            signaled_timestamp_ns: AtomicU64::new(if signaled {
+                MonotonicClock::get().read_time().as_nanos() as u64
+            } else {
+                0
+            }),
             wait_queue: WaitQueue::new(),
             eventfd_listeners: Mutex::new(Vec::new()),
         }
@@ -72,7 +112,13 @@ impl DrmSyncPoint {
     }
 
     fn signal(&self) {
-        self.signaled.store(true, Ordering::Release);
+        let was_signaled = self.signaled.swap(true, Ordering::AcqRel);
+        if !was_signaled {
+            self.signaled_timestamp_ns.store(
+                MonotonicClock::get().read_time().as_nanos() as u64,
+                Ordering::Release,
+            );
+        }
         self.wait_queue.wake_all();
 
         let listeners = core::mem::take(&mut *self.eventfd_listeners.lock());
@@ -83,6 +129,11 @@ impl DrmSyncPoint {
 
     fn reset(&self) {
         self.signaled.store(false, Ordering::Release);
+        self.signaled_timestamp_ns.store(0, Ordering::Release);
+    }
+
+    fn signaled_timestamp_ns(&self) -> u64 {
+        self.signaled_timestamp_ns.load(Ordering::Acquire)
     }
 
     fn register_eventfd(&self, eventfd: Arc<dyn FileLike>) {
@@ -374,6 +425,37 @@ impl Pollable for DrmSyncFile {
 }
 
 impl FileLike for DrmSyncFile {
+    fn ioctl(&self, raw_ioctl: RawIoctl) -> Result<i32> {
+        dispatch_ioctl!(match raw_ioctl {
+            cmd @ SyncIoctlFileInfo => {
+                let mut user_data: SyncFileInfo = cmd.read()?;
+                let signaled = self.fence.is_signaled();
+
+                user_data.name = fixed_c_string(b"drm-sync-file");
+                user_data.status = sync_status_from_signaled(signaled);
+                user_data.flags = 0;
+                user_data.pad = 0;
+                user_data.num_fences = 1;
+
+                if user_data.sync_fence_info != 0 && user_data.num_fences != 0 {
+                    let fence_info = SyncFenceInfo {
+                        obj_name: fixed_c_string(b"drm-out-fence"),
+                        driver_name: fixed_c_string(b"asterinas"),
+                        status: sync_status_from_signaled(signaled),
+                        flags: 0,
+                        timestamp_ns: self.fence.sync_point().signaled_timestamp_ns(),
+                    };
+                    current_userspace!()
+                        .write_val(user_data.sync_fence_info as usize, &fence_info)?;
+                }
+
+                cmd.write(&user_data)?;
+                Ok(0)
+            }
+            _ => return_errno_with_message!(Errno::ENOTTY, "the ioctl command is unknown"),
+        })
+    }
+
     fn inode(&self) -> &Arc<dyn Inode> {
         AnonInodeFs::shared_inode()
     }
