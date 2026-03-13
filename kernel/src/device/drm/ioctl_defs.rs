@@ -9,7 +9,7 @@ use aster_virtio::device::gpu::drm::{
     VirtioGpuWait,
 };
 
-use crate::util::ioctl::{InData, InOutData, NoData, ioc};
+use crate::util::ioctl::{InData, InOutData, OutData, NoData, ioc};
 use ostd::Pod;
 
 #[repr(C)]
@@ -36,7 +36,7 @@ pub(super) struct DrmSetVersion {
 
 pub(super) type DrmIoctlVersion                 = ioc!(DRM_IOCTL_VERSION,                   b'd', 0x00, InOutData<DrmVersion>);
 pub(super) type DrmIoctlGetUnique               = ioc!(DRM_IOCTL_GET_UNIQUE,                b'd', 0x01, InOutData<DrmUnique>);
-pub(super) type DrmIoctlGetMagic                = ioc!(DRM_IOCTL_GET_MAGIC,                 b'd', 0x02, InOutData<DrmAuth>);
+pub(super) type DrmIoctlGetMagic                = ioc!(DRM_IOCTL_GET_MAGIC,                 b'd', 0x02, OutData<DrmAuth>);
 pub(super) type DrmIoctlSetVersion              = ioc!(DRM_IOCTL_SET_VERSION,               b'd', 0x07, InOutData<DrmSetVersion>);
 pub(super) type DrmIoctlAuthMagic               = ioc!(DRM_IOCTL_AUTH_MAGIC,                b'd', 0x11, InData<DrmAuth>);
 pub(super) type DrmIoctlGetCap                  = ioc!(DRM_IOCTL_GET_CAP,                   b'd', 0x0c, InOutData<DrmGetCap>);
