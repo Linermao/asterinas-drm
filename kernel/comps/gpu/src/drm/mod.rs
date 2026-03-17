@@ -1,18 +1,18 @@
-use alloc::sync::Arc;
+use alloc::{boxed::Box, sync::Arc};
 use core::{
-    fmt::Debug,
-    sync::atomic::{AtomicU64, Ordering},
+    any::Any, fmt::Debug, sync::atomic::{AtomicU64, Ordering}
 };
 
 use hashbrown::HashMap;
 use ostd::{mm::PAGE_SIZE, sync::Mutex};
 
 use crate::drm::{
-    gem::DrmGemObject,
+    gem::{DrmGemBackend, DrmGemObject},
     ioctl::{DrmModeCreateDumb, DrmModeFbCmd},
     mode_config::{DrmModeConfig, ObjectId},
 };
 
+pub mod atomic;
 pub mod drm_modes;
 pub mod gem;
 pub mod ioctl;
@@ -62,7 +62,7 @@ bitflags::bitflags! {
     }
 }
 
-pub type MemfdallocatorType = fn(&str, u32, u64) -> Result<Arc<dyn DrmGemObject>, DrmError>;
+pub type MemfdallocatorType = fn(&str, u64) -> Result<Box<dyn DrmGemBackend>, DrmError>;
 
 #[derive(Debug)]
 pub struct VmaOffsetManager {
@@ -98,7 +98,7 @@ impl VmaOffsetManager {
     }
 }
 
-pub trait DrmDevice: Debug + Send + Sync {
+pub trait DrmDevice: Debug + Any + Send + Sync {
     fn name(&self) -> &str;
     fn desc(&self) -> &str;
     fn date(&self) -> &str;

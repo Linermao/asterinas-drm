@@ -23,6 +23,10 @@ pub(super) fn init_in_first_kthread() -> Result<()> {
     let mut any_success = false;
 
     for (index, dev) in gpus.iter().enumerate() {
+        if dev.name() == "simpledrm" && gpus.len() > 1 {
+            continue;
+        }
+        
         match drm_dev_register(index as u32, dev) {
             Ok(_) => {
                 // log::info!("[kernel] gpu driver {:?} probe correctly!", device.name());

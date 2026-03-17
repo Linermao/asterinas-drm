@@ -1,11 +1,11 @@
-use alloc::{sync::Arc, vec::Vec};
+use alloc::{boxed::Box, sync::Arc, vec::Vec};
 
 use aster_framebuffer::FRAMEBUFFER;
 use aster_gpu::drm::{
     DrmDevice, DrmDeviceCaps, DrmError, DrmFeatures, MemfdallocatorType, VmaOffsetManager,
     drm_modes::DrmDisplayMode,
-    gem::DrmGemObject,
-    ioctl::{DrmModeCreateDumb, DrmModeFbCmd},
+    gem::{DrmGemBackend, DrmGemObject},
+    ioctl::{DrmModeCreateDumb, DrmModeFbCmd, DrmModeFbDirtyCmd},
     mode_config::{DrmModeConfig, ObjectId},
     mode_object::{
         DrmObject,
@@ -34,6 +34,7 @@ const MIN_WIDTH: u32 = 1;
 const MAX_WIDTH: u32 = 4096;
 const MIN_HEIGHT: u32 = 1;
 const MAX_HEIGHT: u32 = 4096;
+const PREFERRED_DEPTH: u32 = 16;
 
 #[derive(Debug)]
 pub(crate) struct SimpleDrmDevice {
@@ -43,7 +44,19 @@ pub(crate) struct SimpleDrmDevice {
 
 impl SimpleDrmDevice {
     pub fn new() -> Self {
-        let mut mode_config = DrmModeConfig::new(MIN_WIDTH, MAX_WIDTH, MIN_HEIGHT, MAX_HEIGHT);
+        // TODO: true format infomation
+        let mut mode_config = DrmModeConfig::new(
+            MIN_WIDTH,
+            MAX_WIDTH,
+            MIN_HEIGHT,
+            MAX_HEIGHT,
+            PREFERRED_DEPTH,
+            0,
+            0,
+            0,
+            true,
+            false,
+        );
 
         Self::init_objects(&mut mode_config);
 
@@ -114,7 +127,10 @@ impl DrmDevice for SimpleDrmDevice {
         let pitch = args.width * (args.bpp / 8);
         let size = (pitch * args.height) as u64;
 
-        memfd_allocator("simpledrm-dumb", pitch, size)
+        let backend = memfd_allocator("simpledrm-dumb", size)?;
+        let gem_object = SimpleDrmGemObject::new(pitch, size, backend);
+
+        Ok(Arc::new(gem_object))
     }
 
     fn map_dumb(&self, handle: u32) -> Result<u64, DrmError> {
@@ -123,14 +139,49 @@ impl DrmDevice for SimpleDrmDevice {
 
     fn fb_create(
         &self,
-        _fb_cmd: &DrmModeFbCmd,
+        fb_cmd: &DrmModeFbCmd,
         gem_object: Arc<dyn DrmGemObject>,
     ) -> Result<ObjectId, DrmError> {
-        let fb = Arc::new(SimpleDrmFramebuffer::new(gem_object));
+        let fb = Arc::new(SimpleDrmFramebuffer::new(
+            fb_cmd.width,
+            fb_cmd.height,
+            gem_object,
+        ));
 
         let handle = self.mode_config.lock().add_framebuffer(fb);
 
         Ok(handle)
+    }
+}
+
+#[derive(Debug)]
+struct SimpleDrmGemObject {
+    pitch: u32,
+    size: u64,
+    backend: Box<dyn DrmGemBackend>,
+}
+
+impl DrmGemObject for SimpleDrmGemObject {
+    fn pitch(&self) -> u32 {
+        self.pitch
+    }
+
+    fn size(&self) -> u64 {
+        self.size
+    }
+
+    fn backend(&self) -> &Box<dyn DrmGemBackend> {
+        &self.backend
+    }
+}
+
+impl SimpleDrmGemObject {
+    fn new(pitch: u32, size: u64, backend: Box<dyn DrmGemBackend>) -> Self {
+        Self {
+            pitch,
+            size,
+            backend,
+        }
     }
 }
 
@@ -170,12 +221,12 @@ impl DrmCrtc for SimpleDrmCrtc {
         &self.state
     }
 
-    fn primary_plane(&self) -> Arc<dyn DrmPlane> {
-        self.primary.clone()
+    fn primary_plane(&self) -> &Arc<dyn DrmPlane> {
+        &self.primary
     }
 
-    fn cursor_plane(&self) -> Option<Arc<dyn DrmPlane>> {
-        self.cursor.clone()
+    fn cursor_plane(&self) -> &Option<Arc<dyn DrmPlane>> {
+        &self.cursor
     }
 
     fn set_config(
@@ -184,12 +235,13 @@ impl DrmCrtc for SimpleDrmCrtc {
         _y: u32,
         fb: Arc<dyn DrmFramebuffer>,
         _connectors: Vec<Arc<dyn DrmConnector>>,
+        _dev: Arc<dyn DrmDevice>,
     ) -> Result<(), DrmError> {
         // TODO:
         if let Some(framebuffer) = FRAMEBUFFER.get() {
             let iomem = framebuffer.io_mem();
             let mut writer = iomem.writer().to_fallible();
-            fb.gem_object().read(0, &mut writer)?;
+            fb.gem_object().backend().read(0, &mut writer)?;
         } else {
             return Err(DrmError::NotFound);
         }
@@ -259,7 +311,7 @@ impl DrmConnector for SimpleDrmConnector {
         &self.state
     }
 
-    fn fill_modes(&self) -> Result<(), DrmError> {
+    fn fill_modes(&self, dev: Arc<dyn DrmDevice>) -> Result<(), DrmError> {
         {
             let mut state = self.state.lock();
             // TODO: with force
@@ -267,12 +319,12 @@ impl DrmConnector for SimpleDrmConnector {
             state.set_status(status);
         }
 
-        self.get_modes()?;
+        self.get_modes(dev)?;
 
         Ok(())
     }
 
-    fn get_modes(&self) -> Result<(), DrmError> {
+    fn get_modes(&self, _dev: Arc<dyn DrmDevice>) -> Result<(), DrmError> {
         let fb_info = boot_info().framebuffer_arg;
 
         let mode = if let Some(fb) = fb_info {
@@ -319,17 +371,44 @@ impl SimpleDrmConnector {
 
 #[derive(Debug)]
 struct SimpleDrmFramebuffer {
+    width: u32,
+    height: u32,
     gem_object: Arc<dyn DrmGemObject>,
 }
 
 impl DrmFramebuffer for SimpleDrmFramebuffer {
+    fn width(&self) -> u32 {
+        self.width
+    }
+
+    fn height(&self) -> u32 {
+        self.height
+    }
+
     fn gem_object(&self) -> Arc<dyn DrmGemObject> {
         self.gem_object.clone()
+    }
+
+    fn dirty(&self, _dev: Arc<dyn DrmDevice>, _dirty_cmd: &DrmModeFbDirtyCmd) -> Result<(), DrmError> {
+        // TODO
+        if let Some(framebuffer) = FRAMEBUFFER.get() {
+            let iomem = framebuffer.io_mem();
+            let mut writer = iomem.writer().to_fallible();
+            self.gem_object().backend().read(0, &mut writer)?;
+        } else {
+            return Err(DrmError::NotFound);
+        }
+
+        Ok(())
     }
 }
 
 impl SimpleDrmFramebuffer {
-    fn new(gem_object: Arc<dyn DrmGemObject>) -> Self {
-        Self { gem_object }
+    fn new(width: u32, height: u32, gem_object: Arc<dyn DrmGemObject>) -> Self {
+        Self {
+            width,
+            height,
+            gem_object,
+        }
     }
 }

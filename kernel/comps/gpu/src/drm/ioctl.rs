@@ -1,3 +1,5 @@
+use int_to_c_enum::TryFromInt;
+
 use crate::drm::{drm_modes::DrmModeModeInfo, mode_object::property::DRM_PROP_NAME_LEN};
 
 #[repr(C)]
@@ -20,6 +22,58 @@ impl DrmVersion {
     pub fn is_first_call(&self) -> bool {
         return self.name == 0 && self.date == 0 && self.desc == 0;
     }
+}
+
+#[repr(u64)]
+#[derive(Debug, TryFromInt)]
+pub enum DrmGetCapabilities {
+    DumbBuffer = 0x1,
+    VblankHighCrtc = 0x2,
+    DumbPreferredDepth = 0x3,
+    DumbPreferShadow = 0x4,
+    Prime = 0x5,
+    TimestampMonotonic = 0x6,
+    AsyncPageFlip = 0x7,
+    CursorWidth = 0x8,
+    CursorHeight = 0x9,
+    Addfb2Modifiers = 0x10,
+    PageFlipTarget = 0x11,
+    CrtcInVblankEvent = 0x12,
+    SyncObj = 0x13,
+    SyncObjTimeline = 0x14,
+    AtomicAsyncPageFlip = 0x15,
+}
+
+bitflags::bitflags! {
+    pub struct DrmPrimeValue: u64 {
+        const IMPORT = 0x1;
+        const EXPORT = 0x2;
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod)]
+pub struct DrmGetCap {
+    pub capability: u64,
+    pub value: u64,
+}
+
+#[repr(u64)]
+#[derive(Debug, TryFromInt)]
+pub enum DrmSetCapabilities {
+    Stereo3D = 0x1,
+    UniversalPlane = 0x2,
+    Atomic = 0x3,
+    AspectRatio = 0x4,
+    WritebackConnectors = 0x5,
+    CursorPlaneHostport = 0x6,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod)]
+pub struct DrmSetClientCap {
+    pub capability: u64,
+    pub value: u64,
 }
 
 #[repr(C)]
@@ -65,6 +119,45 @@ pub struct DrmModeCrtc {
     pub gamma_size: u32,
     pub mode_valid: u32,
     pub mode: DrmModeModeInfo,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod)]
+pub struct DrmModeCursor {
+    pub flags: u32,
+    pub crtc_id: u32,
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+    pub handle: u32,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod)]
+pub struct DrmModeCursor2 {
+    pub flags: u32,
+    pub crtc_id: u32,
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+    pub handle: u32,
+    pub hot_x: i32,
+    pub hot_y: i32,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod)]
+pub struct DrmModeAtomic {
+    pub flags: u32,
+    pub count_objs: u32,
+    pub objs_ptr: u64,
+    pub count_props_ptr: u64,
+    pub props_ptr: u64,
+    pub prop_values_ptr: u64,
+    pub reserved: u64,
+    pub user_data: u64,
 }
 
 #[repr(C)]
@@ -163,6 +256,16 @@ pub struct DrmModeFbCmd {
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod)]
+pub struct DrmModeFbDirtyCmd {
+    pub fb_id: u32,
+    pub flags: u32,
+    pub color: u32,
+    pub num_clips: u32,
+    pub clips_ptr: u64,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod)]
 pub struct DrmModeCreateDumb {
     pub height: u32,
     pub width: u32,
@@ -189,6 +292,33 @@ pub struct DrmModeDestroyDumb {
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod)]
+pub struct DrmModeGetPlaneRes {
+    pub plane_id_ptr: u64,
+    pub count_planes: u32,
+    __padding: u32,
+}
+
+impl DrmModeGetPlaneRes {
+    pub fn is_first_call(&self) -> bool {
+        return self.plane_id_ptr == 0;
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod)]
+pub struct DrmModeGetPlane {
+    pub plane_id: u32,
+    pub crtc_id: u32,
+    pub fb_id: u32,
+    pub possible_crtcs: u32,
+    /// Never used.
+    pub gamma_size: u32,
+    pub count_format_types: u32,
+    pub format_type_ptr: u64,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod)]
 pub struct DrmModeObjectGetProps {
     pub props_ptr: u64,
     pub prop_values_ptr: u64,
@@ -209,5 +339,11 @@ impl DrmModeObjectGetProps {
 pub struct DrmModeCreateBlob {
     pub data: u64,
     pub length: u32,
+    pub blob_id: u32,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod)]
+pub struct DrmModeDestroyBlob {
     pub blob_id: u32,
 }

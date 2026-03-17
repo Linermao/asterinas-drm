@@ -1,6 +1,6 @@
 use alloc::vec;
 
-use crate::drm::mode_object::property::{DrmProperty, PropertyEnum, PropertyFlags, PropertySpec};
+use crate::drm::mode_object::property::{DrmProperty, PropertyEnum, DrmPropertyFlags, PropertySpec};
 
 #[repr(u64)]
 #[derive(Debug)]
@@ -33,7 +33,7 @@ impl PropertySpec for ConnectorProps {
         match self {
             Self::DPMS => DrmProperty::create_enum(
                 "DPMS",
-                PropertyFlags::empty(),
+                DrmPropertyFlags::empty(),
                 vec![
                     PropertyEnum::new(DrmModeDpms::ON as u64, "On"),
                     PropertyEnum::new(DrmModeDpms::STANDBY as u64, "Standby"),
@@ -43,15 +43,15 @@ impl PropertySpec for ConnectorProps {
             ),
             Self::LinkStatus => DrmProperty::create_enum(
                 "LinkStatus",
-                PropertyFlags::empty(),
+                DrmPropertyFlags::empty(),
                 vec![
                     PropertyEnum::new(DrmLinkStatus::GOOD as u64, "Good"),
                     PropertyEnum::new(DrmLinkStatus::BAD as u64, "Bad"),
                 ],
             ),
-            Self::NonDesktop => DrmProperty::create_bool("NonDesktop", PropertyFlags::IMMUTABLE),
+            Self::NonDesktop => DrmProperty::create_bool("NonDesktop", DrmPropertyFlags::IMMUTABLE),
             Self::TILE => {
-                DrmProperty::create("Tile", PropertyFlags::BLOB | PropertyFlags::IMMUTABLE)
+                DrmProperty::create("Tile", DrmPropertyFlags::BLOB | DrmPropertyFlags::IMMUTABLE)
             }
         }
     }

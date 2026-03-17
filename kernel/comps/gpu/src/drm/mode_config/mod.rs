@@ -28,10 +28,29 @@ pub struct DrmModeConfig {
     max_width: u32,
     min_height: u32,
     max_height: u32,
+
+    preferred_depth: u32,
+    prefer_shadow: u32,
+    cursor_width: u32,
+    cursor_height: u32,
+
+    async_page_flip: bool,
+    fb_modifiers_not_supported: bool,
 }
 
 impl DrmModeConfig {
-    pub fn new(min_width: u32, max_width: u32, min_height: u32, max_height: u32) -> Self {
+    pub fn new(
+        min_width: u32,
+        max_width: u32,
+        min_height: u32,
+        max_height: u32,
+        preferred_depth: u32,
+        prefer_shadow: u32,
+        cursor_width: u32,
+        cursor_height: u32,
+        async_page_flip: bool,
+        fb_modifiers_not_supported: bool,
+    ) -> Self {
         Self {
             planes: Vec::new(),
             crtcs: Vec::new(),
@@ -46,7 +65,38 @@ impl DrmModeConfig {
             max_width,
             min_height,
             max_height,
+
+            preferred_depth,
+            prefer_shadow,
+            cursor_width,
+            cursor_height,
+            async_page_flip,
+            fb_modifiers_not_supported,
         }
+    }
+
+    pub fn preferred_depth(&self) -> u32 {
+        self.preferred_depth
+    }
+
+    pub fn prefer_shadow(&self) -> u32 {
+        self.prefer_shadow
+    }
+
+    pub fn cursor_width(&self) -> u32 {
+        self.cursor_width
+    }
+    
+    pub fn cursor_height(&self) -> u32 {
+        self.cursor_height
+    }
+
+    pub fn async_page_flip(&self) -> bool {
+        self.async_page_flip
+    }
+    
+    pub fn fb_modifiers_not_supported(&self) -> bool {
+        self.fb_modifiers_not_supported
     }
 
     pub fn next_object_id(&self) -> ObjectId {

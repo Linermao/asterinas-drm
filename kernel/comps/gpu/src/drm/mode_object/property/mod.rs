@@ -8,16 +8,18 @@ use crate::drm::mode_object::{DrmObject, DrmObjectCast};
 pub const DRM_PROP_NAME_LEN: usize = 32;
 pub type PropertyObject = HashMap<u32, u64>;
 
-fn str_to_u8_32(s: &str) -> [u8; 32] {
-    let mut buf = [0u8; 32];
+fn str_to_u8(s: &str) -> [u8; DRM_PROP_NAME_LEN] {
+    let mut buf = [0u8; DRM_PROP_NAME_LEN];
+
     let bytes = s.as_bytes();
-    let len = core::cmp::min(bytes.len(), 32);
+    let len = bytes.len().min(DRM_PROP_NAME_LEN - 1);
+
     buf[..len].copy_from_slice(&bytes[..len]);
     buf
 }
 
 bitflags::bitflags! {
-    pub struct PropertyFlags: u32 {
+    pub struct DrmPropertyFlags: u32 {
         const PENDING    = 1 << 0;
         const RANGE      = 1 << 1;
         const IMMUTABLE  = 1 << 2;
@@ -44,7 +46,7 @@ pub enum DrmModeObjectType {
 }
 
 #[derive(Debug, Clone)]
-pub enum PropertyKind {
+pub enum DrmPropertyKind {
     Range { min: u64, max: u64 },
     SignedRange { min: i64, max: i64 },
     Enum(Vec<PropertyEnum>),
@@ -84,65 +86,76 @@ impl DrmObjectCast for DrmModeBlob {
 
 #[derive(Debug, Clone)]
 pub struct DrmProperty {
-    name: [u8; DRM_PROP_NAME_LEN],
-    flags: PropertyFlags,
-    kind: PropertyKind,
+    name: &'static str,
+    flags: DrmPropertyFlags,
+    kind: DrmPropertyKind,
+    type_: DrmPropertyType,
 }
 
 impl DrmProperty {
-    pub fn name(&self) -> [u8; DRM_PROP_NAME_LEN] {
+    pub fn name(&self) -> &'static str {
         self.name
+    }
+
+    pub fn name_to_u8(&self) -> [u8; DRM_PROP_NAME_LEN] {
+        str_to_u8(self.name)
+    }
+
+    pub fn type_(&self) -> DrmPropertyType {
+        self.type_
     }
 
     pub fn flags(&self) -> u32 {
         self.flags.bits()
     }
 
-    pub fn kind(&self) -> &PropertyKind {
+    pub fn kind(&self) -> &DrmPropertyKind {
         &self.kind
     }
 
-    pub fn create(name: &str, flags: PropertyFlags) -> Self {
-        let name = str_to_u8_32(name);
+    pub fn create(name: &'static str, flags: DrmPropertyFlags) -> Self {
         Self {
             name,
             flags,
-            kind: PropertyKind::Blob(0),
+            kind: DrmPropertyKind::Blob(0),
+            type_: DrmPropertyType::from_name(name)
         }
     }
 
-    pub fn create_bool(name: &str, flags: PropertyFlags) -> Self {
+    pub fn create_bool(name: &'static str, flags: DrmPropertyFlags) -> Self {
         Self::create_range(name, flags, 0, 1)
     }
 
-    pub fn create_range(name: &str, flags: PropertyFlags, min: u64, max: u64) -> Self {
+    pub fn create_range(name: &'static str, flags: DrmPropertyFlags, min: u64, max: u64) -> Self {
         Self {
-            name: str_to_u8_32(name),
-            flags: flags | PropertyFlags::RANGE,
-            kind: PropertyKind::Range { min, max },
+            name,
+            flags: flags | DrmPropertyFlags::RANGE,
+            kind: DrmPropertyKind::Range { min, max },
+            type_: DrmPropertyType::from_name(name)
         }
     }
 
-    pub fn create_enum(name: &str, flags: PropertyFlags, enums: Vec<PropertyEnum>) -> Self {
+    pub fn create_enum(name: &'static str, flags: DrmPropertyFlags, enums: Vec<PropertyEnum>) -> Self {
         Self {
-            name: str_to_u8_32(name),
-            flags: flags | PropertyFlags::ENUM,
-            kind: PropertyKind::Enum(enums),
+            name,
+            flags: flags | DrmPropertyFlags::ENUM,
+            kind: DrmPropertyKind::Enum(enums),
+            type_: DrmPropertyType::from_name(name)
         }
     }
 
     pub fn count_values(&self) -> u32 {
         match &self.kind {
-            PropertyKind::Range { .. } => 2,
-            PropertyKind::SignedRange { .. } => 2,
+            DrmPropertyKind::Range { .. } => 2,
+            DrmPropertyKind::SignedRange { .. } => 2,
             _ => 0,
         }
     }
 
     pub fn count_enum_blobs(&self) -> u32 {
         match &self.kind {
-            PropertyKind::Enum(entries) => entries.len() as u32,
-            PropertyKind::Bitmask(entries) => entries.len() as u32,
+            DrmPropertyKind::Enum(entries) => entries.len() as u32,
+            DrmPropertyKind::Bitmask(entries) => entries.len() as u32,
             _ => 0,
         }
     }
@@ -158,6 +171,31 @@ impl DrmObjectCast for DrmProperty {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+pub enum DrmPropertyType {
+    CrtcId,
+    FbId,
+    Active,
+    ModeId,
+    OutFencePtr,
+    InFenceFd,
+    Unknown,
+}
+
+impl DrmPropertyType {
+    pub fn from_name(name: &str) -> Self {
+        match name {
+            "CRTC_ID" => Self::CrtcId,
+            "FB_ID" => Self::FbId,
+            "ACTIVE" => Self::Active,
+            "MODE_ID" => Self::ModeId,
+            "OUT_FENCE_PTR" => Self::OutFencePtr,
+            "IN_FENCE_FD" => Self::InFenceFd,
+            _ => Self::Unknown,
+        }
+    }
+}
+
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod)]
 pub struct PropertyEnum {
@@ -166,10 +204,10 @@ pub struct PropertyEnum {
 }
 
 impl PropertyEnum {
-    pub fn new(value: u64, name: &str) -> Self {
+    pub fn new(value: u64, name: &'static str) -> Self {
         Self {
             value,
-            name: str_to_u8_32(name),
+            name: str_to_u8(name),
         }
     }
 }

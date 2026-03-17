@@ -4,26 +4,25 @@ use core::fmt::Debug;
 use ostd::sync::Mutex;
 
 use crate::drm::{
-    DrmError,
-    drm_modes::DrmDisplayMode,
-    mode_object::{
+    DrmDevice, DrmError, drm_modes::DrmDisplayMode, mode_object::{
         DrmObject, DrmObjectCast, connector::DrmConnector, framebuffer::DrmFramebuffer,
         plane::DrmPlane, property::PropertyObject,
-    },
+    }
 };
 
 pub mod property;
 
 pub trait DrmCrtc: Debug + Send + Sync {
     fn state(&self) -> &Mutex<CrtcState>;
-    fn primary_plane(&self) -> Arc<dyn DrmPlane>;
-    fn cursor_plane(&self) -> Option<Arc<dyn DrmPlane>>;
+    fn primary_plane(&self) -> &Arc<dyn DrmPlane>;
+    fn cursor_plane(&self) -> &Option<Arc<dyn DrmPlane>>;
     fn set_config(
         &self,
         x: u32,
         y: u32,
         fb: Arc<dyn DrmFramebuffer>,
         connectors: Vec<Arc<dyn DrmConnector>>,
+        dev: Arc<dyn DrmDevice>,
     ) -> Result<(), DrmError>;
 }
 
@@ -51,6 +50,14 @@ impl dyn DrmCrtc {
     pub fn get_properties(&self) -> PropertyObject {
         self.state().lock().properties.clone()
     }
+
+    pub fn active(&self) -> bool {
+        self.state().lock().active
+    }
+
+    pub fn set_active(&self, active: bool) {
+        self.state().lock().active = active;
+    }
 }
 
 impl DrmObjectCast for dyn DrmCrtc {
@@ -69,6 +76,7 @@ pub struct CrtcState {
     display_mode: Option<DrmDisplayMode>,
     gamma_size: u32,
     enable: bool,
+    active: bool,
 }
 
 impl CrtcState {
@@ -78,6 +86,7 @@ impl CrtcState {
             display_mode: None,
             gamma_size: 0,
             enable: false,
+            active: false,
         }
     }
 }

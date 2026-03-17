@@ -4,9 +4,7 @@ use core::fmt::Debug;
 use ostd::sync::Mutex;
 
 use crate::drm::{
-    DrmError,
-    drm_modes::{DrmDisplayInfo, DrmDisplayMode},
-    mode_object::{DrmObject, DrmObjectCast, property::PropertyObject},
+    DrmDevice, DrmError, drm_modes::{DrmDisplayInfo, DrmDisplayMode}, mode_config::ObjectId, mode_object::{DrmObject, DrmObjectCast, encoder::DrmEncoder, property::PropertyObject}
 };
 
 pub mod property;
@@ -55,9 +53,9 @@ pub trait DrmConnector: Debug + Send + Sync {
 
     fn state(&self) -> &Mutex<ConnectorState>;
 
-    fn fill_modes(&self) -> Result<(), DrmError>;
+    fn fill_modes(&self, dev: Arc<dyn DrmDevice>) -> Result<(), DrmError>;
 
-    fn get_modes(&self) -> Result<(), DrmError>;
+    fn get_modes(&self, dev: Arc<dyn DrmDevice>) -> Result<(), DrmError>;
 
     fn detect(&self) -> Result<ConnectorStatus, DrmError>;
 }
@@ -81,6 +79,10 @@ impl dyn DrmConnector {
 
     pub fn modes(&self) -> Vec<DrmDisplayMode> {
         self.state().lock().display_modes.clone()
+    }
+
+    pub fn current_encoder_id(&self) -> Option<ObjectId> {
+        self.state().lock().current_encoder_id
     }
 
     pub fn get_properties(&self) -> PropertyObject {
@@ -111,6 +113,8 @@ pub struct ConnectorState {
     display_modes: Vec<DrmDisplayMode>,
     display_info: DrmDisplayInfo,
     possible_encoders: u32,
+
+    current_encoder_id: Option<ObjectId>,
 }
 
 impl ConnectorState {
@@ -121,6 +125,7 @@ impl ConnectorState {
             display_modes: Vec::new(),
             display_info: DrmDisplayInfo::default(),
             possible_encoders: 0,
+            current_encoder_id: None,
         }
     }
 

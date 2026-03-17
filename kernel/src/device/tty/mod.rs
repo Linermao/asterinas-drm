@@ -378,8 +378,10 @@ impl<D: TtyDriver> Tty<D> {
             }
             cmd @ SetGraphicsMode => {
                 let console = self.console()?;
-
+                
                 let mode = ConsoleMode::try_from(cmd.get())?;
+                log::error!("[kernel] cmd: {:?}, {:?}", mode, console);
+
                 if !console.set_mode(mode) {
                     return_errno_with_message!(Errno::EINVAL, "the console mode is not supported");
                 }

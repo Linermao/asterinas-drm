@@ -3,7 +3,7 @@ use core::fmt::Debug;
 
 use ostd::sync::Mutex;
 
-use crate::drm::mode_object::{DrmObject, DrmObjectCast};
+use crate::drm::{mode_config::ObjectId, mode_object::{DrmObject, DrmObjectCast}};
 
 #[repr(u32)]
 #[derive(Debug, Clone, Copy)]
@@ -31,12 +31,17 @@ impl dyn DrmEncoder {
     pub fn possible_clones(&self) -> u32 {
         self.state().lock().possible_clones
     }
+
+    pub fn current_crtc_id(&self) -> Option<ObjectId> {
+        self.state().lock().current_crtc_id
+    }
 }
 
 #[derive(Debug)]
 pub struct EncoderState {
     possible_crtcs: u32,
     possible_clones: u32,
+    current_crtc_id: Option<ObjectId>,
 }
 
 impl EncoderState {
@@ -44,6 +49,7 @@ impl EncoderState {
         Self {
             possible_crtcs: 0,
             possible_clones: 0,
+            current_crtc_id: None
         }
     }
 

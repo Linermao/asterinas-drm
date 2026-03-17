@@ -7,6 +7,14 @@ use crate::drm::mode_object::{DrmObject, DrmObjectCast, property::PropertyObject
 
 pub mod property;
 
+#[repr(u32)]
+#[derive(Debug, Clone, Copy)]
+pub enum DrmPlaneType {
+    Overlay = 0,
+    Primary = 1,
+    Cursor = 2,
+}
+
 pub trait DrmPlane: Debug + Send + Sync {
     fn state(&self) -> &Mutex<PlaneState>;
 }
