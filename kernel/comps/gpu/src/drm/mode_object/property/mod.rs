@@ -179,6 +179,14 @@ pub enum DrmPropertyType {
     ModeId,
     OutFencePtr,
     InFenceFd,
+    SrcX,
+    SrcY,
+    SrcW,
+    SrcH,
+    CrtcX,
+    CrtcY,
+    CrtcW,
+    CrtcH,
     Unknown,
 }
 
@@ -191,6 +199,14 @@ impl DrmPropertyType {
             "MODE_ID" => Self::ModeId,
             "OUT_FENCE_PTR" => Self::OutFencePtr,
             "IN_FENCE_FD" => Self::InFenceFd,
+            "SRC_X" => Self::SrcX,
+            "SRC_Y" => Self::SrcY,
+            "SRC_W" => Self::SrcW,
+            "SRC_H" => Self::SrcH,
+            "CRTC_X" => Self::CrtcX,
+            "CRTC_Y" => Self::CrtcY,
+            "CRTC_W" => Self::CrtcW,
+            "CRTC_H" => Self::CrtcH,
             _ => Self::Unknown,
         }
     }

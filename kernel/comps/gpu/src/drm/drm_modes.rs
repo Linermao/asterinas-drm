@@ -1,4 +1,7 @@
 use alloc::format;
+use int_to_c_enum::TryFromInt;
+
+use crate::drm::DrmError;
 
 const DRM_DISPLAY_MODE_LEN: usize = 32;
 
@@ -31,6 +34,29 @@ bitflags::bitflags! {
         const USERDEF   = 1 << 5;
         const DRIVER    = 1 << 6;
     }
+}
+
+const fn fourcc_code(a: u8, b: u8, c: u8, d: u8) -> u32 {                      
+    (a as u32)                                                                 
+        | ((b as u32) << 8)                                                    
+        | ((c as u32) << 16)                                                   
+        | ((d as u32) << 24)                                                   
+}     
+
+#[repr(u32)]
+#[derive(Debug, Clone, Copy)]
+pub enum DrmFormat {
+    XRGB8888 = fourcc_code(b'X', b'R', b'2', b'4'),                            
+    ARGB8888 = fourcc_code(b'A', b'R', b'2', b'4'),                            
+    XBGR8888 = fourcc_code(b'X', b'B', b'2', b'4'),                            
+    RGBX8888 = fourcc_code(b'R', b'X', b'2', b'4'),                            
+    BGRX8888 = fourcc_code(b'B', b'X', b'2', b'4'),  
+    C8       = fourcc_code(b'C', b'8', b' ', b' '),
+    XRGB1555 = fourcc_code(b'X', b'R', b'1', b'5'),
+    RGB565   = fourcc_code(b'R', b'G', b'1', b'6'),
+    RGB888   = fourcc_code(b'R', b'G', b'2', b'4'),
+    XRGB2101010 = fourcc_code(b'X', b'R', b'3', b'0'),
+    Unknown  = fourcc_code(b' ', b' ', b' ', b' '),
 }
 
 #[derive(Debug, Clone, Copy)]

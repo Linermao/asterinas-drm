@@ -2,30 +2,27 @@ use alloc::{boxed::Box, sync::Arc, vec::Vec};
 
 use aster_framebuffer::FRAMEBUFFER;
 use aster_gpu::drm::{
-    DrmDevice, DrmDeviceCaps, DrmError, DrmFeatures, MemfdallocatorType, VmaOffsetManager,
+    DrmDevice, DrmDeviceCaps, DrmError, DrmFeatures, MemfdAllocatorType, VmaOffsetManager,
+    atomic::{DrmAtomicHelper, DrmAtomicPendingState},
     drm_modes::DrmDisplayMode,
     gem::{DrmGemBackend, DrmGemObject},
-    ioctl::{DrmModeCreateDumb, DrmModeFbCmd, DrmModeFbDirtyCmd},
+    ioctl::{DrmModeCreateDumb, DrmModeCrtc, DrmModeFbCmd2, DrmModeFbDirtyCmd},
     mode_config::{DrmModeConfig, ObjectId},
     mode_object::{
-        DrmObject,
+        DrmObject, DrmObjectType,
         connector::{
             ConnectorState, ConnectorStatus, ConnectorType, DrmConnector, property::ConnectorProps,
         },
-        crtc::{CrtcState, DrmCrtc},
+        crtc::{CrtcState, DrmCrtc, property::CrtcProps},
         encoder::{DrmEncoder, EncoderState, EncoderType},
         framebuffer::DrmFramebuffer,
-        plane::{DrmPlane, PlaneState},
+        plane::{DrmPlane, DrmPlaneType, PlaneState, property::PlaneProps},
         property::PropertyObject,
     },
 };
 use hashbrown::HashMap;
 use ostd::{boot::boot_info, mm::io_util::HasVmReaderWriter, sync::Mutex};
 
-const SIMPLEDRM_FEATURES: DrmFeatures =
-    DrmFeatures::from_bits_truncate(DrmFeatures::GEM.bits() | DrmFeatures::MODESET.bits());
-const SIMPLEDRM_CAPABILITIES: DrmDeviceCaps =
-    DrmDeviceCaps::from_bits_truncate(DrmDeviceCaps::DUMB_CREATE.bits());
 const SIMPLEDRM_NAME: &'static str = "simpledrm";
 const SIMPLEDRM_DESC: &'static str = "DRM driver for simple-framebuffer platform devices";
 const SIMPLEDRM_DATE: &'static str = "0";
@@ -67,9 +64,14 @@ impl SimpleDrmDevice {
     }
 
     fn init_objects(config: &mut DrmModeConfig) {
-        let plane = Arc::new(SimpleDrmPlane::new());
-        let crtc = Arc::new(SimpleDrmCrtc::new(plane.clone(), None));
+        let primary = Arc::new(SimpleDrmPlane::new(config, DrmPlaneType::Primary));
+        let (primary_id, _) = config.add_object(DrmObject::Plane(primary.clone()));
+
+        let crtc = Arc::new(SimpleDrmCrtc::new(config, primary.clone(), primary_id, None));
+        let (_, crtc_indices) = config.add_object(DrmObject::Crtc(crtc.clone()));
+
         let encoder = Arc::new(SimpleDrmEncoder::new(EncoderType::VIRTUAL));
+        let (_, encoder_indices) = config.add_object(DrmObject::Encoder(encoder.clone()));
 
         let connector_type = ConnectorType::VIRTUAL;
         let connector_type_id = config.next_connector_type_id(connector_type);
@@ -78,13 +80,9 @@ impl SimpleDrmDevice {
             connector_type,
             connector_type_id,
         ));
-
-        let _ = config.add_object(DrmObject::Plane(plane.clone()));
-        let crtc_indices = config.add_object(DrmObject::Crtc(crtc.clone()));
-        let encoder_indices = config.add_object(DrmObject::Encoder(encoder.clone()));
         let _ = config.add_object(DrmObject::Connector(connector.clone()));
 
-        plane.set_possible_crtcs(&[crtc_indices]);
+        primary.set_possible_crtcs(&[crtc_indices]);
         encoder.set_possible_crtcs(&[crtc_indices]);
         connector.set_possible_encoders(&[encoder_indices]);
     }
@@ -104,15 +102,23 @@ impl DrmDevice for SimpleDrmDevice {
     }
 
     fn features(&self) -> DrmFeatures {
-        SIMPLEDRM_FEATURES
+        DrmFeatures::GEM | DrmFeatures::MODESET | DrmFeatures::ATOMIC
     }
 
     fn capbilities(&self) -> DrmDeviceCaps {
-        SIMPLEDRM_CAPABILITIES
+        DrmDeviceCaps::DUMB_CREATE
     }
 
     fn mode_config(&self) -> &Mutex<DrmModeConfig> {
         &self.mode_config
+    }
+
+    fn set_config(
+        &self,
+        crtc_resp: &DrmModeCrtc,
+        connector_ids: Vec<ObjectId>,
+    ) -> Result<(), DrmError> {
+        self.atomic_helper_set_config(crtc_resp, connector_ids)
     }
 
     fn vma_offset_manager(&self) -> &Mutex<VmaOffsetManager> {
@@ -122,7 +128,7 @@ impl DrmDevice for SimpleDrmDevice {
     fn create_dumb(
         &self,
         args: &DrmModeCreateDumb,
-        memfd_allocator: MemfdallocatorType,
+        memfd_allocator: MemfdAllocatorType,
     ) -> Result<Arc<dyn DrmGemObject>, DrmError> {
         let pitch = args.width * (args.bpp / 8);
         let size = (pitch * args.height) as u64;
@@ -139,7 +145,7 @@ impl DrmDevice for SimpleDrmDevice {
 
     fn fb_create(
         &self,
-        fb_cmd: &DrmModeFbCmd,
+        fb_cmd: &DrmModeFbCmd2,
         gem_object: Arc<dyn DrmGemObject>,
     ) -> Result<ObjectId, DrmError> {
         let fb = Arc::new(SimpleDrmFramebuffer::new(
@@ -151,6 +157,53 @@ impl DrmDevice for SimpleDrmDevice {
         let handle = self.mode_config.lock().add_framebuffer(fb);
 
         Ok(handle)
+    }
+
+    fn atomic_commit(
+        &self,
+        nonblock: bool,
+        pending_state: &mut DrmAtomicPendingState,
+    ) -> Result<(), DrmError> {
+        self.atomic_helper_commit(nonblock, pending_state)
+    }
+
+    fn atomic_commit_tail(
+        &self,
+        pending_state: &mut DrmAtomicPendingState,
+    ) -> Result<(), DrmError> {
+        self.atomic_helper_commit_tail(pending_state)
+    }
+}
+
+impl DrmAtomicHelper for SimpleDrmDevice {
+    fn atomic_flush(&self, pending_state: &mut DrmAtomicPendingState) -> Result<(), DrmError> {
+        let config = self.mode_config.lock();
+
+        for crtc_id in pending_state.affected_crtcs() {
+            let crtc = config
+                .get_object_with::<dyn DrmCrtc>(*crtc_id)
+                .ok_or(DrmError::NotFound)?;
+            if !crtc.active() {
+                continue;
+            }
+
+            let Some(fb_id) = crtc.primary_plane().fb_id() else {
+                continue;
+            };
+            let fb = config
+                .get_object_with::<dyn DrmFramebuffer>(fb_id)
+                .ok_or(DrmError::NotFound)?;
+
+            let Some(framebuffer) = FRAMEBUFFER.get() else {
+                return Err(DrmError::NotFound);
+            };
+
+            let iomem = framebuffer.io_mem();
+            let mut writer = iomem.writer().to_fallible();
+            fb.gem_object().backend().read(0, &mut writer)?;
+        }
+
+        Ok(())
     }
 }
 
@@ -197,8 +250,23 @@ impl DrmPlane for SimpleDrmPlane {
 }
 
 impl SimpleDrmPlane {
-    fn new() -> Self {
-        let properties: PropertyObject = HashMap::new();
+    fn new(config: &mut DrmModeConfig, type_: DrmPlaneType) -> Self {
+        use PlaneProps::*;
+        let mut properties: PropertyObject = HashMap::new();
+
+        properties.insert(config.attach_property(&Type), type_ as u64);
+        properties.insert(config.attach_property(&CrtcId), 0);
+        properties.insert(config.attach_property(&FbId), 0);
+
+        properties.insert(config.attach_property(&SrcX), 0);
+        properties.insert(config.attach_property(&SrcY), 0);
+        properties.insert(config.attach_property(&SrcW), 0);
+        properties.insert(config.attach_property(&SrcH), 0);
+        properties.insert(config.attach_property(&CrtcX), 0);
+        properties.insert(config.attach_property(&CrtcY), 0);
+        properties.insert(config.attach_property(&CrtcW), 0);
+        properties.insert(config.attach_property(&CrtcH), 0);
+
         Self {
             state: Mutex::new(PlaneState::new(properties)),
         }
@@ -213,6 +281,7 @@ impl SimpleDrmPlane {
 struct SimpleDrmCrtc {
     state: Mutex<CrtcState>,
     primary: Arc<dyn DrmPlane>,
+    primary_id: ObjectId,
     cursor: Option<Arc<dyn DrmPlane>>,
 }
 
@@ -225,38 +294,32 @@ impl DrmCrtc for SimpleDrmCrtc {
         &self.primary
     }
 
-    fn cursor_plane(&self) -> &Option<Arc<dyn DrmPlane>> {
-        &self.cursor
+    fn primary_plane_id(&self) -> ObjectId {
+        self.primary_id
     }
 
-    fn set_config(
-        &self,
-        _x: u32,
-        _y: u32,
-        fb: Arc<dyn DrmFramebuffer>,
-        _connectors: Vec<Arc<dyn DrmConnector>>,
-        _dev: Arc<dyn DrmDevice>,
-    ) -> Result<(), DrmError> {
-        // TODO:
-        if let Some(framebuffer) = FRAMEBUFFER.get() {
-            let iomem = framebuffer.io_mem();
-            let mut writer = iomem.writer().to_fallible();
-            fb.gem_object().backend().read(0, &mut writer)?;
-        } else {
-            return Err(DrmError::NotFound);
-        }
-
-        Ok(())
+    fn cursor_plane(&self) -> &Option<Arc<dyn DrmPlane>> {
+        &self.cursor
     }
 }
 
 impl SimpleDrmCrtc {
-    fn new(primary: Arc<dyn DrmPlane>, cursor: Option<Arc<dyn DrmPlane>>) -> Self {
-        let properties: PropertyObject = HashMap::new();
+    fn new(
+        config: &mut DrmModeConfig,
+        primary: Arc<dyn DrmPlane>,
+        primary_id: ObjectId,
+        cursor: Option<Arc<dyn DrmPlane>>,
+    ) -> Self {
+        use CrtcProps::*;
+
+        let mut properties: PropertyObject = HashMap::new();
+        properties.insert(config.attach_property(&Active), 0);
+        properties.insert(config.attach_property(&ModeId), 0);
 
         Self {
             state: Mutex::new(CrtcState::new(properties)),
             primary,
+            primary_id,
             cursor,
         }
     }
@@ -352,10 +415,11 @@ impl SimpleDrmConnector {
 
         let mut properties: PropertyObject = HashMap::new();
 
+        properties.insert(config.attach_property(&CrtcId), 0);
         properties.insert(config.attach_property(&DPMS), 0);
         properties.insert(config.attach_property(&LinkStatus), 0);
         properties.insert(config.attach_property(&NonDesktop), 0);
-        properties.insert(config.attach_property(&TILE), 0);
+        properties.insert(config.attach_property(&Tile), 0);
 
         Self {
             type_,
@@ -389,7 +453,11 @@ impl DrmFramebuffer for SimpleDrmFramebuffer {
         self.gem_object.clone()
     }
 
-    fn dirty(&self, _dev: Arc<dyn DrmDevice>, _dirty_cmd: &DrmModeFbDirtyCmd) -> Result<(), DrmError> {
+    fn dirty(
+        &self,
+        _dev: Arc<dyn DrmDevice>,
+        _dirty_cmd: &DrmModeFbDirtyCmd,
+    ) -> Result<(), DrmError> {
         // TODO
         if let Some(framebuffer) = FRAMEBUFFER.get() {
             let iomem = framebuffer.io_mem();

@@ -1,29 +1,43 @@
-use alloc::{sync::Arc, vec::Vec};
-use core::fmt::Debug;
+use alloc::sync::Arc;
+use core::{any::Any, fmt::Debug};
 
 use ostd::sync::Mutex;
 
 use crate::drm::{
-    DrmDevice, DrmError, drm_modes::DrmDisplayMode, mode_object::{
-        DrmObject, DrmObjectCast, connector::DrmConnector, framebuffer::DrmFramebuffer,
-        plane::DrmPlane, property::PropertyObject,
+    DrmDevice, DrmError, drm_modes::DrmDisplayMode, mode_config::ObjectId, mode_object::{
+        DrmObject, DrmObjectCast, framebuffer::DrmFramebuffer, plane::DrmPlane,
+        property::PropertyObject,
     }
 };
 
 pub mod property;
 
-pub trait DrmCrtc: Debug + Send + Sync {
+#[derive(Debug)]
+pub struct CrtcState {
+    properties: PropertyObject,
+    display_mode: Option<DrmDisplayMode>,
+    gamma_size: u32,
+    enable: bool,
+    active: bool,
+}
+
+impl CrtcState {
+    pub fn new(properties: PropertyObject) -> Self {
+        Self {
+            properties,
+            display_mode: None,
+            gamma_size: 0,
+            enable: false,
+            active: false,
+        }
+    }
+}
+
+pub trait DrmCrtc: Debug + Send + Sync + Any {
     fn state(&self) -> &Mutex<CrtcState>;
     fn primary_plane(&self) -> &Arc<dyn DrmPlane>;
+    fn primary_plane_id(&self) -> ObjectId; // TODO
     fn cursor_plane(&self) -> &Option<Arc<dyn DrmPlane>>;
-    fn set_config(
-        &self,
-        x: u32,
-        y: u32,
-        fb: Arc<dyn DrmFramebuffer>,
-        connectors: Vec<Arc<dyn DrmConnector>>,
-        dev: Arc<dyn DrmDevice>,
-    ) -> Result<(), DrmError>;
 }
 
 impl dyn DrmCrtc {
@@ -35,12 +49,12 @@ impl dyn DrmCrtc {
         self.state().lock().enable
     }
 
-    pub fn set_display_mode(&self, display_mode: DrmDisplayMode) {
-        self.state().lock().display_mode = Some(display_mode);
-    }
-
     pub fn display_mode(&self) -> Option<DrmDisplayMode> {
         self.state().lock().display_mode
+    }
+
+    pub fn set_display_mode(&self, display_mode: DrmDisplayMode) {
+        self.state().lock().display_mode = Some(display_mode);
     }
 
     pub fn count_props(&self) -> u32 {
@@ -66,27 +80,6 @@ impl DrmObjectCast for dyn DrmCrtc {
             Some(c)
         } else {
             None
-        }
-    }
-}
-
-#[derive(Debug)]
-pub struct CrtcState {
-    properties: PropertyObject,
-    display_mode: Option<DrmDisplayMode>,
-    gamma_size: u32,
-    enable: bool,
-    active: bool,
-}
-
-impl CrtcState {
-    pub fn new(properties: PropertyObject) -> Self {
-        Self {
-            properties,
-            display_mode: None,
-            gamma_size: 0,
-            enable: false,
-            active: false,
         }
     }
 }

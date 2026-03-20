@@ -91,7 +91,7 @@ impl DrmModeConfig {
         self.cursor_height
     }
 
-    pub fn async_page_flip(&self) -> bool {
+    pub fn allow_async_page_flip(&self) -> bool {
         self.async_page_flip
     }
     
@@ -113,10 +113,10 @@ impl DrmModeConfig {
         type_id
     }
 
-    pub fn add_object(&mut self, object: DrmObject) -> usize {
+    pub fn add_object(&mut self, object: DrmObject) -> (ObjectId, usize) {
         let id = self.next_object_id();
 
-        let index_or_id = match object {
+        let index = match object {
             DrmObject::Plane(_) => {
                 let idx = self.planes.len();
                 self.planes.push(id);
@@ -137,21 +137,21 @@ impl DrmModeConfig {
                 self.connectors.push(id);
                 idx
             }
-            _ => id as usize,
+            _ => 0,
         };
 
         self.objects.insert(id, object);
 
-        index_or_id
+        (id, index)
     }
 
     pub fn add_blob(&mut self, data: Vec<u8>) -> ObjectId {
         let blob = Arc::new(DrmModeBlob::new(data));
-        self.add_object(DrmObject::Blob(blob)) as ObjectId
+        self.add_object(DrmObject::Blob(blob)).0
     }
 
     pub fn add_framebuffer(&mut self, fb: Arc<dyn DrmFramebuffer>) -> ObjectId {
-        self.add_object(DrmObject::Framebuffer(fb)) as ObjectId
+        self.add_object(DrmObject::Framebuffer(fb)).0
     }
 
     pub fn count_objects(&self, type_: DrmObjectType) -> usize {
@@ -168,10 +168,10 @@ impl DrmModeConfig {
 
     pub fn attach_property(&mut self, property_spec: &dyn PropertySpec) -> ObjectId {
         let property = Arc::new(property_spec.build());
-        self.add_object(DrmObject::Property(property)) as ObjectId
+        self.add_object(DrmObject::Property(property)).0
     }
 
-    pub fn get_object_ids(&self, type_: DrmObjectType, mask: Option<ObjectId>) -> Vec<ObjectId> {
+    pub fn collect_object_ids(&self, type_: DrmObjectType, mask: Option<ObjectId>) -> Vec<ObjectId> {
         let res = match type_ {
             DrmObjectType::Crtc => &self.crtcs,
             DrmObjectType::Connector => &self.connectors,

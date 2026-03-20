@@ -32,8 +32,12 @@ impl dyn DrmEncoder {
         self.state().lock().possible_clones
     }
 
-    pub fn current_crtc_id(&self) -> Option<ObjectId> {
-        self.state().lock().current_crtc_id
+    pub fn crtc_id(&self) -> Option<ObjectId> {
+        self.state().lock().crtc_id
+    }
+
+    pub fn set_crtc_id(&self, crtc_id: Option<ObjectId>) {
+        self.state().lock().crtc_id = crtc_id;
     }
 }
 
@@ -41,7 +45,7 @@ impl dyn DrmEncoder {
 pub struct EncoderState {
     possible_crtcs: u32,
     possible_clones: u32,
-    current_crtc_id: Option<ObjectId>,
+    crtc_id: Option<ObjectId>,
 }
 
 impl EncoderState {
@@ -49,7 +53,7 @@ impl EncoderState {
         Self {
             possible_crtcs: 0,
             possible_clones: 0,
-            current_crtc_id: None
+            crtc_id: None
         }
     }
 

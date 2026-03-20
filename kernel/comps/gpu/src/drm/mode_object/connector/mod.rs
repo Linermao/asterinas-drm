@@ -4,7 +4,10 @@ use core::fmt::Debug;
 use ostd::sync::Mutex;
 
 use crate::drm::{
-    DrmDevice, DrmError, drm_modes::{DrmDisplayInfo, DrmDisplayMode}, mode_config::ObjectId, mode_object::{DrmObject, DrmObjectCast, encoder::DrmEncoder, property::PropertyObject}
+    DrmDevice, DrmError,
+    drm_modes::{DrmDisplayInfo, DrmDisplayMode},
+    mode_config::ObjectId,
+    mode_object::{DrmObject, DrmObjectCast, property::PropertyObject},
 };
 
 pub mod property;
@@ -46,6 +49,48 @@ pub enum ConnectorStatus {
     Unknownconnection = 3,
 }
 
+#[derive(Debug)]
+pub struct ConnectorState {
+    status: ConnectorStatus,
+    properties: PropertyObject,
+    display_modes: Vec<DrmDisplayMode>,
+    display_info: DrmDisplayInfo,
+    possible_encoders: u32,
+
+    encoder_id: Option<ObjectId>,
+}
+
+impl ConnectorState {
+    pub fn new(properties: PropertyObject) -> Self {
+        Self {
+            status: ConnectorStatus::Unknownconnection,
+            properties,
+            display_modes: Vec::new(),
+            display_info: DrmDisplayInfo::default(),
+            possible_encoders: 0,
+            encoder_id: None,
+        }
+    }
+
+    pub fn set_possible_encoders(&mut self, encoder_indices: &[usize]) {
+        for &idx in encoder_indices {
+            self.possible_encoders |= 1 << idx;
+        }
+    }
+
+    pub fn set_status(&mut self, status: ConnectorStatus) {
+        self.status = status;
+    }
+
+    pub fn set_modes(&mut self, modes: &[DrmDisplayMode]) {
+        self.display_modes.clear();
+
+        for &mode in modes {
+            self.display_modes.push(mode);
+        }
+    }
+}
+
 pub trait DrmConnector: Debug + Send + Sync {
     fn type_(&self) -> ConnectorType;
 
@@ -81,8 +126,12 @@ impl dyn DrmConnector {
         self.state().lock().display_modes.clone()
     }
 
-    pub fn current_encoder_id(&self) -> Option<ObjectId> {
-        self.state().lock().current_encoder_id
+    pub fn encoder_id(&self) -> Option<ObjectId> {
+        self.state().lock().encoder_id
+    }
+
+    pub fn set_encoder_id(&self, encoder_id: Option<ObjectId>) {
+        self.state().lock().encoder_id = encoder_id;
     }
 
     pub fn get_properties(&self) -> PropertyObject {
@@ -103,48 +152,6 @@ impl dyn DrmConnector {
 
     pub fn subpixel(&self) -> u32 {
         self.state().lock().display_info.subpixel_order()
-    }
-}
-
-#[derive(Debug)]
-pub struct ConnectorState {
-    status: ConnectorStatus,
-    properties: PropertyObject,
-    display_modes: Vec<DrmDisplayMode>,
-    display_info: DrmDisplayInfo,
-    possible_encoders: u32,
-
-    current_encoder_id: Option<ObjectId>,
-}
-
-impl ConnectorState {
-    pub fn new(properties: PropertyObject) -> Self {
-        Self {
-            status: ConnectorStatus::Unknownconnection,
-            properties,
-            display_modes: Vec::new(),
-            display_info: DrmDisplayInfo::default(),
-            possible_encoders: 0,
-            current_encoder_id: None,
-        }
-    }
-
-    pub fn set_possible_encoders(&mut self, encoder_indices: &[usize]) {
-        for &idx in encoder_indices {
-            self.possible_encoders |= 1 << idx;
-        }
-    }
-
-    pub fn set_status(&mut self, status: ConnectorStatus) {
-        self.status = status;
-    }
-
-    pub fn set_modes(&mut self, modes: &[DrmDisplayMode]) {
-        self.display_modes.clear();
-
-        for &mode in modes {
-            self.display_modes.push(mode);
-        }
     }
 }
 

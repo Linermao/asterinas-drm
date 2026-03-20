@@ -22,10 +22,11 @@ enum DrmLinkStatus {
 pub enum ConnectorProps {
     DPMS,
     // PATH(u32),
-    TILE,
+    Tile,
     LinkStatus,
     NonDesktop,
     // HdrOutputMetadata,
+    CrtcId,
 }
 
 impl PropertySpec for ConnectorProps {
@@ -50,9 +51,10 @@ impl PropertySpec for ConnectorProps {
                 ],
             ),
             Self::NonDesktop => DrmProperty::create_bool("NonDesktop", DrmPropertyFlags::IMMUTABLE),
-            Self::TILE => {
+            Self::Tile => {
                 DrmProperty::create("Tile", DrmPropertyFlags::BLOB | DrmPropertyFlags::IMMUTABLE)
             }
+            Self::CrtcId => DrmProperty::create("CRTC_ID", DrmPropertyFlags::empty()),
         }
     }
 }

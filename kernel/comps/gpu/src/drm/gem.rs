@@ -1,9 +1,9 @@
-use alloc::{boxed::Box, vec::Vec};
+use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use core::{any::Any, fmt::Debug};
 
 use ostd::mm::{VmReader, VmWriter};
 
-use crate::drm::DrmError;
+use crate::drm::{DrmError, MemfdAllocatorType, ioctl::DrmModeCreateDumb};
 
 #[derive(Debug)]
 pub struct DrmSgEntry {
@@ -26,7 +26,7 @@ impl dyn DrmGemObject {
     pub fn read(&self, offset: usize, writer: &mut VmWriter) -> Result<usize, DrmError> {
         self.backend().read(offset, writer)
     }
-    
+
     pub fn write(&self, offset: usize, reader: &mut VmReader) -> Result<usize, DrmError> {
         self.backend().write(offset, reader)
     }
@@ -44,7 +44,6 @@ pub trait DrmGemBackend: Debug + Any + Sync + Send {
         Err(DrmError::NotSupported)
     }
 }
-
 
 impl dyn DrmGemBackend {
     pub fn downcast_ref<T: DrmGemBackend>(&self) -> Option<&T> {

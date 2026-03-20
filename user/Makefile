@@ -15,6 +15,7 @@ all:
 	gcc -static ./page_flip/page_flip.c $(UTIL_SRCS) -o build/page_flip $(FLAGS)
 	gcc -static ./page_flip/test_vblank.c $(UTIL_SRCS) -o build/test_vblank $(FLAGS)
 	gcc -static ./page_flip/vsync.c $(UTIL_SRCS) -o build/vsync $(FLAGS)
+	gcc -static ./atomic/atomic.c $(UTIL_SRCS) -o build/atomic $(FLAGS)
 
 # 	@echo "==> Building modetest..."
 # 	gcc -static $(MODETEST_SRCS) $(UTIL_SRCS) -o build/modetest $(FLAGS)

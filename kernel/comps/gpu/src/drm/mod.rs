@@ -1,14 +1,17 @@
-use alloc::{boxed::Box, sync::Arc};
+use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use core::{
-    any::Any, fmt::Debug, sync::atomic::{AtomicU64, Ordering}
+    any::Any,
+    fmt::Debug,
+    sync::atomic::{AtomicU64, Ordering},
 };
 
 use hashbrown::HashMap;
 use ostd::{mm::PAGE_SIZE, sync::Mutex};
 
 use crate::drm::{
+    atomic::{DrmAtomicHelper, DrmAtomicPendingState},
     gem::{DrmGemBackend, DrmGemObject},
-    ioctl::{DrmModeCreateDumb, DrmModeFbCmd},
+    ioctl::{DrmModeCreateDumb, DrmModeCrtc, DrmModeFbCmd2},
     mode_config::{DrmModeConfig, ObjectId},
 };
 
@@ -62,7 +65,7 @@ bitflags::bitflags! {
     }
 }
 
-pub type MemfdallocatorType = fn(&str, u64) -> Result<Box<dyn DrmGemBackend>, DrmError>;
+pub type MemfdAllocatorType = fn(&str, u64) -> Result<Box<dyn DrmGemBackend>, DrmError>;
 
 #[derive(Debug)]
 pub struct VmaOffsetManager {
@@ -106,10 +109,15 @@ pub trait DrmDevice: Debug + Any + Send + Sync {
     fn capbilities(&self) -> DrmDeviceCaps;
     fn mode_config(&self) -> &Mutex<DrmModeConfig>;
     fn vma_offset_manager(&self) -> &Mutex<VmaOffsetManager>;
+    fn set_config(
+        &self,
+        crtc_resp: &DrmModeCrtc,
+        connector_ids: Vec<ObjectId>,
+    ) -> Result<(), DrmError>;
     fn create_dumb(
         &self,
         _args: &DrmModeCreateDumb,
-        _memfd_allocator: MemfdallocatorType,
+        _memfd_allocator: MemfdAllocatorType,
     ) -> Result<Arc<dyn DrmGemObject>, DrmError> {
         Err(DrmError::NotSupported)
     }
@@ -118,9 +126,16 @@ pub trait DrmDevice: Debug + Any + Send + Sync {
     }
     fn fb_create(
         &self,
-        fb_cmd: &DrmModeFbCmd,
+        fb_cmd: &DrmModeFbCmd2,
         gem_object: Arc<dyn DrmGemObject>,
     ) -> Result<ObjectId, DrmError>;
+    fn atomic_commit(
+        &self,
+        nonblock: bool,
+        pending_state: &mut DrmAtomicPendingState,
+    ) -> Result<(), DrmError>;
+    fn atomic_commit_tail(&self, pending_state: &mut DrmAtomicPendingState)
+    -> Result<(), DrmError>;
 }
 
 impl dyn DrmDevice {

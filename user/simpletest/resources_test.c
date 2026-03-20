@@ -52,6 +52,6 @@ int main(int argc, char **argv) {
     dump_resource(&dev, connectors);
     dump_resource(&dev, encoders);
 	dump_resource(&dev, crtcs);
-	// dump_resource(&dev, planes);
-	// dump_resource(&dev, framebuffers);
+	dump_resource(&dev, planes);
+	dump_resource(&dev, framebuffers);
 }

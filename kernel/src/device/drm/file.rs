@@ -3,18 +3,21 @@ use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use aster_gpu::drm::{
     DrmDevice, DrmDeviceCaps, DrmFeatures,
-    atomic::DrmAtomicFlags,
+    atomic::{
+        DrmAtomicFlags, DrmAtomicPendingState,
+        vblank::{DRM_EVENT_VBLANK_LEN, DrmVblankEvent},
+    },
     drm_modes::DrmModeModeInfo,
     gem::DrmGemObject,
     ioctl::*,
     mode_object::{
-        DrmObject, DrmObjectType,
+        DrmObjectType,
         connector::DrmConnector,
         crtc::DrmCrtc,
         encoder::DrmEncoder,
         framebuffer::DrmFramebuffer,
         plane::DrmPlane,
-        property::{DrmModeBlob, DrmProperty, DrmPropertyKind, DrmPropertyType, PropertyEnum},
+        property::{DrmModeBlob, DrmProperty, DrmPropertyKind, PropertyEnum},
     },
 };
 use hashbrown::HashMap;
@@ -35,11 +38,11 @@ use crate::{
         utils::{InodeIo, StatusFlags},
     },
     prelude::*,
-    process::signal::{PollHandle, Pollable},
+    process::signal::{PollHandle, Pollable, Pollee},
+    time::clocks::MonotonicClock,
     util::ioctl::RawIoctl,
 };
 
-#[derive(Debug)]
 pub(super) struct DrmFile {
     minor: Arc<DrmMinor>,
     next_gem_handle: AtomicU32,
@@ -60,6 +63,9 @@ pub(super) struct DrmFile {
     /// This client is capable of handling the cursor plane with the
     /// restrictions imposed on it by the virtualized drivers.
     supports_virtualized_cursor_plane: AtomicBool,
+
+    event_pollee: Pollee,
+    event_queue: Mutex<VecDeque<Vec<u8>>>,
 }
 
 impl DrmFile {
@@ -75,6 +81,8 @@ impl DrmFile {
             aspect_ratio_allowed: AtomicBool::new(false),
             writeback_connectors: AtomicBool::new(false),
             supports_virtualized_cursor_plane: AtomicBool::new(false),
+            event_pollee: Pollee::new(),
+            event_queue: Mutex::new(VecDeque::new()),
         }
     }
 
@@ -84,6 +92,26 @@ impl DrmFile {
 
     pub fn next_gem_handle(&self) -> u32 {
         self.next_gem_handle.fetch_add(1, Ordering::SeqCst)
+    }
+
+    fn queue_drm_event(&self, event: Vec<u8>) {
+        self.event_queue.lock().push_back(event);
+        self.event_pollee.notify(IoEvents::IN);
+    }
+
+    fn make_flip_complete_event(&self, user_data: u64, crtc_id: u32, sequence: u32) -> Vec<u8> {
+        let now = MonotonicClock::get().read_time();
+        let mut bytes = Vec::with_capacity(DRM_EVENT_VBLANK_LEN as usize);
+
+        bytes.extend_from_slice(&(DrmVblankEvent::FlipComplete as u32).to_ne_bytes());
+        bytes.extend_from_slice(&DRM_EVENT_VBLANK_LEN.to_ne_bytes());
+        bytes.extend_from_slice(&user_data.to_ne_bytes());
+        bytes.extend_from_slice(&(now.as_secs() as u32).to_ne_bytes());
+        bytes.extend_from_slice(&now.subsec_micros().to_ne_bytes());
+        bytes.extend_from_slice(&sequence.to_ne_bytes());
+        bytes.extend_from_slice(&crtc_id.to_ne_bytes());
+
+        bytes
     }
 
     pub fn add_gem(&self, id: u32, gem: Arc<dyn DrmGemObject>) {
@@ -100,9 +128,14 @@ impl DrmFile {
 }
 
 impl Pollable for DrmFile {
-    fn poll(&self, mask: IoEvents, _poller: Option<&mut PollHandle>) -> IoEvents {
-        let events = IoEvents::IN | IoEvents::OUT;
-        events & mask
+    fn poll(&self, mask: IoEvents, poller: Option<&mut PollHandle>) -> IoEvents {
+        self.event_pollee.poll_with(mask, poller, || {
+            let mut events = IoEvents::OUT;
+            if !self.event_queue.lock().is_empty() {
+                events |= IoEvents::IN;
+            }
+            events
+        })
     }
 }
 
@@ -110,10 +143,42 @@ impl InodeIo for DrmFile {
     fn read_at(
         &self,
         _offset: usize,
-        _writer: &mut VmWriter,
-        _status_flags: StatusFlags,
+        writer: &mut VmWriter,
+        status_flags: StatusFlags,
     ) -> Result<usize> {
-        return_errno_with_message!(Errno::EINVAL, "drm: read not supported");
+        let is_nonblocking = status_flags.contains(StatusFlags::O_NONBLOCK);
+        let mut queue = self.event_queue.lock();
+
+        if queue.is_empty() {
+            if is_nonblocking {
+                return_errno!(Errno::EAGAIN);
+            }
+            // Blocking DRM read should wait for events; current fallback is EAGAIN.
+            return_errno!(Errno::EAGAIN);
+        }
+
+        let mut total_written = 0usize;
+        while let Some(event) = queue.front() {
+            if event.len() > writer.avail() {
+                if total_written == 0 {
+                    // Linux DRM requires user buffer to fit the next full event.
+                    return_errno!(Errno::EINVAL);
+                }
+                break;
+            }
+
+            let Some(event) = queue.pop_front() else {
+                break;
+            };
+            writer.write_fallible(&mut event.as_slice().into())?;
+            total_written += event.len();
+        }
+
+        if queue.is_empty() {
+            self.event_pollee.invalidate();
+        }
+
+        Ok(total_written)
     }
 
     fn write_at(
@@ -225,7 +290,7 @@ impl FileIo for DrmFile {
                                 VblankHighCrtc => 1,
                                 DumbPreferredDepth => mode_config.preferred_depth() as u64,
                                 DumbPreferShadow => mode_config.prefer_shadow() as u64,
-                                AsyncPageFlip => mode_config.async_page_flip() as u64,
+                                AsyncPageFlip => mode_config.allow_async_page_flip() as u64,
                                 PageFlipTarget => {
                                     // TODO: check if each crtc has func: page_flip_target
                                     0
@@ -242,7 +307,7 @@ impl FileIo for DrmFile {
                                 CrtcInVblankEvent => 1,
                                 AtomicAsyncPageFlip => {
                                     (dev.check_feature(DrmFeatures::ATOMIC)
-                                        && mode_config.async_page_flip())
+                                        && mode_config.allow_async_page_flip())
                                         as u64
                                 }
                                 _ => 0,
@@ -383,22 +448,22 @@ impl FileIo for DrmFile {
 
                         write_to_user::<u32>(
                             card_res.crtc_id_ptr as usize,
-                            config.get_object_ids(DrmObjectType::Crtc, None),
+                            config.collect_object_ids(DrmObjectType::Crtc, None),
                         )?;
 
                         write_to_user::<u32>(
                             card_res.encoder_id_ptr as usize,
-                            config.get_object_ids(DrmObjectType::Encoder, None),
+                            config.collect_object_ids(DrmObjectType::Encoder, None),
                         )?;
 
                         write_to_user::<u32>(
                             card_res.connector_id_ptr as usize,
-                            config.get_object_ids(DrmObjectType::Connector, None),
+                            config.collect_object_ids(DrmObjectType::Connector, None),
                         )?;
 
                         write_to_user::<u32>(
                             card_res.fb_id_ptr as usize,
-                            config.get_object_ids(DrmObjectType::Framebuffer, None),
+                            config.collect_object_ids(DrmObjectType::Framebuffer, None),
                         )?;
 
                         card_res.max_width = config.max_width();
@@ -426,7 +491,7 @@ impl FileIo for DrmFile {
                         crtc_resp.gamma_size = crtc.gamma_size();
                         crtc_resp.x = primary.src_x() >> 16;
                         crtc_resp.y = primary.src_y() >> 16;
-                        crtc_resp.fb_id = primary.fb_id();
+                        crtc_resp.fb_id = primary.fb_id().unwrap_or(0);
 
                         if crtc.enable() {
                             if let Some(mode) = crtc.display_mode() {
@@ -455,43 +520,14 @@ impl FileIo for DrmFile {
                     }
 
                     let crtc_resp: DrmModeCrtc = cmd.read()?;
-                    let dev = self.device();
-                    let config = dev.mode_config().lock();
+                    let connector_ids = read_from_user::<u32>(
+                        crtc_resp.set_connectors_ptr as usize,
+                        crtc_resp.count_connectors as usize,
+                    )?;
 
-                    // TODO:
-                    if let Some(crtc) = config.get_object_with::<dyn DrmCrtc>(crtc_resp.crtc_id) {
-                        let _primary = crtc.primary_plane();
+                    self.device().set_config(&crtc_resp, connector_ids)?;
 
-                        if crtc_resp.mode_valid == 1 {
-                            let display_mode = crtc_resp.mode.into();
-                            crtc.set_display_mode(display_mode);
-                        }
-
-                        let fb = match config.get_object_with::<dyn DrmFramebuffer>(crtc_resp.fb_id)
-                        {
-                            Some(fb) => fb,
-                            None => return_errno!(Errno::ENOENT),
-                        };
-
-                        let connector_ids = read_from_user::<u32>(
-                            crtc_resp.set_connectors_ptr as usize,
-                            crtc_resp.count_connectors as usize,
-                        )?;
-                        let mut connectors: Vec<Arc<dyn DrmConnector>> = vec![];
-                        for id in connector_ids {
-                            let connector = match config.get_object_with::<dyn DrmConnector>(id) {
-                                Some(c) => c,
-                                None => return_errno!(Errno::ENOENT),
-                            };
-                            connectors.push(connector);
-                        }
-
-                        crtc.set_config(crtc_resp.x, crtc_resp.y, fb, connectors, self.device())?;
-
-                        cmd.write(&crtc_resp)?;
-                    } else {
-                        return_errno!(Errno::ENOENT);
-                    }
+                    cmd.write(&crtc_resp)?;
 
                     Ok(0)
                 }
@@ -515,7 +551,7 @@ impl FileIo for DrmFile {
                         config.get_object_with::<dyn DrmEncoder>(encoder_resp.encoder_id)
                     {
                         // TODO:
-                        encoder_resp.crtc_id = 0;
+                        encoder_resp.crtc_id = encoder.crtc_id().unwrap_or(0);
                         encoder_resp.encoder_type = encoder.type_() as u32;
                         encoder_resp.possible_crtcs = encoder.possible_crtcs();
                         encoder_resp.possible_clones = encoder.possible_clones();
@@ -561,7 +597,7 @@ impl FileIo for DrmFile {
 
                             write_to_user::<u32>(
                                 out_resp.encoders_ptr as usize,
-                                config.get_object_ids(
+                                config.collect_object_ids(
                                     DrmObjectType::Encoder,
                                     Some(connector.possible_encoders()),
                                 ),
@@ -582,6 +618,8 @@ impl FileIo for DrmFile {
                                 out_resp.prop_values_ptr as usize,
                                 properties.values().copied().collect(),
                             )?;
+
+                            out_resp.encoder_id = connector.encoder_id().unwrap_or(0);
 
                             out_resp.connector_type = connector.type_() as u32;
                             out_resp.connector_type_id = connector.type_id_();
@@ -615,6 +653,7 @@ impl FileIo for DrmFile {
                             out_resp.count_values = property.count_values();
                             out_resp.count_enum_blobs = property.count_enum_blobs();
                             out_resp.flags = property.flags();
+                            out_resp.name = property.name_to_u8();
 
                             cmd.write(&out_resp)?;
                         } else {
@@ -691,7 +730,8 @@ impl FileIo for DrmFile {
                     let dev = self.device();
 
                     if let Some(gem_object) = self.lookup_gem(fb_cmd.handle) {
-                        let fb_id = dev.fb_create(&fb_cmd, gem_object)?;
+                        let fb_cmd2: DrmModeFbCmd2 = fb_cmd.into();
+                        let fb_id = dev.fb_create(&fb_cmd2, gem_object)?;
                         fb_cmd.fb_id = fb_id;
                     } else {
                         return_errno!(Errno::ENOENT);
@@ -818,7 +858,7 @@ impl FileIo for DrmFile {
                         }
                         write_to_user(
                             plane_resp.plane_id_ptr as usize,
-                            config.get_object_ids(DrmObjectType::Plane, None),
+                            config.collect_object_ids(DrmObjectType::Plane, None),
                         )?;
 
                         cmd.write(&plane_resp)?;
@@ -845,6 +885,45 @@ impl FileIo for DrmFile {
                     } else {
                         return_errno!(Errno::ENOENT);
                     }
+
+                    Ok(0)
+                }
+                cmd @ DrmIoctlModeAddFB2 => {
+                    log::error!("[kernel] DrmIoctlModeAddFB2");
+                    if !self.device().check_feature(DrmFeatures::MODESET) {
+                        return_errno!(Errno::EOPNOTSUPP);
+                    }
+                    let mut fb_cmd: DrmModeFbCmd2 = cmd.read()?;
+
+                    let dev = self.device();
+
+                    {
+                        let flags = DrmModeFb::from_bits(fb_cmd.flags).ok_or(Errno::EINVAL)?;
+                        let config = dev.mode_config().lock();
+
+                        if fb_cmd.width < config.min_width()
+                            || fb_cmd.width > config.max_width()
+                            || fb_cmd.height < config.min_height()
+                            || fb_cmd.height > config.max_height()
+                        {
+                            return_errno!(Errno::EINVAL);
+                        }
+
+                        if flags.contains(DrmModeFb::MODIFIERS)
+                            && config.fb_modifiers_not_supported()
+                        {
+                            return_errno!(Errno::EINVAL);
+                        }
+                    }
+
+                    if let Some(gem_object) = self.lookup_gem(fb_cmd.handles[0]) {
+                        let fb_id = dev.fb_create(&fb_cmd, gem_object)?;
+                        fb_cmd.fb_id = fb_id;
+                    } else {
+                        return_errno!(Errno::ENOENT);
+                    }
+
+                    cmd.write(&fb_cmd)?;
 
                     Ok(0)
                 }
@@ -889,24 +968,21 @@ impl FileIo for DrmFile {
                     Ok(0)
                 }
                 cmd @ DrmIoctlModeAtomic => {
+                    log::error!("[kernel] DrmIoctlModeAtomic");
                     if !self.device().check_feature(DrmFeatures::ATOMIC)
                         || !self.device().check_feature(DrmFeatures::MODESET)
+                        || !self.atomic.load(Ordering::Relaxed)
                     {
                         return_errno!(Errno::EOPNOTSUPP);
                     }
 
-                    if !self.atomic.load(Ordering::Relaxed) {
-                        // Match Linux behavior: MODE_ATOMIC requires client-cap atomic.
-                        return_errno!(Errno::EOPNOTSUPP);
-                    }
-
                     let arg: DrmModeAtomic = cmd.read()?;
-
                     let flags = DrmAtomicFlags::from_bits(arg.flags).ok_or(Errno::EINVAL)?;
                     if arg.reserved != 0 {
                         return_errno!(Errno::EINVAL);
                     }
 
+                    // get user space data
                     let object_ids =
                         read_from_user::<u32>(arg.objs_ptr as usize, arg.count_objs as usize)?;
                     let prop_counts = read_from_user::<u32>(
@@ -921,71 +997,41 @@ impl FileIo for DrmFile {
                     let prop_ids = read_from_user::<u32>(arg.props_ptr as usize, total_props)?;
                     let prop_values =
                         read_from_user::<u64>(arg.prop_values_ptr as usize, total_props)?;
-                    let mut prop_ids_iter = prop_ids.into_iter();
-                    let mut prop_values_iter = prop_values.into_iter();
 
-                    let dev = self.device();
-                    let config = dev.mode_config().lock();
-                    let mut requires_modeset = false;
+                    // Atomic check
+                    let mut atomic_states = DrmAtomicPendingState::new();
+                    let requires_modeset = atomic_states.init(
+                        self.device(),
+                        object_ids,
+                        prop_counts,
+                        prop_ids,
+                        prop_values,
+                    )?;
 
-                    for (id, prop_count) in object_ids.iter().zip(prop_counts.iter()) {
-                        let object = config
-                            .get_object(*id, DrmObjectType::Any)
-                            .ok_or(Errno::ENOENT)?;
+                    // Basic Linux-like modeset gating.
+                    if requires_modeset && !flags.contains(DrmAtomicFlags::ALLOW_MODESET) {
+                        return_errno!(Errno::EINVAL);
+                    }
 
-                        for _ in 0..*prop_count {
-                            let prop_id = prop_ids_iter.next().ok_or(Errno::EINVAL)?;
-                            let prop_value = prop_values_iter.next().ok_or(Errno::EINVAL)?;
+                    // Atomic commit
+                    if !flags.contains(DrmAtomicFlags::TEST_ONLY) {
+                        let nonblock = flags.contains(DrmAtomicFlags::NONBLOCK);
+                        self.device().atomic_commit(nonblock, &mut atomic_states)?;
+                    }
 
-                            if !object.get_properties().contains_key(&prop_id) {
-                                return_errno!(Errno::EINVAL);
-                            }
-                            let property = config
-                                .get_object_with::<DrmProperty>(prop_id)
-                                .ok_or(Errno::ENOENT)?;
-
-                            match object {
-                                DrmObject::Plane(drm_plane) => todo!(),
-                                DrmObject::Crtc(crtc) => match property.type_() {
-                                    DrmPropertyType::Active => {
-                                        if prop_value > 1 {
-                                            return_errno!(Errno::EINVAL);
-                                        }
-                                        if crtc.active() != (prop_value != 0) {
-                                            crtc.set_active(prop_value != 0);
-                                            requires_modeset = true;
-                                        }
-                                    }
-                                    DrmPropertyType::ModeId => {
-                                        let blob_id = prop_value as u32;
-                                        let _blob = config
-                                            .get_object_with::<DrmModeBlob>(blob_id)
-                                            .ok_or(Errno::ENOENT)?;
-                                    }
-                                    _ => {}
-                                },
-                                DrmObject::Encoder(drm_encoder) => todo!(),
-                                DrmObject::Connector(connector) => match property.type_() {
-                                    DrmPropertyType::CrtcId => {
-                                        let current_crtc = connector
-                                            .current_encoder_id()
-                                            .and_then(|enc_id| {
-                                                config.get_object_with::<dyn DrmEncoder>(enc_id)
-                                            })
-                                            .map(|enc| enc.current_crtc_id())
-                                            .unwrap_or(None);
-
-                                        if current_crtc != Some(prop_value as u32) {
-                                            requires_modeset = true;
-                                        }
-                                    }
-                                    _ => {}
-                                },
-                                _ => {}
-                            };
+                    if flags.contains(DrmAtomicFlags::PAGE_FLIP_EVENT) {
+                        for affected_crtc_id in atomic_states.affected_crtcs() {
+                            // TODO
+                            let sequence = 0;
+                            self.queue_drm_event(self.make_flip_complete_event(
+                                arg.user_data,
+                                *affected_crtc_id,
+                                sequence,
+                            ));
                         }
                     }
 
+                    cmd.write(&arg)?;
                     Ok(0)
                 }
                 cmd @ DrmIoctlModeCreatePropBlob => {

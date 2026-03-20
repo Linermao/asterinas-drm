@@ -6,10 +6,12 @@ use core::{
 };
 
 use aster_gpu::drm::{
-    DrmDevice, DrmDeviceCaps, DrmError, DrmFeatures, MemfdallocatorType, VmaOffsetManager,
+    DrmDevice, DrmDeviceCaps, DrmError, DrmFeatures, MemfdAllocatorType, VmaOffsetManager,
+    atomic::{DrmAtomicHelper, DrmAtomicPendingState},
     gem::{DrmGemBackend, DrmGemObject},
-    ioctl::{DrmModeCreateDumb, DrmModeFbCmd},
+    ioctl::{DrmModeCreateDumb, DrmModeCrtc, DrmModeFbCmd2},
     mode_config::{DrmModeConfig, ObjectId},
+    mode_object::{crtc::DrmCrtc, framebuffer::DrmFramebuffer},
 };
 use aster_util::mem_obj_slice::Slice;
 use bitflags::bitflags;
@@ -34,7 +36,7 @@ use crate::{
             VirtioGpuResourceUnref, VirtioGpuRespCapsetInfo, VirtioGpuRespDisplayInfo,
             VirtioGpuRespEdid, VirtioGpuRespOk, VirtioGpuSetScanout, VirtioGpuTransferToHost2d,
             gem::VirtioGemObject,
-            output::{VirtioGpuFramebuffer, virtio_gpu_output_init},
+            output::{VirtioGpuCrtc, VirtioGpuFramebuffer, virtio_gpu_output_init},
         },
     },
     id_alloc::SyncIdAlloc,
@@ -186,16 +188,7 @@ impl GpuDevice {
         let num_capsets = config.num_capsets;
 
         let mut mode_config = DrmModeConfig::new(
-            XRES_MIN,
-            XRES_MAX, 
-            YRES_MIN, 
-            YRES_MAX,
-            16,
-            0,
-            0,
-            0,
-            true,
-            false,
+            XRES_MIN, XRES_MAX, YRES_MIN, YRES_MAX, 16, 0, 0, 0, true, false,
         );
 
         for scanout_id in 0..num_scanouts {
@@ -345,14 +338,22 @@ impl DrmDevice for GpuDevice {
         &self.mode_config
     }
 
+    fn set_config(
+        &self,
+        crtc_resp: &DrmModeCrtc,
+        connector_ids: Vec<ObjectId>,
+    ) -> Result<(), DrmError> {
+        self.atomic_helper_set_config(crtc_resp, connector_ids)
+    }
+
     fn vma_offset_manager(&self) -> &Mutex<VmaOffsetManager> {
-        &self.vma_offset_manager 
+        &self.vma_offset_manager
     }
 
     fn create_dumb(
         &self,
         args: &DrmModeCreateDumb,
-        memfd_allocator: MemfdallocatorType,
+        memfd_allocator: MemfdAllocatorType,
     ) -> Result<Arc<dyn DrmGemObject>, DrmError> {
         if args.bpp != 32 {
             return Err(DrmError::Invalid);
@@ -393,9 +394,10 @@ impl DrmDevice for GpuDevice {
 
     fn fb_create(
         &self,
-        fb_cmd: &DrmModeFbCmd,
+        fb_cmd: &DrmModeFbCmd2,
         gem_object: Arc<dyn DrmGemObject>,
     ) -> Result<ObjectId, DrmError> {
+        // TODO:
         let fb = Arc::new(VirtioGpuFramebuffer::new(
             fb_cmd.width,
             fb_cmd.height,
@@ -405,6 +407,70 @@ impl DrmDevice for GpuDevice {
         let handle = self.mode_config.lock().add_framebuffer(fb);
 
         Ok(handle)
+    }
+
+    fn atomic_commit(
+        &self,
+        nonblock: bool,
+        pending_state: &mut DrmAtomicPendingState,
+    ) -> Result<(), DrmError> {
+        self.atomic_helper_commit(nonblock, pending_state)
+    }
+
+    fn atomic_commit_tail(
+        &self,
+        pending_state: &mut DrmAtomicPendingState,
+    ) -> Result<(), DrmError> {
+        self.atomic_helper_commit_tail(pending_state)
+    }
+}
+
+impl DrmAtomicHelper for GpuDevice {
+    fn atomic_flush(&self, pending_state: &mut DrmAtomicPendingState) -> Result<(), DrmError> {
+        let config = self.mode_config.lock();
+        for crtc_id in pending_state.affected_crtcs() {
+            let crtc = config
+                .get_object_with::<dyn DrmCrtc>(*crtc_id)
+                .ok_or(DrmError::NotFound)?;
+            if !crtc.active() {
+                continue;
+            }
+
+            let primary_plane = crtc.primary_plane();
+            let Some(fb_id) = primary_plane.fb_id() else {
+                continue;
+            };
+
+            let fb = config
+                .get_object_with::<dyn DrmFramebuffer>(fb_id)
+                .ok_or(DrmError::NotFound)?;
+
+            let gem_object =
+                Arc::downcast::<VirtioGemObject>(fb.gem_object()).map_err(|_| DrmError::Invalid)?;
+
+            let rect = VirtioGpuRect {
+                x: primary_plane.crtc_x(),
+                y: primary_plane.crtc_y(),
+                width: fb.width(),
+                height: fb.height(),
+            };
+            let vcrtc = Arc::downcast::<VirtioGpuCrtc>(crtc).map_err(|_| DrmError::Invalid)?;
+            let scanout_id = vcrtc.scanout_id();
+            let resource_id = gem_object.resource_id();
+
+            // ensure the host-side 2D resource sees the latest guest framebuffer contents
+            // some devices (older qemu) may not implement this command; failure is
+            // non‑fatal so we log it and continue with flush+scanout.
+            self.transfer_to_host_2d(resource_id, rect, 0)
+                .map_err(|_| DrmError::Invalid)?;
+            self.set_scanout(scanout_id, resource_id, rect)
+                .map_err(|_| DrmError::Invalid)?;
+            // and finally flush to update the currently bound scanout
+            self.resource_flush(resource_id, rect)
+                .map_err(|_| DrmError::Invalid)?;
+        }
+
+        Ok(())
     }
 }
 

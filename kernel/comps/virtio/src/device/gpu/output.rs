@@ -2,16 +2,17 @@ use alloc::{sync::Arc, vec::Vec};
 
 use aster_gpu::drm::{
     DrmDevice, DrmError,
+    atomic::DrmAtomicHelper,
     drm_modes::DrmDisplayMode,
     gem::DrmGemObject,
     ioctl::DrmModeFbDirtyCmd,
-    mode_config::DrmModeConfig,
+    mode_config::{DrmModeConfig, ObjectId},
     mode_object::{
         DrmObject,
         connector::{
             ConnectorState, ConnectorStatus, ConnectorType, DrmConnector, property::ConnectorProps,
         },
-        crtc::{CrtcState, DrmCrtc},
+        crtc::{CrtcState, DrmCrtc, property::CrtcProps},
         encoder::{DrmEncoder, EncoderState, EncoderType},
         framebuffer::DrmFramebuffer,
         plane::{DrmPlane, DrmPlaneType, PlaneState, property::PlaneProps},
@@ -24,8 +25,16 @@ use ostd::sync::Mutex;
 use crate::device::gpu::{VirtioGpuRect, device::GpuDevice, gem::VirtioGemObject};
 
 pub fn virtio_gpu_output_init(scanout_id: u32, config: &mut DrmModeConfig) -> Result<(), DrmError> {
-    let plane = Arc::new(VirtioGpuPlane::new(config, DrmPlaneType::Primary));
-    let crtc = Arc::new(VirtioGpuCrtc::new(scanout_id, plane.clone(), None));
+    let primary_plane = Arc::new(VirtioGpuPlane::new(config, DrmPlaneType::Primary));
+    let (primary_id, _) = config.add_object(DrmObject::Plane(primary_plane.clone()));
+
+    let crtc = Arc::new(VirtioGpuCrtc::new(
+        config,
+        scanout_id,
+        primary_plane.clone(),
+        primary_id,
+        None,
+    ));
     let encoder = Arc::new(VirtioGpuEncoder::new(EncoderType::VIRTUAL));
 
     let connector_type = ConnectorType::VIRTUAL;
@@ -36,12 +45,11 @@ pub fn virtio_gpu_output_init(scanout_id: u32, config: &mut DrmModeConfig) -> Re
         connector_type_id,
     ));
 
-    let _ = config.add_object(DrmObject::Plane(plane.clone()));
-    let crtc_indices = config.add_object(DrmObject::Crtc(crtc.clone()));
-    let encoder_indices = config.add_object(DrmObject::Encoder(encoder.clone()));
+    let (_, crtc_indices) = config.add_object(DrmObject::Crtc(crtc.clone()));
+    let (_, encoder_indices) = config.add_object(DrmObject::Encoder(encoder.clone()));
     let _ = config.add_object(DrmObject::Connector(connector.clone()));
 
-    plane.set_possible_crtcs(&[crtc_indices]);
+    primary_plane.set_possible_crtcs(&[crtc_indices]);
     encoder.set_possible_crtcs(&[crtc_indices]);
     connector.set_possible_encoders(&[encoder_indices]);
 
@@ -65,6 +73,17 @@ impl VirtioGpuPlane {
 
         let mut properties: PropertyObject = HashMap::new();
         properties.insert(config.attach_property(&Type), type_ as u64);
+        properties.insert(config.attach_property(&CrtcId), 0);
+        properties.insert(config.attach_property(&FbId), 0);
+
+        properties.insert(config.attach_property(&SrcX), 0);
+        properties.insert(config.attach_property(&SrcY), 0);
+        properties.insert(config.attach_property(&SrcW), 0);
+        properties.insert(config.attach_property(&SrcH), 0);
+        properties.insert(config.attach_property(&CrtcX), 0);
+        properties.insert(config.attach_property(&CrtcY), 0);
+        properties.insert(config.attach_property(&CrtcW), 0);
+        properties.insert(config.attach_property(&CrtcH), 0);
 
         Self {
             state: Mutex::new(PlaneState::new(properties)),
@@ -81,6 +100,7 @@ pub struct VirtioGpuCrtc {
     scanout_id: u32,
     state: Mutex<CrtcState>,
     primary: Arc<dyn DrmPlane>,
+    primary_id: ObjectId,
     cursor: Option<Arc<dyn DrmPlane>>,
 }
 
@@ -93,59 +113,40 @@ impl DrmCrtc for VirtioGpuCrtc {
         &self.primary
     }
 
-    fn cursor_plane(&self) -> &Option<Arc<dyn DrmPlane>> {
-        &self.cursor
+    fn primary_plane_id(&self) -> ObjectId {
+        self.primary_id
     }
 
-    fn set_config(
-        &self,
-        x: u32,
-        y: u32,
-        fb: Arc<dyn DrmFramebuffer>,
-        _connectors: Vec<Arc<dyn DrmConnector>>,
-        dev: Arc<dyn DrmDevice>,
-    ) -> Result<(), DrmError> {
-        let vgpu = Arc::downcast::<GpuDevice>(dev).map_err(|_| DrmError::Invalid)?;
-        let gem_object =
-            Arc::downcast::<VirtioGemObject>(fb.gem_object()).map_err(|_| DrmError::Invalid)?;
-
-        let width = fb.width();
-        let height = fb.height();
-
-        let rect = VirtioGpuRect {
-            x,
-            y,
-            width,
-            height,
-        };
-        let scanout_id = self.scanout_id;
-        let resource_id = gem_object.resource_id();
-
-        // ensure the host-side 2D resource sees the latest guest framebuffer contents
-        // some devices (older qemu) may not implement this command; failure is
-        // non‑fatal so we log it and continue with flush+scanout.
-        vgpu.transfer_to_host_2d(resource_id, rect, 0)
-            .map_err(|_| DrmError::Invalid)?;
-        vgpu.set_scanout(scanout_id, resource_id, rect)
-            .map_err(|_| DrmError::Invalid)?;
-        // and finally flush to update the currently bound scanout
-        vgpu.resource_flush(resource_id, rect)
-            .map_err(|_| DrmError::Invalid)?;
-
-        Ok(())
+    fn cursor_plane(&self) -> &Option<Arc<dyn DrmPlane>> {
+        &self.cursor
     }
 }
 
 impl VirtioGpuCrtc {
-    fn new(scanout_id: u32, primary: Arc<dyn DrmPlane>, cursor: Option<Arc<dyn DrmPlane>>) -> Self {
-        let properties: PropertyObject = HashMap::new();
+    fn new(
+        config: &mut DrmModeConfig,
+        scanout_id: u32,
+        primary: Arc<dyn DrmPlane>,
+        primary_id: ObjectId,
+        cursor: Option<Arc<dyn DrmPlane>>,
+    ) -> Self {
+        use CrtcProps::*;
+
+        let mut properties: PropertyObject = HashMap::new();
+        properties.insert(config.attach_property(&Active), 0);
+        properties.insert(config.attach_property(&ModeId), 0);
 
         Self {
             scanout_id,
             state: Mutex::new(CrtcState::new(properties)),
             primary,
+            primary_id,
             cursor,
         }
+    }
+
+    pub fn scanout_id(&self) -> u32 {
+        self.scanout_id
     }
 }
 
@@ -248,10 +249,11 @@ impl VirtioGpuConnector {
 
         let mut properties: PropertyObject = HashMap::new();
 
+        properties.insert(config.attach_property(&CrtcId), 0);
         properties.insert(config.attach_property(&DPMS), 0);
         properties.insert(config.attach_property(&LinkStatus), 0);
         properties.insert(config.attach_property(&NonDesktop), 0);
-        properties.insert(config.attach_property(&TILE), 0);
+        properties.insert(config.attach_property(&Tile), 0);
 
         Self {
             type_,

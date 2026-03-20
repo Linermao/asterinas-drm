@@ -1,6 +1,9 @@
 use int_to_c_enum::TryFromInt;
 
-use crate::drm::{drm_modes::DrmModeModeInfo, mode_object::property::DRM_PROP_NAME_LEN};
+use crate::drm::{
+    drm_modes::{DrmFormat, DrmModeModeInfo},
+    mode_object::property::DRM_PROP_NAME_LEN,
+};
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod)]
@@ -252,6 +255,64 @@ pub struct DrmModeFbCmd {
     pub bpp: u32,
     pub depth: u32,
     pub handle: u32,
+}
+
+bitflags::bitflags! {
+    pub struct DrmModeFb: u32 {
+        const INTERLACED = 1 << 0;
+        const MODIFIERS = 1 << 1;
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod)]
+pub struct DrmModeFbCmd2 {
+    pub fb_id: u32,
+    pub width: u32,
+    pub height: u32,
+    pub pixel_format: u32,
+    pub flags: u32,
+    pub handles: [u32; 4],
+    pub pitches: [u32; 4],
+    pub offsets: [u32; 4],
+    __padding: u32,
+    pub modifier: [u64; 4],
+}
+
+impl From<DrmModeFbCmd> for DrmModeFbCmd2 {
+    fn from(fb_cmd: DrmModeFbCmd) -> Self {
+        let pixel_format = match (fb_cmd.bpp, fb_cmd.depth) {
+            (8, 8) => DrmFormat::C8 as u32,
+            (16, 15) => DrmFormat::XRGB1555 as u32,
+            (16, 16) => DrmFormat::RGB565 as u32,
+            (24, 24) => DrmFormat::RGB888 as u32,
+            (32, 24) => DrmFormat::XRGB8888 as u32,
+            (32, 30) => DrmFormat::XRGB2101010 as u32,
+            (32, 32) => DrmFormat::ARGB8888 as u32,
+            _ => DrmFormat::Unknown as u32,
+        };
+
+        let mut handles = [0u32; 4];
+        let mut pitches = [0u32; 4];
+        let offsets = [0u32; 4];
+        let modifier = [0u64; 4];
+
+        handles[0] = fb_cmd.handle;
+        pitches[0] = fb_cmd.pitch;
+
+        Self {
+            fb_id: fb_cmd.fb_id,
+            width: fb_cmd.width,
+            height: fb_cmd.height,
+            pixel_format,
+            flags: 0,
+            handles,
+            pitches,
+            offsets,
+            __padding: 0,
+            modifier,
+        }
+    }
 }
 
 #[repr(C)]

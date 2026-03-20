@@ -131,6 +131,8 @@ drm_ioc!(DrmIoctlModeGetPlaneResources, DRM_IOCTL_MODE_GETPLANERESOURCES,   b'd'
     DrmIoctlFlags::ANY);
 drm_ioc!(DrmIoctlModeGetPlane,          DRM_IOCTL_MODE_GETPLANE,            b'd', 0xb6, InOutData<DrmModeGetPlane>,
     DrmIoctlFlags::ANY);
+drm_ioc!(DrmIoctlModeAddFB2,            DRM_IOCTL_MODE_ADDFB2,              b'd', 0xb8, InOutData<DrmModeFbCmd2>,
+    DrmIoctlFlags::ANY);
 drm_ioc!(DrmIoctlModeObjectGetProps,    DRM_IOCTL_MODE_OBJ_GETPROPERTIES,   b'd', 0xb9, InOutData<DrmModeObjectGetProps>,
     DrmIoctlFlags::ANY);
 drm_ioc!(DrmIoctlModeCursor2,           DRM_IOCTL_MODE_CURSOR2,             b'd', 0xbb, InOutData<DrmModeCursor2>, 

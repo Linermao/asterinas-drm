@@ -7,4 +7,5 @@ cp -rf ./user/build/ /mnt
 sync
 umount /mnt
 
+make kernel
 make BOOT_PROTOCOL=linux-efi-handover64 run_kernel 
