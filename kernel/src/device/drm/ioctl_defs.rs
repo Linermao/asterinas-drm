@@ -119,6 +119,8 @@ drm_ioc!(DrmIoctlModeAddFB,             DRM_IOCTL_MODE_ADDFB,               b'd'
     DrmIoctlFlags::ANY);
 drm_ioc!(DrmIoctlModeRmFB,              DRM_IOCTL_MODE_RMFB,                b'd', 0xaf, InOutData<u32>,
     DrmIoctlFlags::ANY);
+drm_ioc!(DrmIoctlModePageFlip,          DRM_IOCTL_MODE_PAGE_FLIP,           b'd', 0xb0, InOutData<DrmModeCrtcPageFlip>,
+    DrmIoctlFlags::ANY);
 drm_ioc!(DrmIoctlModeDirtyFb,           DRM_IOCTL_MODE_DIRTYFB,             b'd', 0xb1, InOutData<DrmModeFbDirtyCmd>,
     DrmIoctlFlags::ANY);
 drm_ioc!(DrmIoctlModeCreateDumb,        DRM_IOCTL_MODE_CREATE_DUMB,         b'd', 0xb2, InOutData<DrmModeCreateDumb>,

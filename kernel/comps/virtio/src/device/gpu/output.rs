@@ -2,7 +2,7 @@ use alloc::{sync::Arc, vec::Vec};
 
 use aster_gpu::drm::{
     DrmDevice, DrmError,
-    atomic::DrmAtomicHelper,
+    atomic::{DrmAtomicHelper, vblank::DrmVblankState},
     drm_modes::DrmDisplayMode,
     gem::DrmGemObject,
     ioctl::DrmModeFbDirtyCmd,
@@ -99,6 +99,7 @@ impl VirtioGpuPlane {
 pub struct VirtioGpuCrtc {
     scanout_id: u32,
     state: Mutex<CrtcState>,
+    vblank_state: Mutex<DrmVblankState>,
     primary: Arc<dyn DrmPlane>,
     primary_id: ObjectId,
     cursor: Option<Arc<dyn DrmPlane>>,
@@ -107,6 +108,10 @@ pub struct VirtioGpuCrtc {
 impl DrmCrtc for VirtioGpuCrtc {
     fn state(&self) -> &Mutex<CrtcState> {
         &self.state
+    }
+
+    fn vblank_state(&self) -> &Mutex<DrmVblankState> {
+        &self.vblank_state
     }
 
     fn primary_plane(&self) -> &Arc<dyn DrmPlane> {
@@ -139,6 +144,7 @@ impl VirtioGpuCrtc {
         Self {
             scanout_id,
             state: Mutex::new(CrtcState::new(properties)),
+            vblank_state: Mutex::new(DrmVblankState::new()),
             primary,
             primary_id,
             cursor,
@@ -285,37 +291,6 @@ impl DrmFramebuffer for VirtioGpuFramebuffer {
 
     fn height(&self) -> u32 {
         self.height
-    }
-
-    fn dirty(
-        &self,
-        dev: Arc<dyn DrmDevice>,
-        _dirty_cmd: &DrmModeFbDirtyCmd,
-    ) -> Result<(), DrmError> {
-        let vgpu = Arc::downcast::<GpuDevice>(dev).map_err(|_| DrmError::Invalid)?;
-        let gem_object =
-            Arc::downcast::<VirtioGemObject>(self.gem_object()).map_err(|_| DrmError::Invalid)?;
-
-        let width = self.width();
-        let height = self.height();
-
-        // TODO
-        let rect = VirtioGpuRect {
-            x: 0,
-            y: 0,
-            width,
-            height,
-        };
-        let resource_id = gem_object.resource_id();
-
-        log::error!("[kernel] correct running!");
-
-        vgpu.transfer_to_host_2d(resource_id, rect, 0)
-            .map_err(|_| DrmError::Invalid)?;
-        vgpu.resource_flush(resource_id, rect)
-            .map_err(|_| DrmError::Invalid)?;
-
-        Ok(())
     }
 }
 

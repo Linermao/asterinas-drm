@@ -9,9 +9,12 @@ use hashbrown::HashMap;
 use ostd::{mm::PAGE_SIZE, sync::Mutex};
 
 use crate::drm::{
-    atomic::{DrmAtomicHelper, DrmAtomicPendingState},
+    atomic::{
+        DrmAtomicHelper, DrmAtomicPendingState,
+        vblank::{PageFlipEvent, VblankCallback},
+    },
     gem::{DrmGemBackend, DrmGemObject},
-    ioctl::{DrmModeCreateDumb, DrmModeCrtc, DrmModeFbCmd2},
+    ioctl::{DrmModeCreateDumb, DrmModeCrtc, DrmModeCrtcPageFlip, DrmModeFbCmd2},
     mode_config::{DrmModeConfig, ObjectId},
 };
 
@@ -114,6 +117,13 @@ pub trait DrmDevice: Debug + Any + Send + Sync {
         crtc_resp: &DrmModeCrtc,
         connector_ids: Vec<ObjectId>,
     ) -> Result<(), DrmError>;
+    fn page_flip(
+        &self,
+        page_flip: &DrmModeCrtcPageFlip,
+        vblank_callback: Arc<dyn VblankCallback>,
+        target: Option<u32>,
+    ) -> Result<(), DrmError>;
+    fn dirty_framebuffer(&self, fb_id: ObjectId) -> Result<(), DrmError>;
     fn create_dumb(
         &self,
         _args: &DrmModeCreateDumb,
@@ -133,6 +143,7 @@ pub trait DrmDevice: Debug + Any + Send + Sync {
         &self,
         nonblock: bool,
         pending_state: &mut DrmAtomicPendingState,
+        page_flip_event: Option<PageFlipEvent>,
     ) -> Result<(), DrmError>;
     fn atomic_commit_tail(&self, pending_state: &mut DrmAtomicPendingState)
     -> Result<(), DrmError>;

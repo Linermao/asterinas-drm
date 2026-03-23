@@ -1,4 +1,5 @@
 use alloc::format;
+
 use int_to_c_enum::TryFromInt;
 
 use crate::drm::DrmError;
@@ -36,27 +37,24 @@ bitflags::bitflags! {
     }
 }
 
-const fn fourcc_code(a: u8, b: u8, c: u8, d: u8) -> u32 {                      
-    (a as u32)                                                                 
-        | ((b as u32) << 8)                                                    
-        | ((c as u32) << 16)                                                   
-        | ((d as u32) << 24)                                                   
-}     
+const fn fourcc_code(a: u8, b: u8, c: u8, d: u8) -> u32 {
+    (a as u32) | ((b as u32) << 8) | ((c as u32) << 16) | ((d as u32) << 24)
+}
 
 #[repr(u32)]
 #[derive(Debug, Clone, Copy)]
 pub enum DrmFormat {
-    XRGB8888 = fourcc_code(b'X', b'R', b'2', b'4'),                            
-    ARGB8888 = fourcc_code(b'A', b'R', b'2', b'4'),                            
-    XBGR8888 = fourcc_code(b'X', b'B', b'2', b'4'),                            
-    RGBX8888 = fourcc_code(b'R', b'X', b'2', b'4'),                            
-    BGRX8888 = fourcc_code(b'B', b'X', b'2', b'4'),  
-    C8       = fourcc_code(b'C', b'8', b' ', b' '),
+    XRGB8888 = fourcc_code(b'X', b'R', b'2', b'4'),
+    ARGB8888 = fourcc_code(b'A', b'R', b'2', b'4'),
+    XBGR8888 = fourcc_code(b'X', b'B', b'2', b'4'),
+    RGBX8888 = fourcc_code(b'R', b'X', b'2', b'4'),
+    BGRX8888 = fourcc_code(b'B', b'X', b'2', b'4'),
+    C8 = fourcc_code(b'C', b'8', b' ', b' '),
     XRGB1555 = fourcc_code(b'X', b'R', b'1', b'5'),
-    RGB565   = fourcc_code(b'R', b'G', b'1', b'6'),
-    RGB888   = fourcc_code(b'R', b'G', b'2', b'4'),
+    RGB565 = fourcc_code(b'R', b'G', b'1', b'6'),
+    RGB888 = fourcc_code(b'R', b'G', b'2', b'4'),
     XRGB2101010 = fourcc_code(b'X', b'R', b'3', b'0'),
-    Unknown  = fourcc_code(b' ', b' ', b' ', b' '),
+    Unknown = fourcc_code(b' ', b' ', b' ', b' '),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -87,24 +85,24 @@ impl Default for DrmDisplayMode {
         name[..len].copy_from_slice(&bytes[..len]);
 
         Self {
-            clock: 65000, // kHz (65 MHz)
+            clock: 83500, // kHz
 
             hdisplay: 1280,
-            hsync_start: 1048,
-            hsync_end: 1184,
-            htotal: 1344,
+            hsync_start: 1328,
+            hsync_end: 1360,
+            htotal: 1440,
 
             hskew: 0,
 
             vdisplay: 800,
-            vsync_start: 771,
-            vsync_end: 777,
-            vtotal: 806,
+            vsync_start: 803,
+            vsync_end: 809,
+            vtotal: 823,
 
             vscan: 0,
 
-            flags: (DrmModeFlag::PHSYNC | DrmModeFlag::PVSYNC).bits(),  // DRM_MODE_FLAG_PHSYNC | DRM_MODE_FLAG_PVSYNC
-            type_: DrmModeType::DRIVER.bits(),
+            flags: (DrmModeFlag::PHSYNC | DrmModeFlag::NVSYNC).bits(),
+            type_: (DrmModeType::DRIVER | DrmModeType::PREFERRED).bits(),
 
             name,
         }
@@ -115,43 +113,51 @@ impl DrmDisplayMode {
     /// Create a display mode from resolution (width x height).
     /// This creates a simple mode with reasonable timing values for the given resolution.
     pub fn from_resolution(width: u16, height: u16) -> Self {
+        let w = width as u32;
+        let h = height as u32;
+
+        let h_blank = (w / 5).max(80); // >=20%
+        let h_fp = (h_blank / 4).max(8);
+        let h_sync = (h_blank / 4).max(32);
+        let h_bp = h_blank.saturating_sub(h_fp + h_sync).max(24);
+
+        let v_blank = (h / 20).max(10); // >=5%
+        let v_fp = 1u32;
+        let v_sync = 3u32;
+        let v_bp = v_blank.saturating_sub(v_fp + v_sync).max(6);
+
+        let hdisplay = w;
+        let hsync_start = hdisplay + h_fp;
+        let hsync_end = hsync_start + h_sync;
+        let htotal = hsync_end + h_bp;
+
+        let vdisplay = h;
+        let vsync_start = vdisplay + v_fp;
+        let vsync_end = vsync_start + v_sync;
+        let vtotal = vsync_end + v_bp;
+
+        let clock = ((htotal * vtotal * 60) + 500) / 1000; // kHz, rounded
+
         let mut name = [0u8; DRM_DISPLAY_MODE_LEN];
-        let name_str = format!("{}x{}", width, height);
-        let bytes = name_str.as_bytes();
-        let len = bytes.len().min(DRM_DISPLAY_MODE_LEN);
-        name[..len].copy_from_slice(&bytes[..len]);
-
-        // Calculate reasonable timing values
-        // H blanking is typically around 20-25% of active display
-        let h_blank = width / 4;
-        let hsync_start = width + h_blank / 2;
-        let hsync_end = width + h_blank * 3 / 4;
-        let htotal = width + h_blank;
-
-        // V blanking is typically around 5-10% of active display
-        let v_blank = height / 20 + 1;
-        let vsync_start = height + v_blank / 2;
-        let vsync_end = height + v_blank * 3 / 4;
-        let vtotal = height + v_blank;
-
-        // Calculate pixel clock (assume 60Hz refresh rate)
-        // clock = htotal * vtotal * refresh_rate / 1000 (kHz)
-        let clock = (htotal as u32 * vtotal as u32 * 60) / 1000;
+        let s = alloc::format!("{width}x{height}");
+        let n = s.as_bytes();
+        let len = n.len().min(DRM_DISPLAY_MODE_LEN - 1);
+        name[..len].copy_from_slice(&n[..len]);
 
         Self {
             clock,
-            hdisplay: width,
+            hdisplay: hdisplay as u16,
             hsync_start: hsync_start as u16,
             hsync_end: hsync_end as u16,
             htotal: htotal as u16,
             hskew: 0,
-            vdisplay: height,
+            vdisplay: vdisplay as u16,
             vsync_start: vsync_start as u16,
             vsync_end: vsync_end as u16,
             vtotal: vtotal as u16,
             vscan: 0,
             flags: (DrmModeFlag::PHSYNC | DrmModeFlag::PVSYNC).bits(),
-            type_: DrmModeType::DRIVER.bits(),
+            type_: (DrmModeType::DRIVER | DrmModeType::PREFERRED).bits(),
             name,
         }
     }

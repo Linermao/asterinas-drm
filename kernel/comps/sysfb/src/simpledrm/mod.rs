@@ -3,10 +3,15 @@ use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use aster_framebuffer::FRAMEBUFFER;
 use aster_gpu::drm::{
     DrmDevice, DrmDeviceCaps, DrmError, DrmFeatures, MemfdAllocatorType, VmaOffsetManager,
-    atomic::{DrmAtomicHelper, DrmAtomicPendingState},
+    atomic::{
+        DrmAtomicHelper, DrmAtomicPendingState,
+        vblank::{DrmVblankState, PageFlipEvent, VblankCallback},
+    },
     drm_modes::DrmDisplayMode,
     gem::{DrmGemBackend, DrmGemObject},
-    ioctl::{DrmModeCreateDumb, DrmModeCrtc, DrmModeFbCmd2, DrmModeFbDirtyCmd},
+    ioctl::{
+        DrmModeCreateDumb, DrmModeCrtc, DrmModeCrtcPageFlip, DrmModeFbCmd2, DrmModeFbDirtyCmd,
+    },
     mode_config::{DrmModeConfig, ObjectId},
     mode_object::{
         DrmObject, DrmObjectType,
@@ -67,7 +72,12 @@ impl SimpleDrmDevice {
         let primary = Arc::new(SimpleDrmPlane::new(config, DrmPlaneType::Primary));
         let (primary_id, _) = config.add_object(DrmObject::Plane(primary.clone()));
 
-        let crtc = Arc::new(SimpleDrmCrtc::new(config, primary.clone(), primary_id, None));
+        let crtc = Arc::new(SimpleDrmCrtc::new(
+            config,
+            primary.clone(),
+            primary_id,
+            None,
+        ));
         let (_, crtc_indices) = config.add_object(DrmObject::Crtc(crtc.clone()));
 
         let encoder = Arc::new(SimpleDrmEncoder::new(EncoderType::VIRTUAL));
@@ -121,6 +131,19 @@ impl DrmDevice for SimpleDrmDevice {
         self.atomic_helper_set_config(crtc_resp, connector_ids)
     }
 
+    fn page_flip(
+        &self,
+        page_flip: &DrmModeCrtcPageFlip,
+        vblank_callback: Arc<dyn VblankCallback>,
+        target: Option<u32>,
+    ) -> Result<(), DrmError> {
+        self.atomic_helper_pageflip(page_flip, vblank_callback, target)
+    }
+
+    fn dirty_framebuffer(&self, fb_id: ObjectId) -> Result<(), DrmError> {
+        self.atomic_helper_dirty_framebuffer(fb_id)
+    }
+
     fn vma_offset_manager(&self) -> &Mutex<VmaOffsetManager> {
         &self.vma_offset_manager
     }
@@ -163,8 +186,9 @@ impl DrmDevice for SimpleDrmDevice {
         &self,
         nonblock: bool,
         pending_state: &mut DrmAtomicPendingState,
+        page_flip_event: Option<PageFlipEvent>,
     ) -> Result<(), DrmError> {
-        self.atomic_helper_commit(nonblock, pending_state)
+        self.atomic_helper_commit(nonblock, pending_state, page_flip_event)
     }
 
     fn atomic_commit_tail(
@@ -176,32 +200,28 @@ impl DrmDevice for SimpleDrmDevice {
 }
 
 impl DrmAtomicHelper for SimpleDrmDevice {
-    fn atomic_flush(&self, pending_state: &mut DrmAtomicPendingState) -> Result<(), DrmError> {
+    fn atomic_flush(&self, crtc_id: ObjectId) -> Result<(), DrmError> {
         let config = self.mode_config.lock();
 
-        for crtc_id in pending_state.affected_crtcs() {
-            let crtc = config
-                .get_object_with::<dyn DrmCrtc>(*crtc_id)
-                .ok_or(DrmError::NotFound)?;
-            if !crtc.active() {
-                continue;
-            }
+        let crtc = config
+            .get_object_with::<dyn DrmCrtc>(crtc_id)
+            .ok_or(DrmError::NotFound)?;
 
-            let Some(fb_id) = crtc.primary_plane().fb_id() else {
-                continue;
-            };
-            let fb = config
-                .get_object_with::<dyn DrmFramebuffer>(fb_id)
-                .ok_or(DrmError::NotFound)?;
+        let fb_id = crtc.primary_plane().fb_id().ok_or(DrmError::NotFound)?;
+        let fb = config
+            .get_object_with::<dyn DrmFramebuffer>(fb_id)
+            .ok_or(DrmError::NotFound)?;
 
-            let Some(framebuffer) = FRAMEBUFFER.get() else {
-                return Err(DrmError::NotFound);
-            };
+        let Some(framebuffer) = FRAMEBUFFER.get() else {
+            return Err(DrmError::NotFound);
+        };
 
-            let iomem = framebuffer.io_mem();
-            let mut writer = iomem.writer().to_fallible();
-            fb.gem_object().backend().read(0, &mut writer)?;
-        }
+        let iomem = framebuffer.io_mem();
+        let mut writer = iomem.writer().to_fallible();
+        fb.gem_object().backend().read(0, &mut writer)?;
+
+        // TODO: simpledrm use vblank_timer to set 60hz vblank signal
+        crtc.handle_vblank()?;
 
         Ok(())
     }
@@ -280,6 +300,7 @@ impl SimpleDrmPlane {
 #[derive(Debug)]
 struct SimpleDrmCrtc {
     state: Mutex<CrtcState>,
+    vblank_state: Mutex<DrmVblankState>,
     primary: Arc<dyn DrmPlane>,
     primary_id: ObjectId,
     cursor: Option<Arc<dyn DrmPlane>>,
@@ -288,6 +309,10 @@ struct SimpleDrmCrtc {
 impl DrmCrtc for SimpleDrmCrtc {
     fn state(&self) -> &Mutex<CrtcState> {
         &self.state
+    }
+
+    fn vblank_state(&self) -> &Mutex<DrmVblankState> {
+        &self.vblank_state
     }
 
     fn primary_plane(&self) -> &Arc<dyn DrmPlane> {
@@ -318,6 +343,7 @@ impl SimpleDrmCrtc {
 
         Self {
             state: Mutex::new(CrtcState::new(properties)),
+            vblank_state: Mutex::new(DrmVblankState::new()),
             primary,
             primary_id,
             cursor,
@@ -451,23 +477,6 @@ impl DrmFramebuffer for SimpleDrmFramebuffer {
 
     fn gem_object(&self) -> Arc<dyn DrmGemObject> {
         self.gem_object.clone()
-    }
-
-    fn dirty(
-        &self,
-        _dev: Arc<dyn DrmDevice>,
-        _dirty_cmd: &DrmModeFbDirtyCmd,
-    ) -> Result<(), DrmError> {
-        // TODO
-        if let Some(framebuffer) = FRAMEBUFFER.get() {
-            let iomem = framebuffer.io_mem();
-            let mut writer = iomem.writer().to_fallible();
-            self.gem_object().backend().read(0, &mut writer)?;
-        } else {
-            return Err(DrmError::NotFound);
-        }
-
-        Ok(())
     }
 }
 

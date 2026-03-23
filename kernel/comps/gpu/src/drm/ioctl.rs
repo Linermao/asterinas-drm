@@ -315,6 +315,42 @@ impl From<DrmModeFbCmd> for DrmModeFbCmd2 {
     }
 }
 
+bitflags::bitflags! {
+    pub struct PageFlipFlags: u32 {
+        /// Request a flip complete event
+        const EVENT = 0x01;
+        /// Request async page flip (don’t wait for vblank)
+        const ASYNC = 0x02;
+        /// Absolute sequence target (optional)
+        const TARGET_ABSOLUTE = 0x04;
+        /// Relative sequence target (optional)
+        const TARGET_RELATIVE = 0x08;
+
+        /// Combined target mask
+        const TARGET = Self::TARGET_ABSOLUTE.bits | Self::TARGET_RELATIVE.bits;
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod)]
+pub struct DrmModeCrtcPageFlip {
+    pub crtc_id: u32,
+    pub fb_id: u32,
+    pub flags: u32,
+    pub reserved: u32,
+    pub user_data: u64,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod)]
+pub struct DrmModeCrtcPageFlipTarget {
+    pub crtc_id: u32,
+    pub fb_id: u32,
+    pub flags: u32,
+    pub sequence: u32,
+    pub user_data: u64,
+}
+
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod)]
 pub struct DrmModeFbDirtyCmd {

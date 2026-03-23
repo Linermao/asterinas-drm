@@ -7,9 +7,12 @@ use core::{
 
 use aster_gpu::drm::{
     DrmDevice, DrmDeviceCaps, DrmError, DrmFeatures, MemfdAllocatorType, VmaOffsetManager,
-    atomic::{DrmAtomicHelper, DrmAtomicPendingState},
+    atomic::{
+        DrmAtomicHelper, DrmAtomicPendingState,
+        vblank::{PageFlipEvent, VblankCallback},
+    },
     gem::{DrmGemBackend, DrmGemObject},
-    ioctl::{DrmModeCreateDumb, DrmModeCrtc, DrmModeFbCmd2},
+    ioctl::{DrmModeCreateDumb, DrmModeCrtc, DrmModeCrtcPageFlip, DrmModeFbCmd2},
     mode_config::{DrmModeConfig, ObjectId},
     mode_object::{crtc::DrmCrtc, framebuffer::DrmFramebuffer},
 };
@@ -346,6 +349,19 @@ impl DrmDevice for GpuDevice {
         self.atomic_helper_set_config(crtc_resp, connector_ids)
     }
 
+    fn page_flip(
+        &self,
+        page_flip: &DrmModeCrtcPageFlip,
+        vblank: Arc<dyn VblankCallback>,
+        target: Option<u32>,
+    ) -> Result<(), DrmError> {
+        self.atomic_helper_pageflip(page_flip, vblank, target)
+    }
+
+    fn dirty_framebuffer(&self, fb_id: ObjectId) -> Result<(), DrmError> {
+        self.atomic_helper_dirty_framebuffer(fb_id)
+    }
+
     fn vma_offset_manager(&self) -> &Mutex<VmaOffsetManager> {
         &self.vma_offset_manager
     }
@@ -413,8 +429,9 @@ impl DrmDevice for GpuDevice {
         &self,
         nonblock: bool,
         pending_state: &mut DrmAtomicPendingState,
+        page_flip_event: Option<PageFlipEvent>,
     ) -> Result<(), DrmError> {
-        self.atomic_helper_commit(nonblock, pending_state)
+        self.atomic_helper_commit(nonblock, pending_state, page_flip_event)
     }
 
     fn atomic_commit_tail(
@@ -426,49 +443,45 @@ impl DrmDevice for GpuDevice {
 }
 
 impl DrmAtomicHelper for GpuDevice {
-    fn atomic_flush(&self, pending_state: &mut DrmAtomicPendingState) -> Result<(), DrmError> {
+    fn atomic_flush(&self, crtc_id: ObjectId) -> Result<(), DrmError> {
         let config = self.mode_config.lock();
-        for crtc_id in pending_state.affected_crtcs() {
-            let crtc = config
-                .get_object_with::<dyn DrmCrtc>(*crtc_id)
-                .ok_or(DrmError::NotFound)?;
-            if !crtc.active() {
-                continue;
-            }
+        let crtc = config
+            .get_object_with::<dyn DrmCrtc>(crtc_id)
+            .ok_or(DrmError::NotFound)?;
 
-            let primary_plane = crtc.primary_plane();
-            let Some(fb_id) = primary_plane.fb_id() else {
-                continue;
-            };
+        let primary_plane = crtc.primary_plane();
+        let fb_id = primary_plane.fb_id().ok_or(DrmError::NotFound)?;
+        let fb = config
+            .get_object_with::<dyn DrmFramebuffer>(fb_id)
+            .ok_or(DrmError::NotFound)?;
 
-            let fb = config
-                .get_object_with::<dyn DrmFramebuffer>(fb_id)
-                .ok_or(DrmError::NotFound)?;
+        let gem_object =
+            Arc::downcast::<VirtioGemObject>(fb.gem_object()).map_err(|_| DrmError::Invalid)?;
 
-            let gem_object =
-                Arc::downcast::<VirtioGemObject>(fb.gem_object()).map_err(|_| DrmError::Invalid)?;
+        let rect = VirtioGpuRect {
+            x: primary_plane.crtc_x(),
+            y: primary_plane.crtc_y(),
+            width: fb.width(),
+            height: fb.height(),
+        };
 
-            let rect = VirtioGpuRect {
-                x: primary_plane.crtc_x(),
-                y: primary_plane.crtc_y(),
-                width: fb.width(),
-                height: fb.height(),
-            };
-            let vcrtc = Arc::downcast::<VirtioGpuCrtc>(crtc).map_err(|_| DrmError::Invalid)?;
-            let scanout_id = vcrtc.scanout_id();
-            let resource_id = gem_object.resource_id();
+        let vcrtc = Arc::downcast::<VirtioGpuCrtc>(crtc.clone()).map_err(|_| DrmError::Invalid)?;
+        let scanout_id = vcrtc.scanout_id();
+        let resource_id = gem_object.resource_id();
 
-            // ensure the host-side 2D resource sees the latest guest framebuffer contents
-            // some devices (older qemu) may not implement this command; failure is
-            // non‑fatal so we log it and continue with flush+scanout.
-            self.transfer_to_host_2d(resource_id, rect, 0)
-                .map_err(|_| DrmError::Invalid)?;
-            self.set_scanout(scanout_id, resource_id, rect)
-                .map_err(|_| DrmError::Invalid)?;
-            // and finally flush to update the currently bound scanout
-            self.resource_flush(resource_id, rect)
-                .map_err(|_| DrmError::Invalid)?;
-        }
+        // ensure the host-side 2D resource sees the latest guest framebuffer contents
+        // some devices (older qemu) may not implement this command; failure is
+        // non‑fatal so we log it and continue with flush+scanout.
+        self.transfer_to_host_2d(resource_id, rect, 0)
+            .map_err(|_| DrmError::Invalid)?;
+        self.set_scanout(scanout_id, resource_id, rect)
+            .map_err(|_| DrmError::Invalid)?;
+        // and finally flush to update the currently bound scanout
+        self.resource_flush(resource_id, rect)
+            .map_err(|_| DrmError::Invalid)?;
+
+        // fake vblank info
+        crtc.handle_vblank()?;
 
         Ok(())
     }

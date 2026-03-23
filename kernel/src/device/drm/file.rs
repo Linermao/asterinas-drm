@@ -5,7 +5,10 @@ use aster_gpu::drm::{
     DrmDevice, DrmDeviceCaps, DrmFeatures,
     atomic::{
         DrmAtomicFlags, DrmAtomicPendingState,
-        vblank::{DRM_EVENT_VBLANK_LEN, DrmVblankEvent},
+        vblank::{
+            DRM_EVENT_VBLANK_LEN, DrmPendingVblankEvent, DrmVblankEvent, PageFlipEvent,
+            VblankCallback,
+        },
     },
     drm_modes::DrmModeModeInfo,
     gem::DrmGemObject,
@@ -39,9 +42,29 @@ use crate::{
     },
     prelude::*,
     process::signal::{PollHandle, Pollable, Pollee},
-    time::clocks::MonotonicClock,
     util::ioctl::RawIoctl,
 };
+
+struct DrmFileVblank {
+    event_pollee: Pollee,
+    event_queue: Mutex<VecDeque<Vec<u8>>>,
+}
+
+impl DrmFileVblank {
+    fn new() -> Self {
+        Self {
+            event_pollee: Pollee::new(),
+            event_queue: Mutex::new(VecDeque::new()),
+        }
+    }
+}
+
+impl VblankCallback for DrmFileVblank {
+    fn send_vblank_event(&self, bytes: &[u8]) {
+        self.event_queue.lock().push_back(bytes.to_vec());
+        self.event_pollee.notify(IoEvents::IN);
+    }
+}
 
 pub(super) struct DrmFile {
     minor: Arc<DrmMinor>,
@@ -64,8 +87,7 @@ pub(super) struct DrmFile {
     /// restrictions imposed on it by the virtualized drivers.
     supports_virtualized_cursor_plane: AtomicBool,
 
-    event_pollee: Pollee,
-    event_queue: Mutex<VecDeque<Vec<u8>>>,
+    vblank: Arc<DrmFileVblank>,
 }
 
 impl DrmFile {
@@ -81,8 +103,7 @@ impl DrmFile {
             aspect_ratio_allowed: AtomicBool::new(false),
             writeback_connectors: AtomicBool::new(false),
             supports_virtualized_cursor_plane: AtomicBool::new(false),
-            event_pollee: Pollee::new(),
-            event_queue: Mutex::new(VecDeque::new()),
+            vblank: Arc::new(DrmFileVblank::new()),
         }
     }
 
@@ -92,26 +113,6 @@ impl DrmFile {
 
     pub fn next_gem_handle(&self) -> u32 {
         self.next_gem_handle.fetch_add(1, Ordering::SeqCst)
-    }
-
-    fn queue_drm_event(&self, event: Vec<u8>) {
-        self.event_queue.lock().push_back(event);
-        self.event_pollee.notify(IoEvents::IN);
-    }
-
-    fn make_flip_complete_event(&self, user_data: u64, crtc_id: u32, sequence: u32) -> Vec<u8> {
-        let now = MonotonicClock::get().read_time();
-        let mut bytes = Vec::with_capacity(DRM_EVENT_VBLANK_LEN as usize);
-
-        bytes.extend_from_slice(&(DrmVblankEvent::FlipComplete as u32).to_ne_bytes());
-        bytes.extend_from_slice(&DRM_EVENT_VBLANK_LEN.to_ne_bytes());
-        bytes.extend_from_slice(&user_data.to_ne_bytes());
-        bytes.extend_from_slice(&(now.as_secs() as u32).to_ne_bytes());
-        bytes.extend_from_slice(&now.subsec_micros().to_ne_bytes());
-        bytes.extend_from_slice(&sequence.to_ne_bytes());
-        bytes.extend_from_slice(&crtc_id.to_ne_bytes());
-
-        bytes
     }
 
     pub fn add_gem(&self, id: u32, gem: Arc<dyn DrmGemObject>) {
@@ -129,9 +130,9 @@ impl DrmFile {
 
 impl Pollable for DrmFile {
     fn poll(&self, mask: IoEvents, poller: Option<&mut PollHandle>) -> IoEvents {
-        self.event_pollee.poll_with(mask, poller, || {
+        self.vblank.event_pollee.poll_with(mask, poller, || {
             let mut events = IoEvents::OUT;
-            if !self.event_queue.lock().is_empty() {
+            if !self.vblank.event_queue.lock().is_empty() {
                 events |= IoEvents::IN;
             }
             events
@@ -147,7 +148,7 @@ impl InodeIo for DrmFile {
         status_flags: StatusFlags,
     ) -> Result<usize> {
         let is_nonblocking = status_flags.contains(StatusFlags::O_NONBLOCK);
-        let mut queue = self.event_queue.lock();
+        let mut queue = self.vblank.event_queue.lock();
 
         if queue.is_empty() {
             if is_nonblocking {
@@ -175,7 +176,7 @@ impl InodeIo for DrmFile {
         }
 
         if queue.is_empty() {
-            self.event_pollee.invalidate();
+            self.vblank.event_pollee.invalidate();
         }
 
         Ok(total_written)
@@ -757,20 +758,65 @@ impl FileIo for DrmFile {
 
                     Ok(0)
                 }
+                cmd @ DrmIoctlModePageFlip => {
+                    if !self.device().check_feature(DrmFeatures::MODESET) {
+                        return_errno!(Errno::EOPNOTSUPP);
+                    }
+
+                    let page_flip: DrmModeCrtcPageFlip = cmd.read()?;
+                    let flags = PageFlipFlags::from_bits(page_flip.flags).ok_or(Errno::EINVAL)?;
+                    let dev = self.device();
+
+                    // Only one of the TARGET_ABSOLUTE/TARGET_RELATIVE flags
+                    // can be specified
+                    if flags.contains(PageFlipFlags::TARGET) {
+                        return_errno!(Errno::EINVAL);
+                    }
+
+                    if flags.intersects(PageFlipFlags::ASYNC)
+                        && !(dev.mode_config().lock().allow_async_page_flip())
+                    {
+                        return_errno!(Errno::EINVAL);
+                    }
+
+                    // let sequence = if flags
+                    //     .intersects(PageFlipFlags::TARGET_ABSOLUTE | PageFlipFlags::TARGET_RELATIVE)
+                    // {
+                    //     page_flip.reserved
+                    // } else {
+                    //     if page_flip.reserved !=0 {
+                    //         return_errno!(Errno::EINVAL);
+                    //     }
+                    //     0
+                    // };
+
+                    // let page_flip: DrmModeCrtcPageFlipTarget = DrmModeCrtcPageFlipTarget {
+                    //     crtc_id: page_flip.crtc_id,
+                    //     fb_id: page_flip.fb_id,
+                    //     flags: page_flip.flags,
+                    //     sequence,
+                    //     user_data: page_flip.user_data,
+                    // };
+
+                    let target: Option<u32> = if flags.intersects(PageFlipFlags::TARGET) {
+                        // TODO: Vblank target support
+                        return_errno!(Errno::EOPNOTSUPP);
+                    } else {
+                        None
+                    };
+
+                    dev.page_flip(&page_flip, self.vblank.clone(), target)?;
+
+                    Ok(0)
+                }
                 cmd @ DrmIoctlModeDirtyFb => {
-                    log::error!("[kernel] DrmIoctlModeDirtyFb");
                     if !self.device().check_feature(DrmFeatures::MODESET) {
                         return_errno!(Errno::EOPNOTSUPP);
                     }
                     let dirty_cmd: DrmModeFbDirtyCmd = cmd.read()?;
-                    let dev = self.device();
-                    let config = dev.mode_config().lock();
+                    // TODO
 
-                    if let Some(fb) = config.get_object_with::<dyn DrmFramebuffer>(dirty_cmd.fb_id)
-                    {
-                        // TODO
-                        fb.dirty(self.device(), &dirty_cmd)?;
-                    }
+                    self.device().dirty_framebuffer(dirty_cmd.fb_id)?;
 
                     Ok(0)
                 }
@@ -880,6 +926,8 @@ impl FileIo for DrmFile {
                         // TODO:
                         plane_resp.gamma_size = 0;
                         plane_resp.possible_crtcs = plane.possible_crtcs();
+                        plane_resp.crtc_id = plane.crtc_id().unwrap_or(0);
+                        plane_resp.fb_id = plane.fb_id().unwrap_or(0);
 
                         cmd.write(&plane_resp)?;
                     } else {
@@ -968,7 +1016,6 @@ impl FileIo for DrmFile {
                     Ok(0)
                 }
                 cmd @ DrmIoctlModeAtomic => {
-                    log::error!("[kernel] DrmIoctlModeAtomic");
                     if !self.device().check_feature(DrmFeatures::ATOMIC)
                         || !self.device().check_feature(DrmFeatures::MODESET)
                         || !self.atomic.load(Ordering::Relaxed)
@@ -1013,25 +1060,21 @@ impl FileIo for DrmFile {
                         return_errno!(Errno::EINVAL);
                     }
 
-                    // Atomic commit
-                    if !flags.contains(DrmAtomicFlags::TEST_ONLY) {
-                        let nonblock = flags.contains(DrmAtomicFlags::NONBLOCK);
-                        self.device().atomic_commit(nonblock, &mut atomic_states)?;
+                    // Only check
+                    if flags.contains(DrmAtomicFlags::TEST_ONLY) {
+                        return Ok(0);
                     }
 
-                    if flags.contains(DrmAtomicFlags::PAGE_FLIP_EVENT) {
-                        for affected_crtc_id in atomic_states.affected_crtcs() {
-                            // TODO
-                            let sequence = 0;
-                            self.queue_drm_event(self.make_flip_complete_event(
-                                arg.user_data,
-                                *affected_crtc_id,
-                                sequence,
-                            ));
-                        }
-                    }
+                    let nonblock = flags.contains(DrmAtomicFlags::NONBLOCK);
+                    let page_flip_event = if flags.contains(DrmAtomicFlags::PAGE_FLIP_EVENT) {
+                        Some(PageFlipEvent::new(arg.user_data, self.vblank.clone()))
+                    } else {
+                        None
+                    };
 
-                    cmd.write(&arg)?;
+                    self.device()
+                        .atomic_commit(nonblock, &mut atomic_states, page_flip_event)?;
+
                     Ok(0)
                 }
                 cmd @ DrmIoctlModeCreatePropBlob => {

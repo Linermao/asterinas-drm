@@ -12,11 +12,6 @@ pub trait DrmFramebuffer: Debug + Sync + Send {
     fn width(&self) -> u32;
     fn height(&self) -> u32;
     fn gem_object(&self) -> Arc<dyn DrmGemObject>;
-    fn dirty(
-        &self, 
-        dev: Arc<dyn DrmDevice>, 
-        dirty_cmd: &DrmModeFbDirtyCmd
-    ) -> Result<(), DrmError>;
 }
 
 impl DrmObjectCast for dyn DrmFramebuffer {

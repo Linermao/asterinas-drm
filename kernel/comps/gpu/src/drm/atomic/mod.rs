@@ -5,8 +5,9 @@ use hashbrown::HashMap;
 
 use crate::drm::{
     DrmDevice, DrmError,
+    atomic::vblank::{DrmPendingVblankEvent, PageFlipEvent, VblankCallback},
     drm_modes::DrmDisplayMode,
-    ioctl::DrmModeCrtc,
+    ioctl::{DrmModeCrtc, DrmModeCrtcPageFlip},
     mode_config::ObjectId,
     mode_object::{
         DrmObject, DrmObjectType,
@@ -77,10 +78,6 @@ impl DrmAtomicPendingState {
         }
     }
 
-    pub fn affected_crtcs(&self) -> &Vec<ObjectId> {
-        &self.affected_crtcs
-    }
-
     pub fn init(
         &mut self,
         dev: Arc<dyn DrmDevice>,
@@ -114,6 +111,7 @@ impl DrmAtomicPendingState {
                 let property = config
                     .get_object_with::<DrmProperty>(prop_id)
                     .ok_or(DrmError::NotFound)?;
+
                 match object {
                     DrmObject::Plane(plane) => match property.type_() {
                         DrmPropertyType::CrtcId => {
@@ -130,14 +128,7 @@ impl DrmAtomicPendingState {
                         }
                         DrmPropertyType::FbId => {
                             let new_fb_id = prop_value as u32;
-                            let old_fb_id = plane.fb_id();
-                            if old_fb_id != Some(new_fb_id)
-                                && config
-                                    .get_object_with::<dyn DrmFramebuffer>(new_fb_id)
-                                    .is_some()
-                            {
-                                plane_states.entry(*object_id).or_default().fb_id = Some(new_fb_id);
-                            }
+                            plane_states.entry(*object_id).or_default().fb_id = Some(new_fb_id);
                         }
                         _ => {}
                     },
@@ -265,11 +256,79 @@ pub trait DrmAtomicHelper: DrmDevice + Debug + Sync + Send {
             }
         }
 
-        self.atomic_helper_commit(false, &mut pending_state)
+        self.atomic_helper_commit(false, &mut pending_state, None)
     }
 
-    fn atomic_helper_pageflip(&self) -> Result<(), DrmError> {
-        self.atomic_commit(true, todo!())?;
+    fn atomic_helper_pageflip(
+        &self,
+        page_flip: &DrmModeCrtcPageFlip,
+        vblank_callback: Arc<dyn VblankCallback>,
+        _target: Option<u32>,
+    ) -> Result<(), DrmError> {
+        let mut pending_state = DrmAtomicPendingState::new();
+
+        {
+            let config = self.mode_config().lock();
+            let crtc_state = PendingCrtcState {
+                active: Some(true),
+                display_mode: None,
+            };
+            let plane_state = PendingPlaneState {
+                crtc_id: Some(page_flip.crtc_id),
+                fb_id: Some(page_flip.fb_id),
+                src_x: None,
+                src_y: None,
+                src_w: None,
+                src_h: None,
+                crtc_x: None,
+                crtc_y: None,
+                crtc_w: None,
+                crtc_h: None,
+            };
+
+            let crtc = config
+                .get_object_with::<dyn DrmCrtc>(page_flip.crtc_id)
+                .ok_or(DrmError::NotFound)?;
+
+            let plane_id = crtc.primary_plane_id();
+
+            pending_state
+                .crtc_states
+                .insert(page_flip.crtc_id, crtc_state);
+            pending_state.plane_states.insert(plane_id, plane_state);
+        }
+
+        let page_flip_event = PageFlipEvent::new(page_flip.user_data, vblank_callback);
+        self.atomic_helper_commit(true, &mut pending_state, Some(page_flip_event))?;
+
+        Ok(())
+    }
+
+    fn atomic_helper_dirty_framebuffer(&self, fb_id: ObjectId) -> Result<(), DrmError> {
+        let mut affected_crtcs = Vec::new();
+        {
+            let config = self.mode_config().lock();
+            for plane_id in config.collect_object_ids(DrmObjectType::Plane, None) {
+                let plane = config
+                    .get_object_with::<dyn DrmPlane>(plane_id)
+                    .ok_or(DrmError::NotFound)?;
+
+                if plane.fb_id() == Some(fb_id) {
+                    if let Some(crtc_id) = plane.crtc_id() {
+                        affected_crtcs.push(crtc_id);
+                    }
+                }
+            }
+        };
+
+        if affected_crtcs.is_empty() {
+            return Err(DrmError::NotFound);
+        }
+
+        for crtc_id in affected_crtcs {
+            self.atomic_flush(crtc_id)?;
+        }
+
         Ok(())
     }
 
@@ -277,12 +336,12 @@ pub trait DrmAtomicHelper: DrmDevice + Debug + Sync + Send {
         &self,
         nonblock: bool,
         pending_state: &mut DrmAtomicPendingState,
+        page_flip_event: Option<PageFlipEvent>,
     ) -> Result<(), DrmError> {
         if nonblock {}
 
         {
             let config = self.mode_config().lock();
-
             for (id, state) in pending_state.plane_states.iter() {
                 let plane = config
                     .get_object_with::<dyn DrmPlane>(*id)
@@ -298,11 +357,14 @@ pub trait DrmAtomicHelper: DrmDevice + Debug + Sync + Send {
                 }
 
                 let new_crtc = plane.crtc_id();
+
                 if state.crtc_id.is_some() || state.fb_id.is_some() {
                     if let Some(id) = old_crtc {
                         pending_state.affected_crtcs.push(id);
                     }
-                    if let Some(id) = new_crtc {
+                    if let Some(id) = new_crtc
+                        && new_crtc != old_crtc
+                    {
                         pending_state.affected_crtcs.push(id);
                     }
                 }
@@ -320,7 +382,7 @@ pub trait DrmAtomicHelper: DrmDevice + Debug + Sync + Send {
                     primary.set_fb_id(None);
 
                     crtc.set_active(false);
-                } else {
+                } else if state.active == Some(true) {
                     crtc.set_active(true);
                 }
             }
@@ -340,6 +402,22 @@ pub trait DrmAtomicHelper: DrmDevice + Debug + Sync + Send {
             }
         }
 
+        if let Some(page_flip_event) = page_flip_event {
+            for affected_crtc_id in &pending_state.affected_crtcs {
+                let config = self.mode_config().lock();
+                let crtc = config
+                    .get_object_with::<dyn DrmCrtc>(*affected_crtc_id)
+                    .ok_or(DrmError::NotFound)?;
+
+                let vblank_state = crtc.vblank_state().lock();
+                vblank_state.queue_event(DrmPendingVblankEvent::new(
+                    page_flip_event.user_data(),
+                    *affected_crtc_id,
+                    page_flip_event.vblank_callback(),
+                ));
+            }
+        }
+
         self.atomic_helper_commit_tail(pending_state)
     }
 
@@ -347,10 +425,12 @@ pub trait DrmAtomicHelper: DrmDevice + Debug + Sync + Send {
         &self,
         pending_state: &mut DrmAtomicPendingState,
     ) -> Result<(), DrmError> {
-        self.atomic_flush(pending_state)?;
+        for affected_crtc_id in &pending_state.affected_crtcs {
+            self.atomic_flush(*affected_crtc_id)?;
+        }
 
         Ok(())
     }
 
-    fn atomic_flush(&self, pending_state: &mut DrmAtomicPendingState) -> Result<(), DrmError>;
+    fn atomic_flush(&self, crtc_id: ObjectId) -> Result<(), DrmError>;
 }

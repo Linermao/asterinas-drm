@@ -9,6 +9,7 @@ UTIL_SRCS     := ./util/common.c ./util/format.c ./util/kms.c ./util/pattern.c .
 all:
 	@echo "==> Building simpletest..."
 	gcc -static ./simpletest/fb_test.c $(UTIL_SRCS) -o build/fb_test $(FLAGS)
+	gcc -static ./simpletest/dirtyfb.c $(UTIL_SRCS) -o build/dirtyfb $(FLAGS)
 	gcc -static ./simpletest/get_resource.c $(UTIL_SRCS) -o build/get_resource $(FLAGS)
 	gcc -static ./simpletest/double_framebuffer.c $(UTIL_SRCS) -o build/double_framebuffer $(FLAGS)
 	gcc -static ./simpletest/resources_test.c $(UTIL_SRCS) -o build/resources_test $(FLAGS)

@@ -1,13 +1,15 @@
 use alloc::sync::Arc;
 use core::{any::Any, fmt::Debug};
 
+use aster_time::read_monotonic_time;
 use ostd::sync::Mutex;
 
 use crate::drm::{
-    DrmDevice, DrmError, drm_modes::DrmDisplayMode, mode_config::ObjectId, mode_object::{
-        DrmObject, DrmObjectCast, framebuffer::DrmFramebuffer, plane::DrmPlane,
-        property::PropertyObject,
-    }
+    DrmError,
+    atomic::vblank::DrmVblankState,
+    drm_modes::DrmDisplayMode,
+    mode_config::ObjectId,
+    mode_object::{DrmObject, DrmObjectCast, plane::DrmPlane, property::PropertyObject},
 };
 
 pub mod property;
@@ -35,6 +37,7 @@ impl CrtcState {
 
 pub trait DrmCrtc: Debug + Send + Sync + Any {
     fn state(&self) -> &Mutex<CrtcState>;
+    fn vblank_state(&self) -> &Mutex<DrmVblankState>;
     fn primary_plane(&self) -> &Arc<dyn DrmPlane>;
     fn primary_plane_id(&self) -> ObjectId; // TODO
     fn cursor_plane(&self) -> &Option<Arc<dyn DrmPlane>>;
@@ -71,6 +74,34 @@ impl dyn DrmCrtc {
 
     pub fn set_active(&self, active: bool) {
         self.state().lock().active = active;
+    }
+
+    pub fn handle_vblank(&self) -> Result<(), DrmError> {
+        let vblank_state = self.vblank_state();
+        let vblank = vblank_state.lock();
+
+        // 1. Increment vblank counter
+        let sequence = vblank.increment();
+
+        // 2. Update timestamp
+        let timestamp = read_monotonic_time(); // TODO: Get actual monotonic time
+        vblank.update_time(timestamp);
+
+        // 3. Take all pending events
+        let pending_events = vblank.take_pending_events();
+
+        drop(vblank);
+
+        // 4. Send each event
+        for event in pending_events {
+            event.send(
+                sequence,
+                timestamp.as_secs() as u32,
+                timestamp.subsec_micros(),
+            );
+        }
+
+        Ok(())
     }
 }
 
