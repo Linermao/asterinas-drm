@@ -1,9 +1,3 @@
-use alloc::format;
-
-use int_to_c_enum::TryFromInt;
-
-use crate::drm::DrmError;
-
 const DRM_DISPLAY_MODE_LEN: usize = 32;
 
 bitflags::bitflags! {

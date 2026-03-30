@@ -145,3 +145,5 @@ drm_ioc!(DrmIoctlModeCreatePropBlob,    DRM_IOCTL_MODE_CREATEPROPBLOB,      b'd'
     DrmIoctlFlags::ANY);
 drm_ioc!(DrmIoctlModeDestroyPropBlob,   DRM_IOCTL_MODE_DESTROYPROPBLOB,     b'd', 0xbe, InOutData<DrmModeDestroyBlob>,
     DrmIoctlFlags::ANY);
+drm_ioc!(DrmIoctlSyncobjCreate,         DRM_IOCTL_SYNCOBJ_CREATE,           b'd', 0xbf, InOutData<DrmSyncobjCreate>,
+    DrmIoctlFlags::ANY);

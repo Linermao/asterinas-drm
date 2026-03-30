@@ -220,7 +220,7 @@ pub struct VirtioGpuResourceFlush {
     pub hdr: VirtioGpuCtrlHdr,
     pub rect: VirtioGpuRect,
     pub resource_id: u32,
-    pub _padding: u32,
+    _padding: u32,
 }
 
 #[derive(Debug, Clone, Copy, Default, Pod)]
@@ -230,7 +230,7 @@ pub struct VirtioGpuTransferToHost2d {
     pub rect: VirtioGpuRect,
     pub offset: u64,
     pub resource_id: u32,
-    pub _padding: u32,
+    _padding: u32,
 }
 
 #[derive(Debug, Clone, Copy, Default, Pod)]

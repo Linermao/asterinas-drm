@@ -1,6 +1,6 @@
 use alloc::vec;
 
-use crate::drm::mode_object::{
+use crate::drm::objects::{
     plane::DrmPlaneType,
     property::{DrmProperty, DrmPropertyFlags, PropertyEnum, PropertySpec},
 };

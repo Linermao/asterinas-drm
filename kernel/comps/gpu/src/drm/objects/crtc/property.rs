@@ -1,4 +1,4 @@
-use crate::drm::mode_object::property::{DrmProperty, DrmPropertyFlags, PropertySpec};
+use crate::drm::objects::property::{DrmProperty, DrmPropertyFlags, PropertySpec};
 
 #[derive(Debug)]
 pub enum CrtcProps {

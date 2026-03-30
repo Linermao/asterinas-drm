@@ -3,7 +3,12 @@ use core::{any::Any, fmt::Debug};
 
 use ostd::mm::{VmReader, VmWriter};
 
-use crate::drm::{DrmError, MemfdAllocatorType, ioctl::DrmModeCreateDumb};
+use crate::drm::{
+    DrmError,
+    ioctl::{DrmModeCreateDumb, DrmModeFbCmd2}, objects::ObjectId,
+};
+
+pub type MemfdAllocatorType = fn(&str, u64) -> Result<Box<dyn DrmGemBackend>, DrmError>;
 
 #[derive(Debug)]
 pub struct DrmSgEntry {
@@ -49,4 +54,19 @@ impl dyn DrmGemBackend {
     pub fn downcast_ref<T: DrmGemBackend>(&self) -> Option<&T> {
         (self as &dyn Any).downcast_ref::<T>()
     }
+}
+
+pub trait DrmGemOps: Debug + Send + Sync {
+    fn create_dumb(
+        &self,
+        _args: &DrmModeCreateDumb,
+        _memfd_allocator_fn: MemfdAllocatorType,
+    ) -> Result<Arc<dyn DrmGemObject>, DrmError> {
+        Err(DrmError::NotSupported)
+    }
+    fn fb_create(
+        &self,
+        fb_cmd: &DrmModeFbCmd2,
+        gem_object: Arc<dyn DrmGemObject>,
+    ) -> Result<ObjectId, DrmError>;
 }

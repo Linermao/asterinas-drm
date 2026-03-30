@@ -1,10 +1,10 @@
 use alloc::{format, sync::Arc};
 
-use aster_gpu::drm::DrmDevice;
+use aster_gpu::drm::{DrmDevice, DrmFeatures};
 use device_id::{DeviceId, MajorId, MinorId};
 
 use crate::{
-    device::drm::file::DrmFile,
+    device::drm::{DrmDeviceCore, file::DrmFile},
     fs::{
         device::{Device, DeviceType},
         inode_handle::FileIo,
@@ -30,23 +30,35 @@ pub(super) struct DrmMinor {
     index: u32,
     type_: DrmMinorType,
 
-    device: Arc<dyn DrmDevice>,
+    device_core: Arc<DrmDeviceCore>,
 
     weak_self: Weak<Self>,
 }
 
 impl DrmMinor {
-    pub fn new(index: u32, device: Arc<dyn DrmDevice>, type_: DrmMinorType) -> Arc<Self> {
+    pub fn new(index: u32, device_core: Arc<DrmDeviceCore>, type_: DrmMinorType) -> Arc<Self> {
         Arc::new_cyclic(move |weak_ref| Self {
             index,
             type_,
-            device,
+            device_core,
             weak_self: weak_ref.clone(),
         })
     }
 
-    pub fn device(&self) -> Arc<dyn DrmDevice> {
-        self.device.clone()
+    pub fn get_drm_device(&self) -> &Arc<dyn DrmDevice> {
+        &self.device_core.device
+    }
+
+    pub fn contain_features(&self, features: DrmFeatures) -> bool {
+        self.device_core.device.contain_features(features)
+    }
+
+    pub fn map_gem_handle(&self, handle: u32) -> Result<u64> {
+        self.device_core.vma_manager.lock().alloc(handle)
+    }
+
+    pub fn lookup_gem_handle(&self, offset: usize) -> Option<u32> {
+        self.device_core.vma_manager.lock().lookup(offset as u64)
     }
 }
 

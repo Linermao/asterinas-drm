@@ -3,7 +3,7 @@ use core::fmt::Debug;
 
 use ostd::sync::Mutex;
 
-use crate::drm::{mode_config::ObjectId, mode_object::{DrmObject, DrmObjectCast}};
+use crate::drm::objects::{DrmObject, DrmObjectCast, ObjectId};
 
 #[repr(u32)]
 #[derive(Debug, Clone, Copy)]
@@ -53,7 +53,7 @@ impl EncoderState {
         Self {
             possible_crtcs: 0,
             possible_clones: 0,
-            crtc_id: None
+            crtc_id: None,
         }
     }
 

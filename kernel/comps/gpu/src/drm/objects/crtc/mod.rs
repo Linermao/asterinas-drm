@@ -6,10 +6,9 @@ use ostd::sync::Mutex;
 
 use crate::drm::{
     DrmError,
-    atomic::vblank::DrmVblankState,
+    kms::vblank::DrmVblankState,
     drm_modes::DrmDisplayMode,
-    mode_config::ObjectId,
-    mode_object::{DrmObject, DrmObjectCast, plane::DrmPlane, property::PropertyObject},
+    objects::{DrmObject, ObjectId, DrmObjectCast, plane::DrmPlane, property::PropertyObject},
 };
 
 pub mod property;

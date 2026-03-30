@@ -3,17 +3,12 @@ use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use aster_gpu::drm::{
     DrmDevice, DrmDeviceCaps, DrmFeatures,
-    atomic::{
-        DrmAtomicFlags, DrmAtomicPendingState,
-        vblank::{
-            DRM_EVENT_VBLANK_LEN, DrmPendingVblankEvent, DrmVblankEvent, PageFlipEvent,
-            VblankCallback,
-        },
-    },
+    atomic::{DrmAtomicFlags, DrmAtomicPendingState},
     drm_modes::DrmModeModeInfo,
     gem::DrmGemObject,
     ioctl::*,
-    mode_object::{
+    kms::vblank::{PageFlipEvent, VblankCallback},
+    objects::{
         DrmObjectType,
         connector::DrmConnector,
         crtc::DrmCrtc,
@@ -30,7 +25,7 @@ use crate::{
     current_userspace,
     device::drm::{
         ioctl_defs::*,
-        memfd::{DrmMemFdFile, memfd_allocator},
+        memfd::{DrmMemFdFile, memfd_allocator_fn},
         minor::DrmMinor,
     },
     dispatch_drm_ioctl,
@@ -107,23 +102,35 @@ impl DrmFile {
         }
     }
 
-    pub fn device(&self) -> Arc<dyn DrmDevice> {
-        self.minor.device()
+    fn get_drm_device(&self) -> &Arc<dyn DrmDevice> {
+        self.minor.get_drm_device()
     }
 
-    pub fn next_gem_handle(&self) -> u32 {
+    fn contain_features(&self, features: DrmFeatures) -> bool {
+        self.minor.contain_features(features)
+    }
+
+    fn map_gem_handle(&self, handle: u32) -> Result<u64> {
+        self.minor.map_gem_handle(handle)
+    }
+
+    fn lookup_gem_handle(&self, offset: usize) -> Option<u32> {
+        self.minor.lookup_gem_handle(offset)
+    }
+
+    fn next_gem_handle(&self) -> u32 {
         self.next_gem_handle.fetch_add(1, Ordering::SeqCst)
     }
 
-    pub fn add_gem(&self, id: u32, gem: Arc<dyn DrmGemObject>) {
+    fn add_gem(&self, id: u32, gem: Arc<dyn DrmGemObject>) {
         self.gem_table.lock().insert(id, gem);
     }
 
-    pub fn lookup_gem(&self, id: u32) -> Option<Arc<dyn DrmGemObject>> {
+    fn lookup_gem(&self, id: u32) -> Option<Arc<dyn DrmGemObject>> {
         self.gem_table.lock().get(&id).cloned()
     }
 
-    pub fn remove_gem(&self, id: u32) -> Option<Arc<dyn DrmGemObject>> {
+    fn remove_gem(&self, id: u32) -> Option<Arc<dyn DrmGemObject>> {
         self.gem_table.lock().remove(&id)
     }
 }
@@ -202,7 +209,7 @@ impl FileIo for DrmFile {
     }
 
     fn mappable_with_offset(&self, offset: usize) -> Result<Mappable> {
-        if let Some(handle) = self.device().lookup_gem_handle(offset) {
+        if let Some(handle) = self.lookup_gem_handle(offset) {
             if let Some(gem_obj) = self.lookup_gem(handle) {
                 if let Some(memfd) = gem_obj.backend().downcast_ref::<DrmMemFdFile>() {
                     return memfd.mappable();
@@ -222,7 +229,7 @@ impl FileIo for DrmFile {
                 cmd @ DrmIoctlVersion => {
                     let mut version: DrmVersion = cmd.read()?;
 
-                    let dev = self.device();
+                    let dev = self.get_drm_device();
 
                     let name = dev.name();
                     let name_len = name.len() + 1;
@@ -271,44 +278,45 @@ impl FileIo for DrmFile {
 
                     let mut req: DrmGetCap = cmd.read()?;
                     let cap = DrmGetCapabilities::try_from(req.capability)?;
-                    let dev = self.device();
+                    let dev = self.get_drm_device();
 
                     let value = match cap {
                         TimestampMonotonic => 1,
                         Prime => (DrmPrimeValue::IMPORT | DrmPrimeValue::EXPORT).bits(),
-                        SyncObj => dev.check_feature(DrmFeatures::SYNCOBJ) as u64,
-                        SyncObjTimeline => dev.check_feature(DrmFeatures::SYNCOBJ_TIMELINE) as u64,
+                        SyncObj => dev.contain_features(DrmFeatures::SYNCOBJ) as u64,
+                        SyncObjTimeline => {
+                            dev.contain_features(DrmFeatures::SYNCOBJ_TIMELINE) as u64
+                        }
                         _ => {
-                            if !dev.check_feature(DrmFeatures::MODESET) {
+                            if !dev.contain_features(DrmFeatures::MODESET) {
                                 return_errno!(Errno::EOPNOTSUPP);
                             }
 
-                            let mode_config = dev.mode_config().lock();
                             match cap {
                                 DumbBuffer => {
                                     dev.check_capbility(DrmDeviceCaps::DUMB_CREATE) as u64
                                 }
                                 VblankHighCrtc => 1,
-                                DumbPreferredDepth => mode_config.preferred_depth() as u64,
-                                DumbPreferShadow => mode_config.prefer_shadow() as u64,
-                                AsyncPageFlip => mode_config.allow_async_page_flip() as u64,
+                                DumbPreferredDepth => dev.preferred_depth() as u64,
+                                DumbPreferShadow => dev.prefer_shadow() as u64,
+                                AsyncPageFlip => dev.support_async_page_flip() as u64,
                                 PageFlipTarget => {
                                     // TODO: check if each crtc has func: page_flip_target
                                     0
                                 }
-                                CursorWidth => match mode_config.cursor_width() {
+                                CursorWidth => match dev.cursor_width() {
                                     0 => 64,
                                     w => w as u64,
                                 },
-                                CursorHeight => match mode_config.cursor_height() {
+                                CursorHeight => match dev.cursor_height() {
                                     0 => 64,
                                     h => h as u64,
                                 },
-                                Addfb2Modifiers => !mode_config.fb_modifiers_not_supported() as u64,
+                                Addfb2Modifiers => !dev.support_fb_modifiers() as u64,
                                 CrtcInVblankEvent => 1,
                                 AtomicAsyncPageFlip => {
-                                    (dev.check_feature(DrmFeatures::ATOMIC)
-                                        && mode_config.allow_async_page_flip())
+                                    (self.contain_features(DrmFeatures::ATOMIC)
+                                        && dev.support_async_page_flip())
                                         as u64
                                 }
                                 _ => 0,
@@ -322,7 +330,7 @@ impl FileIo for DrmFile {
                     Ok(0)
                 }
                 cmd @ DrmIoctlSetClientCap => {
-                    if !self.device().check_feature(DrmFeatures::MODESET) {
+                    if !self.get_drm_device().contain_features(DrmFeatures::MODESET) {
                         return_errno!(Errno::EOPNOTSUPP);
                     }
 
@@ -345,7 +353,7 @@ impl FileIo for DrmFile {
                             };
                         }
                         DrmSetCapabilities::Atomic => {
-                            if !self.device().check_feature(DrmFeatures::ATOMIC) {
+                            if !self.get_drm_device().contain_features(DrmFeatures::ATOMIC) {
                                 return_errno!(Errno::EOPNOTSUPP);
                             }
                             // TODO: The modesetting DDX has a totally broken idea of atomic.
@@ -388,7 +396,10 @@ impl FileIo for DrmFile {
                             };
                         }
                         DrmSetCapabilities::CursorPlaneHostport => {
-                            if !self.device().check_feature(DrmFeatures::CURSOR_HOTSPOT) {
+                            if !self
+                                .get_drm_device()
+                                .contain_features(DrmFeatures::CURSOR_HOTSPOT)
+                            {
                                 return_errno!(Errno::EOPNOTSUPP);
                             }
 
@@ -417,19 +428,19 @@ impl FileIo for DrmFile {
                     Ok(0)
                 }
                 cmd @ DrmIoctlModeGetResources => {
-                    if !self.device().check_feature(DrmFeatures::MODESET) {
+                    if !self.get_drm_device().contain_features(DrmFeatures::MODESET) {
                         return_errno!(Errno::EOPNOTSUPP);
                     }
 
                     let mut card_res: DrmModeGetResources = cmd.read()?;
 
-                    let dev = self.device();
-                    let config = dev.mode_config().lock();
+                    let dev = self.get_drm_device();
+                    let objects = dev.objects().lock();
 
-                    let count_crtcs = config.count_objects(DrmObjectType::Crtc) as u32;
-                    let count_encoders = config.count_objects(DrmObjectType::Encoder) as u32;
-                    let count_connectors = config.count_objects(DrmObjectType::Connector) as u32;
-                    let count_fbs = config.count_objects(DrmObjectType::Framebuffer) as u32;
+                    let count_crtcs = objects.count_objects(DrmObjectType::Crtc) as u32;
+                    let count_encoders = objects.count_objects(DrmObjectType::Encoder) as u32;
+                    let count_connectors = objects.count_objects(DrmObjectType::Connector) as u32;
+                    let count_fbs = objects.count_objects(DrmObjectType::Framebuffer) as u32;
 
                     if card_res.is_first_call() {
                         card_res.count_crtcs = count_crtcs;
@@ -449,28 +460,28 @@ impl FileIo for DrmFile {
 
                         write_to_user::<u32>(
                             card_res.crtc_id_ptr as usize,
-                            config.collect_object_ids(DrmObjectType::Crtc, None),
+                            objects.collect_object_ids(DrmObjectType::Crtc, None),
                         )?;
 
                         write_to_user::<u32>(
                             card_res.encoder_id_ptr as usize,
-                            config.collect_object_ids(DrmObjectType::Encoder, None),
+                            objects.collect_object_ids(DrmObjectType::Encoder, None),
                         )?;
 
                         write_to_user::<u32>(
                             card_res.connector_id_ptr as usize,
-                            config.collect_object_ids(DrmObjectType::Connector, None),
+                            objects.collect_object_ids(DrmObjectType::Connector, None),
                         )?;
 
                         write_to_user::<u32>(
                             card_res.fb_id_ptr as usize,
-                            config.collect_object_ids(DrmObjectType::Framebuffer, None),
+                            objects.collect_object_ids(DrmObjectType::Framebuffer, None),
                         )?;
 
-                        card_res.max_width = config.max_width();
-                        card_res.max_height = config.max_height();
-                        card_res.min_width = config.min_width();
-                        card_res.min_height = config.min_height();
+                        card_res.max_width = dev.max_width();
+                        card_res.max_height = dev.max_height();
+                        card_res.min_width = dev.min_width();
+                        card_res.min_height = dev.min_height();
 
                         cmd.write(&card_res)?;
                     }
@@ -478,15 +489,15 @@ impl FileIo for DrmFile {
                     Ok(0)
                 }
                 cmd @ DrmIoctlModeGetCrtc => {
-                    if !self.device().check_feature(DrmFeatures::MODESET) {
+                    if !self.get_drm_device().contain_features(DrmFeatures::MODESET) {
                         return_errno!(Errno::EOPNOTSUPP);
                     }
 
                     let mut crtc_resp: DrmModeCrtc = cmd.read()?;
-                    let dev = self.device();
-                    let config = dev.mode_config().lock();
+                    let dev = self.get_drm_device();
+                    let objects = dev.objects().lock();
 
-                    if let Some(crtc) = config.get_object_with::<dyn DrmCrtc>(crtc_resp.crtc_id) {
+                    if let Some(crtc) = objects.get_object_by_id::<dyn DrmCrtc>(crtc_resp.crtc_id) {
                         let primary = crtc.primary_plane();
 
                         crtc_resp.gamma_size = crtc.gamma_size();
@@ -515,8 +526,7 @@ impl FileIo for DrmFile {
                     Ok(0)
                 }
                 cmd @ DrmIoctlModeSetCrtc => {
-                    log::error!("[kernel] DrmIoctlModeSetCrtc");
-                    if !self.device().check_feature(DrmFeatures::MODESET) {
+                    if !self.get_drm_device().contain_features(DrmFeatures::MODESET) {
                         return_errno!(Errno::EOPNOTSUPP);
                     }
 
@@ -526,7 +536,7 @@ impl FileIo for DrmFile {
                         crtc_resp.count_connectors as usize,
                     )?;
 
-                    self.device().set_config(&crtc_resp, connector_ids)?;
+                    self.get_drm_device().set_crtc(&crtc_resp, connector_ids)?;
 
                     cmd.write(&crtc_resp)?;
 
@@ -537,19 +547,18 @@ impl FileIo for DrmFile {
 
                     // TODO
                     return_errno!(Errno::ENXIO);
-                    Ok(0)
                 }
                 cmd @ DrmIoctlModeGetEncoder => {
-                    if !self.device().check_feature(DrmFeatures::MODESET) {
+                    if !self.get_drm_device().contain_features(DrmFeatures::MODESET) {
                         return_errno!(Errno::EOPNOTSUPP);
                     }
 
                     let mut encoder_resp: DrmModeGetEncoder = cmd.read()?;
-                    let dev = self.device();
-                    let config = dev.mode_config().lock();
+                    let dev = self.get_drm_device();
+                    let objects = dev.objects().lock();
 
                     if let Some(encoder) =
-                        config.get_object_with::<dyn DrmEncoder>(encoder_resp.encoder_id)
+                        objects.get_object_by_id::<dyn DrmEncoder>(encoder_resp.encoder_id)
                     {
                         // TODO:
                         encoder_resp.crtc_id = encoder.crtc_id().unwrap_or(0);
@@ -565,90 +574,90 @@ impl FileIo for DrmFile {
                     Ok(0)
                 }
                 cmd @ DrmIoctlModeGetConnector => {
-                    if !self.device().check_feature(DrmFeatures::MODESET) {
+                    if !self.get_drm_device().contain_features(DrmFeatures::MODESET) {
                         return_errno!(Errno::EOPNOTSUPP);
                     }
 
                     let mut out_resp: DrmModeGetConnector = cmd.read()?;
-                    let dev = self.device();
-                    let config = dev.mode_config().lock();
+                    let dev = self.get_drm_device();
+                    let connector = {
+                        let objects = dev.objects().lock();
+                        objects
+                            .get_object_by_id::<dyn DrmConnector>(out_resp.connector_id)
+                            .ok_or(Errno::ENOENT)?
+                    };
 
-                    if let Some(connector) =
-                        config.get_object_with::<dyn DrmConnector>(out_resp.connector_id)
-                    {
-                        if out_resp.is_first_call() {
-                            // get modes
-                            // TODO: is current master
-                            if true {
-                                connector.fill_modes(self.device())?;
-                            }
+                    let encoder_ids = {
+                        let objects = dev.objects().lock();
+                        objects.collect_object_ids(
+                            DrmObjectType::Encoder,
+                            Some(connector.possible_encoders()),
+                        )
+                    };
 
-                            out_resp.count_encoders = connector.count_encoders();
-                            out_resp.count_modes = connector.count_modes();
-                            out_resp.count_props = connector.count_props();
+                    if out_resp.is_first_call() {
+                        // get modes
+                        // TODO: is current master
 
-                            cmd.write(&out_resp)?;
-                        } else {
-                            if out_resp.count_encoders < connector.count_encoders()
-                                || out_resp.count_modes < connector.count_modes()
-                                || out_resp.count_props < connector.count_props()
-                            {
-                                return_errno!(Errno::EFAULT);
-                            }
+                        dev.update_connector_modes_and_status(out_resp.connector_id)?;
 
-                            write_to_user::<u32>(
-                                out_resp.encoders_ptr as usize,
-                                config.collect_object_ids(
-                                    DrmObjectType::Encoder,
-                                    Some(connector.possible_encoders()),
-                                ),
-                            )?;
+                        out_resp.count_encoders = connector.count_encoders();
+                        out_resp.count_modes = connector.count_modes();
+                        out_resp.count_props = connector.count_props();
 
-                            let mode_info = connector.modes().into_iter().map(Into::into);
-                            write_to_user::<DrmModeModeInfo>(
-                                out_resp.modes_ptr as usize,
-                                mode_info.collect(),
-                            )?;
-
-                            let properties = connector.get_properties();
-                            write_to_user::<u32>(
-                                out_resp.props_ptr as usize,
-                                properties.keys().copied().collect(),
-                            )?;
-                            write_to_user::<u64>(
-                                out_resp.prop_values_ptr as usize,
-                                properties.values().copied().collect(),
-                            )?;
-
-                            out_resp.encoder_id = connector.encoder_id().unwrap_or(0);
-
-                            out_resp.connector_type = connector.type_() as u32;
-                            out_resp.connector_type_id = connector.type_id_();
-                            out_resp.connection = connector.status() as u32;
-
-                            out_resp.mm_width = connector.mm_width();
-                            out_resp.mm_height = connector.mm_height();
-                            out_resp.subpixel = connector.subpixel();
-
-                            out_resp.pad = 0;
-                            cmd.write(&out_resp)?;
-                        }
+                        cmd.write(&out_resp)?;
                     } else {
-                        return_errno!(Errno::ENOENT);
+                        if out_resp.count_encoders < connector.count_encoders()
+                            || out_resp.count_modes < connector.count_modes()
+                            || out_resp.count_props < connector.count_props()
+                        {
+                            return_errno!(Errno::EFAULT);
+                        }
+
+                        write_to_user::<u32>(out_resp.encoders_ptr as usize, encoder_ids)?;
+
+                        let mode_info = connector.modes().into_iter().map(Into::into);
+                        write_to_user::<DrmModeModeInfo>(
+                            out_resp.modes_ptr as usize,
+                            mode_info.collect(),
+                        )?;
+
+                        let properties = connector.get_properties();
+                        write_to_user::<u32>(
+                            out_resp.props_ptr as usize,
+                            properties.keys().copied().collect(),
+                        )?;
+                        write_to_user::<u64>(
+                            out_resp.prop_values_ptr as usize,
+                            properties.values().copied().collect(),
+                        )?;
+
+                        out_resp.encoder_id = connector.encoder_id().unwrap_or(0);
+
+                        out_resp.connector_type = connector.type_() as u32;
+                        out_resp.connector_type_id = connector.type_id_();
+                        out_resp.connection = connector.status() as u32;
+
+                        out_resp.mm_width = connector.mm_width();
+                        out_resp.mm_height = connector.mm_height();
+                        out_resp.subpixel = connector.subpixel();
+
+                        out_resp.pad = 0;
+                        cmd.write(&out_resp)?;
                     }
 
                     Ok(0)
                 }
                 cmd @ DrmIoctlModeGetProperty => {
-                    if !self.device().check_feature(DrmFeatures::MODESET) {
+                    if !self.get_drm_device().contain_features(DrmFeatures::MODESET) {
                         return_errno!(Errno::EOPNOTSUPP);
                     }
 
                     let mut out_resp: DrmModeGetProperty = cmd.read()?;
-                    let dev = self.device();
-                    let config = dev.mode_config().lock();
+                    let dev = self.get_drm_device();
+                    let config = dev.objects().lock();
 
-                    if let Some(property) = config.get_object_with::<DrmProperty>(out_resp.prop_id)
+                    if let Some(property) = config.get_object_by_id::<DrmProperty>(out_resp.prop_id)
                     {
                         if out_resp.is_first_call() {
                             out_resp.count_values = property.count_values();
@@ -697,15 +706,15 @@ impl FileIo for DrmFile {
                     Ok(0)
                 }
                 cmd @ DrmIoctlModeGetPropBlob => {
-                    if !self.device().check_feature(DrmFeatures::MODESET) {
+                    if !self.get_drm_device().contain_features(DrmFeatures::MODESET) {
                         return_errno!(Errno::EOPNOTSUPP);
                     }
 
                     let mut out_resp: DrmModeGetBlob = cmd.read()?;
-                    let dev = self.device();
-                    let config = dev.mode_config().lock();
+                    let dev = self.get_drm_device();
+                    let config = dev.objects().lock();
 
-                    if let Some(blob) = config.get_object_with::<DrmModeBlob>(out_resp.blob_id) {
+                    if let Some(blob) = config.get_object_by_id::<DrmModeBlob>(out_resp.blob_id) {
                         if out_resp.is_first_call() {
                             out_resp.length = blob.length() as u32;
 
@@ -723,12 +732,12 @@ impl FileIo for DrmFile {
                 }
                 cmd @ DrmIoctlModeAddFB => {
                     log::error!("[kernel] DrmIoctlModeAddFB");
-                    if !self.device().check_feature(DrmFeatures::MODESET) {
+                    if !self.get_drm_device().contain_features(DrmFeatures::MODESET) {
                         return_errno!(Errno::EOPNOTSUPP);
                     }
 
                     let mut fb_cmd: DrmModeFbCmd = cmd.read()?;
-                    let dev = self.device();
+                    let dev = self.get_drm_device();
 
                     if let Some(gem_object) = self.lookup_gem(fb_cmd.handle) {
                         let fb_cmd2: DrmModeFbCmd2 = fb_cmd.into();
@@ -743,13 +752,13 @@ impl FileIo for DrmFile {
                     Ok(0)
                 }
                 cmd @ DrmIoctlModeRmFB => {
-                    if !self.device().check_feature(DrmFeatures::MODESET) {
+                    if !self.get_drm_device().contain_features(DrmFeatures::MODESET) {
                         return_errno!(Errno::EOPNOTSUPP);
                     }
 
                     let fb_id: u32 = cmd.read()?;
-                    let dev = self.device();
-                    let mut config = dev.mode_config().lock();
+                    let dev = self.get_drm_device();
+                    let mut config = dev.objects().lock();
 
                     if let Some(_) = config.remove_object_with::<dyn DrmFramebuffer>(fb_id) {
                     } else {
@@ -759,13 +768,13 @@ impl FileIo for DrmFile {
                     Ok(0)
                 }
                 cmd @ DrmIoctlModePageFlip => {
-                    if !self.device().check_feature(DrmFeatures::MODESET) {
+                    if !self.get_drm_device().contain_features(DrmFeatures::MODESET) {
                         return_errno!(Errno::EOPNOTSUPP);
                     }
 
                     let page_flip: DrmModeCrtcPageFlip = cmd.read()?;
                     let flags = PageFlipFlags::from_bits(page_flip.flags).ok_or(Errno::EINVAL)?;
-                    let dev = self.device();
+                    let dev = self.get_drm_device();
 
                     // Only one of the TARGET_ABSOLUTE/TARGET_RELATIVE flags
                     // can be specified
@@ -773,9 +782,7 @@ impl FileIo for DrmFile {
                         return_errno!(Errno::EINVAL);
                     }
 
-                    if flags.intersects(PageFlipFlags::ASYNC)
-                        && !(dev.mode_config().lock().allow_async_page_flip())
-                    {
+                    if flags.intersects(PageFlipFlags::ASYNC) && !(dev.support_async_page_flip()) {
                         return_errno!(Errno::EINVAL);
                     }
 
@@ -810,30 +817,32 @@ impl FileIo for DrmFile {
                     Ok(0)
                 }
                 cmd @ DrmIoctlModeDirtyFb => {
-                    if !self.device().check_feature(DrmFeatures::MODESET) {
+                    if !self.get_drm_device().contain_features(DrmFeatures::MODESET) {
                         return_errno!(Errno::EOPNOTSUPP);
                     }
                     let dirty_cmd: DrmModeFbDirtyCmd = cmd.read()?;
                     // TODO
 
-                    self.device().dirty_framebuffer(dirty_cmd.fb_id)?;
+                    self.get_drm_device().dirty_framebuffer(dirty_cmd.fb_id)?;
 
                     Ok(0)
                 }
                 cmd @ DrmIoctlModeCreateDumb => {
-                    log::error!("[kernel] DrmIoctlModeCreateDumb");
-                    if !self.device().check_feature(DrmFeatures::MODESET) {
+                    if !self.get_drm_device().contain_features(DrmFeatures::MODESET) {
                         return_errno!(Errno::EOPNOTSUPP);
                     }
 
-                    if !self.device().check_capbility(DrmDeviceCaps::DUMB_CREATE) {
+                    if !self
+                        .get_drm_device()
+                        .check_capbility(DrmDeviceCaps::DUMB_CREATE)
+                    {
                         return_errno!(Errno::ENOSYS);
                     }
 
                     let mut args: DrmModeCreateDumb = cmd.read()?;
-                    let dev = self.device();
+                    let dev = self.get_drm_device();
 
-                    let gem_object = dev.create_dumb(&mut args, memfd_allocator)?;
+                    let gem_object = dev.create_dumb(&mut args, memfd_allocator_fn)?;
                     let handle = self.next_gem_handle();
                     args.pitch = gem_object.pitch();
                     args.size = gem_object.size();
@@ -847,29 +856,33 @@ impl FileIo for DrmFile {
                 }
                 cmd @ DrmIoctlModeMapDumb => {
                     log::error!("[kernel] DrmIoctlModeMapDumb");
-                    if !self.device().check_feature(DrmFeatures::MODESET) {
+                    if !self.get_drm_device().contain_features(DrmFeatures::MODESET) {
                         return_errno!(Errno::EOPNOTSUPP);
                     }
 
-                    if !self.device().check_capbility(DrmDeviceCaps::DUMB_CREATE) {
+                    if !self
+                        .get_drm_device()
+                        .check_capbility(DrmDeviceCaps::DUMB_CREATE)
+                    {
                         return_errno!(Errno::ENOSYS);
                     }
 
                     let mut args: DrmModeMapDumb = cmd.read()?;
-                    let dev = self.device();
-
-                    args.offset = dev.map_dumb(args.handle)?;
+                    args.offset = self.map_gem_handle(args.handle)?;
 
                     cmd.write(&args)?;
                     Ok(0)
                 }
                 cmd @ DrmIoctlModeDestroyDumb => {
                     log::error!("[kernel] DrmIoctlModeDestroyDumb");
-                    if !self.device().check_feature(DrmFeatures::MODESET) {
+                    if !self.get_drm_device().contain_features(DrmFeatures::MODESET) {
                         return_errno!(Errno::EOPNOTSUPP);
                     }
 
-                    if !self.device().check_capbility(DrmDeviceCaps::DUMB_CREATE) {
+                    if !self
+                        .get_drm_device()
+                        .check_capbility(DrmDeviceCaps::DUMB_CREATE)
+                    {
                         return_errno!(Errno::ENOSYS);
                     }
 
@@ -884,13 +897,13 @@ impl FileIo for DrmFile {
                     Ok(0)
                 }
                 cmd @ DrmIoctlModeGetPlaneResources => {
-                    if !self.device().check_feature(DrmFeatures::MODESET) {
+                    if !self.get_drm_device().contain_features(DrmFeatures::MODESET) {
                         return_errno!(Errno::EOPNOTSUPP);
                     }
 
                     let mut plane_resp: DrmModeGetPlaneRes = cmd.read()?;
-                    let dev = self.device();
-                    let config = dev.mode_config().lock();
+                    let dev = self.get_drm_device();
+                    let config = dev.objects().lock();
 
                     let count_planes = config.count_objects(DrmObjectType::Plane) as u32;
 
@@ -913,15 +926,16 @@ impl FileIo for DrmFile {
                     Ok(0)
                 }
                 cmd @ DrmIoctlModeGetPlane => {
-                    if !self.device().check_feature(DrmFeatures::MODESET) {
+                    if !self.get_drm_device().contain_features(DrmFeatures::MODESET) {
                         return_errno!(Errno::EOPNOTSUPP);
                     }
 
                     let mut plane_resp: DrmModeGetPlane = cmd.read()?;
-                    let dev = self.device();
-                    let config = dev.mode_config().lock();
+                    let dev = self.get_drm_device();
+                    let config = dev.objects().lock();
 
-                    if let Some(plane) = config.get_object_with::<dyn DrmPlane>(plane_resp.plane_id)
+                    if let Some(plane) =
+                        config.get_object_by_id::<dyn DrmPlane>(plane_resp.plane_id)
                     {
                         // TODO:
                         plane_resp.gamma_size = 0;
@@ -938,28 +952,25 @@ impl FileIo for DrmFile {
                 }
                 cmd @ DrmIoctlModeAddFB2 => {
                     log::error!("[kernel] DrmIoctlModeAddFB2");
-                    if !self.device().check_feature(DrmFeatures::MODESET) {
+                    if !self.get_drm_device().contain_features(DrmFeatures::MODESET) {
                         return_errno!(Errno::EOPNOTSUPP);
                     }
                     let mut fb_cmd: DrmModeFbCmd2 = cmd.read()?;
 
-                    let dev = self.device();
+                    let dev = self.get_drm_device();
 
                     {
                         let flags = DrmModeFb::from_bits(fb_cmd.flags).ok_or(Errno::EINVAL)?;
-                        let config = dev.mode_config().lock();
 
-                        if fb_cmd.width < config.min_width()
-                            || fb_cmd.width > config.max_width()
-                            || fb_cmd.height < config.min_height()
-                            || fb_cmd.height > config.max_height()
+                        if fb_cmd.width < dev.min_width()
+                            || fb_cmd.width > dev.max_width()
+                            || fb_cmd.height < dev.min_height()
+                            || fb_cmd.height > dev.max_height()
                         {
                             return_errno!(Errno::EINVAL);
                         }
 
-                        if flags.contains(DrmModeFb::MODIFIERS)
-                            && config.fb_modifiers_not_supported()
-                        {
+                        if flags.contains(DrmModeFb::MODIFIERS) && !dev.support_fb_modifiers() {
                             return_errno!(Errno::EINVAL);
                         }
                     }
@@ -976,13 +987,13 @@ impl FileIo for DrmFile {
                     Ok(0)
                 }
                 cmd @ DrmIoctlModeObjectGetProps => {
-                    if !self.device().check_feature(DrmFeatures::MODESET) {
+                    if !self.get_drm_device().contain_features(DrmFeatures::MODESET) {
                         return_errno!(Errno::EOPNOTSUPP);
                     }
 
                     let mut arg: DrmModeObjectGetProps = cmd.read()?;
-                    let dev = self.device();
-                    let config = dev.mode_config().lock();
+                    let dev = self.get_drm_device();
+                    let config = dev.objects().lock();
 
                     if let Some(object) = config.get_object(arg.obj_id, arg.obj_type.try_into()?) {
                         if arg.is_first_call() {
@@ -1013,11 +1024,10 @@ impl FileIo for DrmFile {
                     let _req: DrmModeCursor2 = cmd.read()?;
 
                     return_errno!(Errno::ENXIO);
-                    Ok(0)
                 }
                 cmd @ DrmIoctlModeAtomic => {
-                    if !self.device().check_feature(DrmFeatures::ATOMIC)
-                        || !self.device().check_feature(DrmFeatures::MODESET)
+                    if !self.get_drm_device().contain_features(DrmFeatures::ATOMIC)
+                        || !self.get_drm_device().contain_features(DrmFeatures::MODESET)
                         || !self.atomic.load(Ordering::Relaxed)
                     {
                         return_errno!(Errno::EOPNOTSUPP);
@@ -1048,7 +1058,7 @@ impl FileIo for DrmFile {
                     // Atomic check
                     let mut atomic_states = DrmAtomicPendingState::new();
                     let requires_modeset = atomic_states.init(
-                        self.device(),
+                        self.get_drm_device().clone(),
                         object_ids,
                         prop_counts,
                         prop_ids,
@@ -1072,19 +1082,22 @@ impl FileIo for DrmFile {
                         None
                     };
 
-                    self.device()
-                        .atomic_commit(nonblock, &mut atomic_states, page_flip_event)?;
+                    self.get_drm_device().atomic_commit(
+                        nonblock,
+                        &mut atomic_states,
+                        page_flip_event,
+                    )?;
 
                     Ok(0)
                 }
                 cmd @ DrmIoctlModeCreatePropBlob => {
-                    if !self.device().check_feature(DrmFeatures::MODESET) {
+                    if !self.get_drm_device().contain_features(DrmFeatures::MODESET) {
                         return_errno!(Errno::EOPNOTSUPP);
                     }
 
                     let mut out_resp: DrmModeCreateBlob = cmd.read()?;
-                    let dev = self.device();
-                    let mut config = dev.mode_config().lock();
+                    let dev = self.get_drm_device();
+                    let mut config = dev.objects().lock();
 
                     let data =
                         read_from_user::<u8>(out_resp.data as usize, out_resp.length as usize)?;
@@ -1095,18 +1108,26 @@ impl FileIo for DrmFile {
                     Ok(0)
                 }
                 cmd @ DrmIoctlModeDestroyPropBlob => {
-                    if !self.device().check_feature(DrmFeatures::MODESET) {
+                    if !self.get_drm_device().contain_features(DrmFeatures::MODESET) {
                         return_errno!(Errno::EOPNOTSUPP);
                     }
 
                     let out_resp: DrmModeDestroyBlob = cmd.read()?;
-                    let dev = self.device();
-                    let mut config = dev.mode_config().lock();
+                    let dev = self.get_drm_device();
+                    let mut config = dev.objects().lock();
 
                     if let Some(_) = config.remove_object_with::<DrmModeBlob>(out_resp.blob_id) {
                     } else {
                         return_errno!(Errno::ENOENT);
                     }
+
+                    Ok(0)
+                }
+                cmd @ DrmIoctlSyncobjCreate => {
+                    if !self.get_drm_device().contain_features(DrmFeatures::SYNCOBJ) {
+                        return_errno!(Errno::EOPNOTSUPP);
+                    }
+                    let _args: DrmSyncobjCreate = cmd.read()?;
 
                     Ok(0)
                 }

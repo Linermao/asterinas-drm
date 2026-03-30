@@ -86,7 +86,7 @@ impl DrmGemBackend for DrmMemFdFile {
     }
 }
 
-pub fn memfd_allocator(
+pub fn memfd_allocator_fn(
     name: &str,
     size: u64,
 ) -> Result<Box<dyn DrmGemBackend>, DrmError> {

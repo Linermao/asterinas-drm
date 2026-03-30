@@ -2,7 +2,7 @@ use int_to_c_enum::TryFromInt;
 
 use crate::drm::{
     drm_modes::{DrmFormat, DrmModeModeInfo},
-    mode_object::property::DRM_PROP_NAME_LEN,
+    objects::property::DRM_PROP_NAME_LEN,
 };
 
 #[repr(C)]
@@ -443,4 +443,11 @@ pub struct DrmModeCreateBlob {
 #[derive(Debug, Clone, Copy, Pod)]
 pub struct DrmModeDestroyBlob {
     pub blob_id: u32,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod)]
+pub struct DrmSyncobjCreate {
+    pub handle: u32,
+    pub flags: u32,
 }

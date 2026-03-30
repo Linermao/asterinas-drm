@@ -3,7 +3,7 @@ use core::fmt::Debug;
 
 use ostd::sync::Mutex;
 
-use crate::drm::{mode_config::ObjectId, mode_object::{DrmObject, DrmObjectCast, property::PropertyObject}};
+use crate::drm::objects::{DrmObject, DrmObjectCast, ObjectId, property::PropertyObject};
 
 pub mod property;
 
@@ -100,7 +100,7 @@ impl dyn DrmPlane {
     pub fn set_fb_id(&self, fb_id: Option<ObjectId>) {
         self.state().lock().fb_id = fb_id;
     }
-    
+
     pub fn possible_crtcs(&self) -> u32 {
         self.state().lock().possible_crtcs
     }

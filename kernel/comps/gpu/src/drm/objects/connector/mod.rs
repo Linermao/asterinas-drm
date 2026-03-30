@@ -4,10 +4,8 @@ use core::fmt::Debug;
 use ostd::sync::Mutex;
 
 use crate::drm::{
-    DrmDevice, DrmError,
     drm_modes::{DrmDisplayInfo, DrmDisplayMode},
-    mode_config::ObjectId,
-    mode_object::{DrmObject, DrmObjectCast, property::PropertyObject},
+    objects::{DrmObject, DrmObjectCast, ObjectId, property::PropertyObject},
 };
 
 pub mod property;
@@ -93,16 +91,8 @@ impl ConnectorState {
 
 pub trait DrmConnector: Debug + Send + Sync {
     fn type_(&self) -> ConnectorType;
-
     fn type_id_(&self) -> u32;
-
     fn state(&self) -> &Mutex<ConnectorState>;
-
-    fn fill_modes(&self, dev: Arc<dyn DrmDevice>) -> Result<(), DrmError>;
-
-    fn get_modes(&self, dev: Arc<dyn DrmDevice>) -> Result<(), DrmError>;
-
-    fn detect(&self) -> Result<ConnectorStatus, DrmError>;
 }
 
 impl dyn DrmConnector {

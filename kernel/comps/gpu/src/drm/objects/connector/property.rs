@@ -1,6 +1,6 @@
 use alloc::vec;
 
-use crate::drm::mode_object::property::{DrmProperty, PropertyEnum, DrmPropertyFlags, PropertySpec};
+use crate::drm::objects::property::{DrmProperty, DrmPropertyFlags, PropertyEnum, PropertySpec};
 
 #[repr(u64)]
 #[derive(Debug)]

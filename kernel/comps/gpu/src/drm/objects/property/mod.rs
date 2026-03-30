@@ -3,7 +3,7 @@ use core::{any::Any, fmt::Debug};
 
 use hashbrown::HashMap;
 
-use crate::drm::mode_object::{DrmObject, DrmObjectCast};
+use crate::drm::objects::{DrmObject, DrmObjectCast};
 
 pub const DRM_PROP_NAME_LEN: usize = 32;
 pub type PropertyObject = HashMap<u32, u64>;
@@ -33,7 +33,7 @@ bitflags::bitflags! {
 
 #[repr(u32)]
 #[derive(Debug, Clone, Copy)]
-pub enum DrmModeObjectType {
+pub enum DrmObjectType {
     Any = 0,
     Crtc = 0xCCCC_CCCC,
     Connector = 0xC0C0_C0C0,

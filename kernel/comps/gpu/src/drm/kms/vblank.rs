@@ -1,4 +1,4 @@
-use alloc::{boxed::Box, collections::VecDeque, fmt, sync::Arc, vec::Vec};
+use alloc::{collections::VecDeque, fmt, sync::Arc, vec::Vec};
 use core::{
     fmt::Debug,
     mem::size_of,
@@ -6,10 +6,7 @@ use core::{
     time::Duration,
 };
 
-use aster_time::read_monotonic_time;
 use ostd::sync::Mutex;
-
-use crate::drm::{DrmError, mode_object::crtc::DrmCrtc};
 
 pub const DRM_EVENT_VBLANK_LEN: u32 = 32;
 

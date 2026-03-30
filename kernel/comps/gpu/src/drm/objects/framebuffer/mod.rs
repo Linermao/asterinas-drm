@@ -2,10 +2,8 @@ use alloc::sync::Arc;
 use core::fmt::Debug;
 
 use crate::drm::{
-    DrmDevice, DrmError,
     gem::DrmGemObject,
-    ioctl::DrmModeFbDirtyCmd,
-    mode_object::{DrmObject, DrmObjectCast},
+    objects::{DrmObject, DrmObjectCast},
 };
 
 pub trait DrmFramebuffer: Debug + Sync + Send {

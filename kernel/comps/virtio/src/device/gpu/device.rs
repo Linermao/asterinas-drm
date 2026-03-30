@@ -6,19 +6,24 @@ use core::{
 };
 
 use aster_gpu::drm::{
-    DrmDevice, DrmDeviceCaps, DrmError, DrmFeatures, MemfdAllocatorType, VmaOffsetManager,
-    atomic::{
-        DrmAtomicHelper, DrmAtomicPendingState,
+    DrmDevice, DrmDeviceCaps, DrmError, DrmFeatures,
+    atomic::{DrmAtomicOps, DrmAtomicPendingState, helper::DrmAtomicHelper},
+    drm_modes::DrmDisplayMode,
+    gem::{DrmGemObject, DrmGemOps, MemfdAllocatorType},
+    ioctl::{DrmModeCreateDumb, DrmModeCrtc, DrmModeCrtcPageFlip, DrmModeFbCmd2},
+    kms::{
+        DrmKmsOps,
         vblank::{PageFlipEvent, VblankCallback},
     },
-    gem::{DrmGemBackend, DrmGemObject},
-    ioctl::{DrmModeCreateDumb, DrmModeCrtc, DrmModeCrtcPageFlip, DrmModeFbCmd2},
-    mode_config::{DrmModeConfig, ObjectId},
-    mode_object::{crtc::DrmCrtc, framebuffer::DrmFramebuffer},
+    objects::{
+        DrmObjects, ObjectId,
+        connector::{ConnectorStatus, DrmConnector},
+        crtc::DrmCrtc,
+        framebuffer::DrmFramebuffer,
+    },
 };
 use aster_util::mem_obj_slice::Slice;
 use bitflags::bitflags;
-use hashbrown::HashMap;
 use log::{debug, info, warn};
 use ostd::{
     arch::trap::TrapFrame,
@@ -103,10 +108,7 @@ const VIRTIO_RING_F_INDIRECT_DESC: u64 = 1 << 28;
 
 #[derive(Debug)]
 pub struct GpuDevice {
-    mode_config: Mutex<DrmModeConfig>,
-    vma_offset_manager: Mutex<VmaOffsetManager>,
-
-    resource_id_gem: HashMap<Arc<dyn DrmGemBackend>, u32>,
+    objects: Mutex<DrmObjects>,
 
     config_manager: ConfigManager<VirtioGpuConfig>,
     control_queue: SpinLock<VirtQueue>,
@@ -126,14 +128,6 @@ pub struct GpuDevice {
 }
 
 impl GpuDevice {
-    pub(crate) fn negotiate_features(device_features: u64) -> u64 {
-        let supported_features = GpuFeatures::VIRGL
-            | GpuFeatures::EDID
-            | GpuFeatures::RESOURCE_UUID
-            | GpuFeatures::RESOURCE_BLOB;
-        (GpuFeatures::from_bits_truncate(device_features) & supported_features).bits()
-    }
-
     pub(crate) fn init(mut transport: Box<dyn VirtioTransport>) -> Result<(), VirtioDeviceError> {
         let num_queues = transport.num_queues();
         if num_queues < 2 {
@@ -190,20 +184,15 @@ impl GpuDevice {
         let num_scanouts = config.num_scanouts;
         let num_capsets = config.num_capsets;
 
-        let mut mode_config = DrmModeConfig::new(
-            XRES_MIN, XRES_MAX, YRES_MIN, YRES_MAX, 16, 0, 0, 0, true, false,
-        );
+        let mut objects = DrmObjects::new();
 
         for scanout_id in 0..num_scanouts {
-            virtio_gpu_output_init(scanout_id, &mut mode_config)
+            virtio_gpu_output_init(scanout_id, &mut objects)
                 .map_err(|_| VirtioDeviceError::QueueUnknownError)?;
         }
 
         let device = Arc::new(Self {
-            mode_config: Mutex::new(mode_config),
-            vma_offset_manager: Mutex::new(VmaOffsetManager::new()),
-
-            resource_id_gem: HashMap::new(),
+            objects: Mutex::new(objects),
 
             config_manager,
             control_queue: SpinLock::new(control_queue),
@@ -221,18 +210,6 @@ impl GpuDevice {
             num_capsets: SpinLock::new(num_capsets),
             capset_infos: SpinLock::new(Vec::new()),
         });
-
-        {
-            fn config_space_change(_: &TrapFrame) {
-                debug!("virtio-gpu config space changed");
-            }
-
-            let mut transport = device.transport.lock();
-            transport
-                .register_cfg_callback(Box::new(config_space_change))
-                .unwrap();
-            transport.finish_init();
-        }
 
         // Register this bus-level GPU device to the common GPU subsystem.
         if let Err(err) = aster_gpu::register_device(device.clone()) {
@@ -306,7 +283,147 @@ impl GpuDevice {
         *device.display_infos.lock() = display_infos;
         *device.edids.lock() = edids;
 
+        {
+            fn config_space_change(_: &TrapFrame) {
+                debug!("virtio-gpu config space changed");
+            }
+
+            let mut transport = device.transport.lock();
+            transport
+                .register_cfg_callback(Box::new(config_space_change))
+                .unwrap();
+            transport.finish_init();
+        }
+
         Ok(())
+    }
+}
+
+impl DrmKmsOps for GpuDevice {
+    fn set_crtc(
+        &self,
+        crtc_resp: &DrmModeCrtc,
+        connector_ids: Vec<ObjectId>,
+    ) -> Result<(), DrmError> {
+        self.atomic_helper_set_config(crtc_resp, connector_ids)
+    }
+
+    fn page_flip(
+        &self,
+        page_flip: &DrmModeCrtcPageFlip,
+        vblank: Arc<dyn VblankCallback>,
+        target: Option<u32>,
+    ) -> Result<(), DrmError> {
+        self.atomic_helper_pageflip(page_flip, vblank, target)
+    }
+
+    fn dirty_framebuffer(&self, fb_id: ObjectId) -> Result<(), DrmError> {
+        self.atomic_helper_dirty_framebuffer(fb_id)
+    }
+
+    fn update_connector_modes_and_status(&self, connector_id: ObjectId) -> Result<(), DrmError> {
+        let objects = self.objects.lock();
+        let connector = objects
+            .get_object_by_id::<dyn DrmConnector>(connector_id)
+            .ok_or(DrmError::NotFound)?;
+
+        let display_infos = self.display_infos();
+        if self.has_edid() {
+            // TODO
+        }
+
+        // TODO
+        let mode = if let Some(info) = display_infos.first() {
+            if info.enabled != 0 && info.rect.width > 0 && info.rect.height > 0 {
+                DrmDisplayMode::from_resolution(info.rect.width as u16, info.rect.height as u16)
+            } else {
+                DrmDisplayMode::default()
+            }
+        } else {
+            DrmDisplayMode::default()
+        };
+
+        let status = ConnectorStatus::Connected;
+        let mut state = connector.state().lock();
+        state.set_status(status);
+        state.set_modes(&[mode]);
+
+        Ok(())
+    }
+}
+
+impl DrmGemOps for GpuDevice {
+    fn create_dumb(
+        &self,
+        args: &DrmModeCreateDumb,
+        memfd_allocator_fn: MemfdAllocatorType,
+    ) -> Result<Arc<dyn DrmGemObject>, DrmError> {
+        if args.bpp != 32 {
+            return Err(DrmError::Invalid);
+        }
+
+        let pitch = args.width.checked_mul(4).ok_or(DrmError::Invalid)?;
+        let size = pitch.checked_mul(args.height).ok_or(DrmError::Invalid)?;
+        let size = size as u64;
+
+        let backend = memfd_allocator_fn("virtio-gpu-dumb", size)?;
+        let sg_table = backend.get_pages_sgt()?;
+
+        let resource_id = self.alloc_resource_id();
+        self.resource_create_2d(resource_id, args.width, args.height)
+            .map_err(|_| DrmError::Invalid)?;
+
+        let entries: Vec<VirtioGpuMemEntry> = sg_table
+            .entries
+            .iter()
+            .map(|e| VirtioGpuMemEntry {
+                addr: e.addr,
+                length: e.len,
+                padding: 0,
+            })
+            .collect();
+
+        self.resource_attach_backing_sg(resource_id, entries.as_slice())
+            .map_err(|_| DrmError::Invalid)?;
+
+        let gem_object = VirtioGemObject::new(pitch, size, backend, resource_id);
+
+        Ok(Arc::new(gem_object))
+    }
+
+    fn fb_create(
+        &self,
+        fb_cmd: &DrmModeFbCmd2,
+        gem_object: Arc<dyn DrmGemObject>,
+    ) -> Result<ObjectId, DrmError> {
+        // TODO:
+        let fb = Arc::new(VirtioGpuFramebuffer::new(
+            fb_cmd.width,
+            fb_cmd.height,
+            gem_object,
+        ));
+
+        let handle = self.objects.lock().add_framebuffer(fb);
+
+        Ok(handle)
+    }
+}
+
+impl DrmAtomicOps for GpuDevice {
+    fn atomic_commit(
+        &self,
+        nonblock: bool,
+        pending_state: &mut DrmAtomicPendingState,
+        page_flip_event: Option<PageFlipEvent>,
+    ) -> Result<(), DrmError> {
+        self.atomic_helper_commit(nonblock, pending_state, page_flip_event)
+    }
+
+    fn atomic_commit_tail(
+        &self,
+        pending_state: &mut DrmAtomicPendingState,
+    ) -> Result<(), DrmError> {
+        self.atomic_helper_commit_tail(pending_state)
     }
 }
 
@@ -337,122 +454,62 @@ impl DrmDevice for GpuDevice {
         DrmDeviceCaps::DUMB_CREATE
     }
 
-    fn mode_config(&self) -> &Mutex<DrmModeConfig> {
-        &self.mode_config
+    fn objects(&self) -> &Mutex<DrmObjects> {
+        &self.objects
     }
 
-    fn set_config(
-        &self,
-        crtc_resp: &DrmModeCrtc,
-        connector_ids: Vec<ObjectId>,
-    ) -> Result<(), DrmError> {
-        self.atomic_helper_set_config(crtc_resp, connector_ids)
+    fn min_width(&self) -> u32 {
+        XRES_MIN
     }
 
-    fn page_flip(
-        &self,
-        page_flip: &DrmModeCrtcPageFlip,
-        vblank: Arc<dyn VblankCallback>,
-        target: Option<u32>,
-    ) -> Result<(), DrmError> {
-        self.atomic_helper_pageflip(page_flip, vblank, target)
+    fn max_width(&self) -> u32 {
+        XRES_MAX
     }
 
-    fn dirty_framebuffer(&self, fb_id: ObjectId) -> Result<(), DrmError> {
-        self.atomic_helper_dirty_framebuffer(fb_id)
+    fn min_height(&self) -> u32 {
+        YRES_MIN
     }
 
-    fn vma_offset_manager(&self) -> &Mutex<VmaOffsetManager> {
-        &self.vma_offset_manager
+    fn max_height(&self) -> u32 {
+        YRES_MAX
     }
 
-    fn create_dumb(
-        &self,
-        args: &DrmModeCreateDumb,
-        memfd_allocator: MemfdAllocatorType,
-    ) -> Result<Arc<dyn DrmGemObject>, DrmError> {
-        if args.bpp != 32 {
-            return Err(DrmError::Invalid);
-        }
-
-        let pitch = args.width.checked_mul(4).ok_or(DrmError::Invalid)?;
-        let size = pitch.checked_mul(args.height).ok_or(DrmError::Invalid)?;
-        let size = size as u64;
-
-        let backend = memfd_allocator("virtio-gpu-dumb", size)?;
-        let sg_table = backend.get_pages_sgt()?;
-
-        let resource_id = self.alloc_resource_id();
-        self.resource_create_2d(resource_id, args.width, args.height)
-            .map_err(|_| DrmError::Invalid)?;
-
-        let entries: Vec<VirtioGpuMemEntry> = sg_table
-            .entries
-            .iter()
-            .map(|e| VirtioGpuMemEntry {
-                addr: e.addr,
-                length: e.len,
-                padding: 0,
-            })
-            .collect();
-
-        self.resource_attach_backing_sg(resource_id, entries.as_slice())
-            .map_err(|_| DrmError::Invalid)?;
-
-        let gem_object = VirtioGemObject::new(pitch, size, backend, resource_id);
-
-        Ok(Arc::new(gem_object))
+    fn preferred_depth(&self) -> u32 {
+        16
     }
 
-    fn map_dumb(&self, handle: u32) -> Result<u64, DrmError> {
-        self.vma_offset_manager.lock().alloc(handle)
+    fn prefer_shadow(&self) -> u32 {
+        0
     }
 
-    fn fb_create(
-        &self,
-        fb_cmd: &DrmModeFbCmd2,
-        gem_object: Arc<dyn DrmGemObject>,
-    ) -> Result<ObjectId, DrmError> {
-        // TODO:
-        let fb = Arc::new(VirtioGpuFramebuffer::new(
-            fb_cmd.width,
-            fb_cmd.height,
-            gem_object,
-        ));
-
-        let handle = self.mode_config.lock().add_framebuffer(fb);
-
-        Ok(handle)
+    fn cursor_width(&self) -> u32 {
+        0
     }
 
-    fn atomic_commit(
-        &self,
-        nonblock: bool,
-        pending_state: &mut DrmAtomicPendingState,
-        page_flip_event: Option<PageFlipEvent>,
-    ) -> Result<(), DrmError> {
-        self.atomic_helper_commit(nonblock, pending_state, page_flip_event)
+    fn cursor_height(&self) -> u32 {
+        0
     }
 
-    fn atomic_commit_tail(
-        &self,
-        pending_state: &mut DrmAtomicPendingState,
-    ) -> Result<(), DrmError> {
-        self.atomic_helper_commit_tail(pending_state)
+    fn support_async_page_flip(&self) -> bool {
+        true
+    }
+
+    fn support_fb_modifiers(&self) -> bool {
+        false
     }
 }
 
 impl DrmAtomicHelper for GpuDevice {
     fn atomic_flush(&self, crtc_id: ObjectId) -> Result<(), DrmError> {
-        let config = self.mode_config.lock();
-        let crtc = config
-            .get_object_with::<dyn DrmCrtc>(crtc_id)
+        let objects = self.objects.lock();
+        let crtc = objects
+            .get_object_by_id::<dyn DrmCrtc>(crtc_id)
             .ok_or(DrmError::NotFound)?;
 
         let primary_plane = crtc.primary_plane();
         let fb_id = primary_plane.fb_id().ok_or(DrmError::NotFound)?;
-        let fb = config
-            .get_object_with::<dyn DrmFramebuffer>(fb_id)
+        let fb = objects
+            .get_object_by_id::<dyn DrmFramebuffer>(fb_id)
             .ok_or(DrmError::NotFound)?;
 
         let gem_object =

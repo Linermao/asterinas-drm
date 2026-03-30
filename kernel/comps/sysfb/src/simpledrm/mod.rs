@@ -2,19 +2,17 @@ use alloc::{boxed::Box, sync::Arc, vec::Vec};
 
 use aster_framebuffer::FRAMEBUFFER;
 use aster_gpu::drm::{
-    DrmDevice, DrmDeviceCaps, DrmError, DrmFeatures, MemfdAllocatorType, VmaOffsetManager,
-    atomic::{
-        DrmAtomicHelper, DrmAtomicPendingState,
+    DrmDevice, DrmDeviceCaps, DrmError, DrmFeatures,
+    atomic::{DrmAtomicOps, DrmAtomicPendingState, helper::DrmAtomicHelper},
+    drm_modes::DrmDisplayMode,
+    gem::{DrmGemBackend, DrmGemObject, DrmGemOps, MemfdAllocatorType},
+    ioctl::{DrmModeCreateDumb, DrmModeCrtc, DrmModeCrtcPageFlip, DrmModeFbCmd2},
+    kms::{
+        DrmKmsOps,
         vblank::{DrmVblankState, PageFlipEvent, VblankCallback},
     },
-    drm_modes::DrmDisplayMode,
-    gem::{DrmGemBackend, DrmGemObject},
-    ioctl::{
-        DrmModeCreateDumb, DrmModeCrtc, DrmModeCrtcPageFlip, DrmModeFbCmd2, DrmModeFbDirtyCmd,
-    },
-    mode_config::{DrmModeConfig, ObjectId},
-    mode_object::{
-        DrmObject, DrmObjectType,
+    objects::{
+        DrmObject, DrmObjects, ObjectId,
         connector::{
             ConnectorState, ConnectorStatus, ConnectorType, DrmConnector, property::ConnectorProps,
         },
@@ -40,61 +38,140 @@ const PREFERRED_DEPTH: u32 = 16;
 
 #[derive(Debug)]
 pub(crate) struct SimpleDrmDevice {
-    mode_config: Mutex<DrmModeConfig>,
-    vma_offset_manager: Mutex<VmaOffsetManager>,
+    objects: Mutex<DrmObjects>,
 }
 
 impl SimpleDrmDevice {
     pub fn new() -> Self {
-        // TODO: true format infomation
-        let mut mode_config = DrmModeConfig::new(
-            MIN_WIDTH,
-            MAX_WIDTH,
-            MIN_HEIGHT,
-            MAX_HEIGHT,
-            PREFERRED_DEPTH,
-            0,
-            0,
-            0,
-            true,
-            false,
-        );
+        let mut objects = DrmObjects::new();
 
-        Self::init_objects(&mut mode_config);
-
-        Self {
-            mode_config: Mutex::new(mode_config),
-            vma_offset_manager: Mutex::new(VmaOffsetManager::new()),
-        }
-    }
-
-    fn init_objects(config: &mut DrmModeConfig) {
-        let primary = Arc::new(SimpleDrmPlane::new(config, DrmPlaneType::Primary));
-        let (primary_id, _) = config.add_object(DrmObject::Plane(primary.clone()));
+        let primary = Arc::new(SimpleDrmPlane::new(&mut objects, DrmPlaneType::Primary));
+        let (primary_id, _) = objects.add_object(DrmObject::Plane(primary.clone()));
 
         let crtc = Arc::new(SimpleDrmCrtc::new(
-            config,
+            &mut objects,
             primary.clone(),
             primary_id,
             None,
         ));
-        let (_, crtc_indices) = config.add_object(DrmObject::Crtc(crtc.clone()));
+        let (_, crtc_indices) = objects.add_object(DrmObject::Crtc(crtc.clone()));
 
         let encoder = Arc::new(SimpleDrmEncoder::new(EncoderType::VIRTUAL));
-        let (_, encoder_indices) = config.add_object(DrmObject::Encoder(encoder.clone()));
+        let (_, encoder_indices) = objects.add_object(DrmObject::Encoder(encoder.clone()));
 
         let connector_type = ConnectorType::VIRTUAL;
-        let connector_type_id = config.next_connector_type_id(connector_type);
+        let connector_type_id = objects.next_connector_type_id(connector_type);
         let connector = Arc::new(SimpleDrmConnector::new(
-            config,
+            &mut objects,
             connector_type,
             connector_type_id,
         ));
-        let _ = config.add_object(DrmObject::Connector(connector.clone()));
+        let _ = objects.add_object(DrmObject::Connector(connector.clone()));
 
         primary.set_possible_crtcs(&[crtc_indices]);
         encoder.set_possible_crtcs(&[crtc_indices]);
         connector.set_possible_encoders(&[encoder_indices]);
+
+        Self {
+            objects: Mutex::new(objects),
+        }
+    }
+}
+
+impl DrmKmsOps for SimpleDrmDevice {
+    fn set_crtc(
+        &self,
+        crtc_resp: &DrmModeCrtc,
+        connector_ids: Vec<ObjectId>,
+    ) -> Result<(), DrmError> {
+        self.atomic_helper_set_config(crtc_resp, connector_ids)
+    }
+
+    fn page_flip(
+        &self,
+        page_flip: &DrmModeCrtcPageFlip,
+        vblank_callback: Arc<dyn VblankCallback>,
+        target: Option<u32>,
+    ) -> Result<(), DrmError> {
+        self.atomic_helper_pageflip(page_flip, vblank_callback, target)
+    }
+
+    fn dirty_framebuffer(&self, fb_id: ObjectId) -> Result<(), DrmError> {
+        self.atomic_helper_dirty_framebuffer(fb_id)
+    }
+
+    fn update_connector_modes_and_status(&self, connector_id: ObjectId) -> Result<(), DrmError> {
+        let objects = self.objects.lock();
+        let connector = objects
+            .get_object_by_id::<dyn DrmConnector>(connector_id)
+            .ok_or(DrmError::NotFound)?;
+
+        // TODO:
+        let status = ConnectorStatus::Connected;
+        let fb_info = boot_info().framebuffer_arg;
+        let mode = if let Some(fb) = fb_info {
+            // Create mode from framebuffer resolution
+            DrmDisplayMode::from_resolution(fb.width as u16, fb.height as u16)
+        } else {
+            // Fallback to default mode if no framebuffer info
+            DrmDisplayMode::default()
+        };
+
+        let mut state = connector.state().lock();
+        state.set_status(status);
+        state.set_modes(&[mode]);
+
+        Ok(())
+    }
+}
+
+impl DrmAtomicOps for SimpleDrmDevice {
+    fn atomic_commit(
+        &self,
+        nonblock: bool,
+        pending_state: &mut DrmAtomicPendingState,
+        page_flip_event: Option<PageFlipEvent>,
+    ) -> Result<(), DrmError> {
+        self.atomic_helper_commit(nonblock, pending_state, page_flip_event)
+    }
+
+    fn atomic_commit_tail(
+        &self,
+        pending_state: &mut DrmAtomicPendingState,
+    ) -> Result<(), DrmError> {
+        self.atomic_helper_commit_tail(pending_state)
+    }
+}
+
+impl DrmGemOps for SimpleDrmDevice {
+    fn create_dumb(
+        &self,
+        args: &DrmModeCreateDumb,
+        memfd_allocator_fn: MemfdAllocatorType,
+    ) -> Result<Arc<dyn DrmGemObject>, DrmError> {
+        let pitch = args.width * (args.bpp / 8);
+        let size = (pitch * args.height) as u64;
+
+        let backend = memfd_allocator_fn("simpledrm-dumb", size)?;
+        let gem_object = SimpleDrmGemObject::new(pitch, size, backend);
+
+        Ok(Arc::new(gem_object))
+    }
+
+    fn fb_create(
+        &self,
+        fb_cmd: &DrmModeFbCmd2,
+        gem_object: Arc<dyn DrmGemObject>,
+    ) -> Result<ObjectId, DrmError> {
+        let fb = Arc::new(SimpleDrmFramebuffer::new(
+            fb_cmd.width,
+            fb_cmd.height,
+            gem_object,
+        ));
+
+        let handle = self.objects.lock().add_framebuffer(fb);
+
+        Ok(handle)
     }
 }
 
@@ -119,97 +196,62 @@ impl DrmDevice for SimpleDrmDevice {
         DrmDeviceCaps::DUMB_CREATE
     }
 
-    fn mode_config(&self) -> &Mutex<DrmModeConfig> {
-        &self.mode_config
+    fn min_width(&self) -> u32 {
+        MIN_WIDTH
     }
 
-    fn set_config(
-        &self,
-        crtc_resp: &DrmModeCrtc,
-        connector_ids: Vec<ObjectId>,
-    ) -> Result<(), DrmError> {
-        self.atomic_helper_set_config(crtc_resp, connector_ids)
+    fn max_width(&self) -> u32 {
+        MAX_WIDTH
     }
 
-    fn page_flip(
-        &self,
-        page_flip: &DrmModeCrtcPageFlip,
-        vblank_callback: Arc<dyn VblankCallback>,
-        target: Option<u32>,
-    ) -> Result<(), DrmError> {
-        self.atomic_helper_pageflip(page_flip, vblank_callback, target)
+    fn min_height(&self) -> u32 {
+        MIN_HEIGHT
     }
 
-    fn dirty_framebuffer(&self, fb_id: ObjectId) -> Result<(), DrmError> {
-        self.atomic_helper_dirty_framebuffer(fb_id)
+    fn max_height(&self) -> u32 {
+        MAX_HEIGHT
     }
 
-    fn vma_offset_manager(&self) -> &Mutex<VmaOffsetManager> {
-        &self.vma_offset_manager
+    fn preferred_depth(&self) -> u32 {
+        PREFERRED_DEPTH
     }
 
-    fn create_dumb(
-        &self,
-        args: &DrmModeCreateDumb,
-        memfd_allocator: MemfdAllocatorType,
-    ) -> Result<Arc<dyn DrmGemObject>, DrmError> {
-        let pitch = args.width * (args.bpp / 8);
-        let size = (pitch * args.height) as u64;
-
-        let backend = memfd_allocator("simpledrm-dumb", size)?;
-        let gem_object = SimpleDrmGemObject::new(pitch, size, backend);
-
-        Ok(Arc::new(gem_object))
+    fn prefer_shadow(&self) -> u32 {
+        0
     }
 
-    fn map_dumb(&self, handle: u32) -> Result<u64, DrmError> {
-        self.vma_offset_manager.lock().alloc(handle)
+    fn cursor_width(&self) -> u32 {
+        0
     }
 
-    fn fb_create(
-        &self,
-        fb_cmd: &DrmModeFbCmd2,
-        gem_object: Arc<dyn DrmGemObject>,
-    ) -> Result<ObjectId, DrmError> {
-        let fb = Arc::new(SimpleDrmFramebuffer::new(
-            fb_cmd.width,
-            fb_cmd.height,
-            gem_object,
-        ));
-
-        let handle = self.mode_config.lock().add_framebuffer(fb);
-
-        Ok(handle)
+    fn cursor_height(&self) -> u32 {
+        0
     }
 
-    fn atomic_commit(
-        &self,
-        nonblock: bool,
-        pending_state: &mut DrmAtomicPendingState,
-        page_flip_event: Option<PageFlipEvent>,
-    ) -> Result<(), DrmError> {
-        self.atomic_helper_commit(nonblock, pending_state, page_flip_event)
+    fn support_async_page_flip(&self) -> bool {
+        true
     }
 
-    fn atomic_commit_tail(
-        &self,
-        pending_state: &mut DrmAtomicPendingState,
-    ) -> Result<(), DrmError> {
-        self.atomic_helper_commit_tail(pending_state)
+    fn support_fb_modifiers(&self) -> bool {
+        false
+    }
+
+    fn objects(&self) -> &Mutex<DrmObjects> {
+        &self.objects
     }
 }
 
 impl DrmAtomicHelper for SimpleDrmDevice {
     fn atomic_flush(&self, crtc_id: ObjectId) -> Result<(), DrmError> {
-        let config = self.mode_config.lock();
+        let objects = self.objects.lock();
 
-        let crtc = config
-            .get_object_with::<dyn DrmCrtc>(crtc_id)
+        let crtc = objects
+            .get_object_by_id::<dyn DrmCrtc>(crtc_id)
             .ok_or(DrmError::NotFound)?;
 
         let fb_id = crtc.primary_plane().fb_id().ok_or(DrmError::NotFound)?;
-        let fb = config
-            .get_object_with::<dyn DrmFramebuffer>(fb_id)
+        let fb = objects
+            .get_object_by_id::<dyn DrmFramebuffer>(fb_id)
             .ok_or(DrmError::NotFound)?;
 
         let Some(framebuffer) = FRAMEBUFFER.get() else {
@@ -270,22 +312,22 @@ impl DrmPlane for SimpleDrmPlane {
 }
 
 impl SimpleDrmPlane {
-    fn new(config: &mut DrmModeConfig, type_: DrmPlaneType) -> Self {
+    fn new(objects: &mut DrmObjects, type_: DrmPlaneType) -> Self {
         use PlaneProps::*;
         let mut properties: PropertyObject = HashMap::new();
 
-        properties.insert(config.attach_property(&Type), type_ as u64);
-        properties.insert(config.attach_property(&CrtcId), 0);
-        properties.insert(config.attach_property(&FbId), 0);
+        properties.insert(objects.attach_property(&Type), type_ as u64);
+        properties.insert(objects.attach_property(&CrtcId), 0);
+        properties.insert(objects.attach_property(&FbId), 0);
 
-        properties.insert(config.attach_property(&SrcX), 0);
-        properties.insert(config.attach_property(&SrcY), 0);
-        properties.insert(config.attach_property(&SrcW), 0);
-        properties.insert(config.attach_property(&SrcH), 0);
-        properties.insert(config.attach_property(&CrtcX), 0);
-        properties.insert(config.attach_property(&CrtcY), 0);
-        properties.insert(config.attach_property(&CrtcW), 0);
-        properties.insert(config.attach_property(&CrtcH), 0);
+        properties.insert(objects.attach_property(&SrcX), 0);
+        properties.insert(objects.attach_property(&SrcY), 0);
+        properties.insert(objects.attach_property(&SrcW), 0);
+        properties.insert(objects.attach_property(&SrcH), 0);
+        properties.insert(objects.attach_property(&CrtcX), 0);
+        properties.insert(objects.attach_property(&CrtcY), 0);
+        properties.insert(objects.attach_property(&CrtcW), 0);
+        properties.insert(objects.attach_property(&CrtcH), 0);
 
         Self {
             state: Mutex::new(PlaneState::new(properties)),
@@ -330,7 +372,7 @@ impl DrmCrtc for SimpleDrmCrtc {
 
 impl SimpleDrmCrtc {
     fn new(
-        config: &mut DrmModeConfig,
+        objects: &mut DrmObjects,
         primary: Arc<dyn DrmPlane>,
         primary_id: ObjectId,
         cursor: Option<Arc<dyn DrmPlane>>,
@@ -338,8 +380,8 @@ impl SimpleDrmCrtc {
         use CrtcProps::*;
 
         let mut properties: PropertyObject = HashMap::new();
-        properties.insert(config.attach_property(&Active), 0);
-        properties.insert(config.attach_property(&ModeId), 0);
+        properties.insert(objects.attach_property(&Active), 0);
+        properties.insert(objects.attach_property(&ModeId), 0);
 
         Self {
             state: Mutex::new(CrtcState::new(properties)),
@@ -399,53 +441,19 @@ impl DrmConnector for SimpleDrmConnector {
     fn state(&self) -> &Mutex<ConnectorState> {
         &self.state
     }
-
-    fn fill_modes(&self, dev: Arc<dyn DrmDevice>) -> Result<(), DrmError> {
-        {
-            let mut state = self.state.lock();
-            // TODO: with force
-            let status = self.detect()?;
-            state.set_status(status);
-        }
-
-        self.get_modes(dev)?;
-
-        Ok(())
-    }
-
-    fn get_modes(&self, _dev: Arc<dyn DrmDevice>) -> Result<(), DrmError> {
-        let fb_info = boot_info().framebuffer_arg;
-
-        let mode = if let Some(fb) = fb_info {
-            // Create mode from framebuffer resolution
-            DrmDisplayMode::from_resolution(fb.width as u16, fb.height as u16)
-        } else {
-            // Fallback to default mode if no framebuffer info
-            DrmDisplayMode::default()
-        };
-
-        let mut state = self.state.lock();
-        state.set_modes(&[mode]);
-
-        Ok(())
-    }
-
-    fn detect(&self) -> Result<ConnectorStatus, DrmError> {
-        Ok(ConnectorStatus::Connected)
-    }
 }
 
 impl SimpleDrmConnector {
-    fn new(config: &mut DrmModeConfig, type_: ConnectorType, type_id_: u32) -> Self {
+    fn new(objects: &mut DrmObjects, type_: ConnectorType, type_id_: u32) -> Self {
         use ConnectorProps::*;
 
         let mut properties: PropertyObject = HashMap::new();
 
-        properties.insert(config.attach_property(&CrtcId), 0);
-        properties.insert(config.attach_property(&DPMS), 0);
-        properties.insert(config.attach_property(&LinkStatus), 0);
-        properties.insert(config.attach_property(&NonDesktop), 0);
-        properties.insert(config.attach_property(&Tile), 0);
+        properties.insert(objects.attach_property(&CrtcId), 0);
+        properties.insert(objects.attach_property(&DPMS), 0);
+        properties.insert(objects.attach_property(&LinkStatus), 0);
+        properties.insert(objects.attach_property(&NonDesktop), 0);
+        properties.insert(objects.attach_property(&Tile), 0);
 
         Self {
             type_,
