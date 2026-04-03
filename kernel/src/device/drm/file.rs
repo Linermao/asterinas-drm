@@ -17,6 +17,7 @@ use aster_gpu::drm::{
         plane::DrmPlane,
         property::{DrmModeBlob, DrmProperty, DrmPropertyKind, PropertyEnum},
     },
+    syncobj::{DrmSyncobj, DrmSyncobjWaitFlags},
 };
 use hashbrown::HashMap;
 use ostd::mm::VmIo;
@@ -65,6 +66,8 @@ pub(super) struct DrmFile {
     minor: Arc<DrmMinor>,
     next_gem_handle: AtomicU32,
     gem_table: Mutex<HashMap<u32, Arc<dyn DrmGemObject>>>,
+    next_syncobj_handle: AtomicU32,
+    syncobj_table: Mutex<HashMap<u32, Arc<DrmSyncobj>>>,
 
     /// True when the client has asked us to expose stereo 3D mode flags.
     stereo_allowed: AtomicBool,
@@ -91,6 +94,8 @@ impl DrmFile {
             minor,
             next_gem_handle: AtomicU32::new(1),
             gem_table: Mutex::new(HashMap::new()),
+            next_syncobj_handle: AtomicU32::new(1),
+            syncobj_table: Mutex::new(HashMap::new()),
 
             stereo_allowed: AtomicBool::new(false),
             universal_planes: AtomicBool::new(false),
@@ -122,16 +127,44 @@ impl DrmFile {
         self.next_gem_handle.fetch_add(1, Ordering::SeqCst)
     }
 
-    fn add_gem(&self, id: u32, gem: Arc<dyn DrmGemObject>) {
-        self.gem_table.lock().insert(id, gem);
+    fn add_gem(&self, gem: Arc<dyn DrmGemObject>) -> Result<u32> {
+        let handle = self.next_gem_handle();
+        self.gem_table.lock().insert(handle, gem);
+        Ok(handle)
     }
 
     fn lookup_gem(&self, id: u32) -> Option<Arc<dyn DrmGemObject>> {
         self.gem_table.lock().get(&id).cloned()
     }
 
-    fn remove_gem(&self, id: u32) -> Option<Arc<dyn DrmGemObject>> {
-        self.gem_table.lock().remove(&id)
+    fn destroy_gem(&self, id: u32) -> Result<()> {
+        let gem_object = self.gem_table.lock().remove(&id).ok_or(Errno::EBUSY)?;
+        Ok(gem_object.release()?)
+    }
+
+    fn next_syncobj_handle(&self) -> u32 {
+        self.next_syncobj_handle.fetch_add(1, Ordering::SeqCst)
+    }
+
+    fn create_syncobj(&self) -> Result<u32> {
+        let handle = self.next_syncobj_handle();
+        self.syncobj_table
+            .lock()
+            .insert(handle, Arc::new(DrmSyncobj::new()));
+        Ok(handle)
+    }
+
+    fn lookup_syncobj(&self, handle: u32) -> Option<Arc<DrmSyncobj>> {
+        self.syncobj_table.lock().get(&handle).cloned()
+    }
+
+    fn destroy_syncobj(&self, handle: u32) -> Result<()> {
+        let _syncobj = self
+            .syncobj_table
+            .lock()
+            .remove(&handle)
+            .ok_or(Errno::EBUSY)?;
+        Ok(())
     }
 }
 
@@ -330,7 +363,7 @@ impl FileIo for DrmFile {
                     Ok(0)
                 }
                 cmd @ DrmIoctlSetClientCap => {
-                    if !self.get_drm_device().contain_features(DrmFeatures::MODESET) {
+                    if !self.contain_features(DrmFeatures::MODESET) {
                         return_errno!(Errno::EOPNOTSUPP);
                     }
 
@@ -353,7 +386,7 @@ impl FileIo for DrmFile {
                             };
                         }
                         DrmSetCapabilities::Atomic => {
-                            if !self.get_drm_device().contain_features(DrmFeatures::ATOMIC) {
+                            if !self.contain_features(DrmFeatures::ATOMIC) {
                                 return_errno!(Errno::EOPNOTSUPP);
                             }
                             // TODO: The modesetting DDX has a totally broken idea of atomic.
@@ -396,10 +429,7 @@ impl FileIo for DrmFile {
                             };
                         }
                         DrmSetCapabilities::CursorPlaneHostport => {
-                            if !self
-                                .get_drm_device()
-                                .contain_features(DrmFeatures::CURSOR_HOTSPOT)
-                            {
+                            if !self.contain_features(DrmFeatures::CURSOR_HOTSPOT) {
                                 return_errno!(Errno::EOPNOTSUPP);
                             }
 
@@ -428,7 +458,7 @@ impl FileIo for DrmFile {
                     Ok(0)
                 }
                 cmd @ DrmIoctlModeGetResources => {
-                    if !self.get_drm_device().contain_features(DrmFeatures::MODESET) {
+                    if !self.contain_features(DrmFeatures::MODESET) {
                         return_errno!(Errno::EOPNOTSUPP);
                     }
 
@@ -489,7 +519,7 @@ impl FileIo for DrmFile {
                     Ok(0)
                 }
                 cmd @ DrmIoctlModeGetCrtc => {
-                    if !self.get_drm_device().contain_features(DrmFeatures::MODESET) {
+                    if !self.contain_features(DrmFeatures::MODESET) {
                         return_errno!(Errno::EOPNOTSUPP);
                     }
 
@@ -526,7 +556,7 @@ impl FileIo for DrmFile {
                     Ok(0)
                 }
                 cmd @ DrmIoctlModeSetCrtc => {
-                    if !self.get_drm_device().contain_features(DrmFeatures::MODESET) {
+                    if !self.contain_features(DrmFeatures::MODESET) {
                         return_errno!(Errno::EOPNOTSUPP);
                     }
 
@@ -549,7 +579,7 @@ impl FileIo for DrmFile {
                     return_errno!(Errno::ENXIO);
                 }
                 cmd @ DrmIoctlModeGetEncoder => {
-                    if !self.get_drm_device().contain_features(DrmFeatures::MODESET) {
+                    if !self.contain_features(DrmFeatures::MODESET) {
                         return_errno!(Errno::EOPNOTSUPP);
                     }
 
@@ -574,7 +604,7 @@ impl FileIo for DrmFile {
                     Ok(0)
                 }
                 cmd @ DrmIoctlModeGetConnector => {
-                    if !self.get_drm_device().contain_features(DrmFeatures::MODESET) {
+                    if !self.contain_features(DrmFeatures::MODESET) {
                         return_errno!(Errno::EOPNOTSUPP);
                     }
 
@@ -649,7 +679,7 @@ impl FileIo for DrmFile {
                     Ok(0)
                 }
                 cmd @ DrmIoctlModeGetProperty => {
-                    if !self.get_drm_device().contain_features(DrmFeatures::MODESET) {
+                    if !self.contain_features(DrmFeatures::MODESET) {
                         return_errno!(Errno::EOPNOTSUPP);
                     }
 
@@ -706,7 +736,7 @@ impl FileIo for DrmFile {
                     Ok(0)
                 }
                 cmd @ DrmIoctlModeGetPropBlob => {
-                    if !self.get_drm_device().contain_features(DrmFeatures::MODESET) {
+                    if !self.contain_features(DrmFeatures::MODESET) {
                         return_errno!(Errno::EOPNOTSUPP);
                     }
 
@@ -732,7 +762,7 @@ impl FileIo for DrmFile {
                 }
                 cmd @ DrmIoctlModeAddFB => {
                     log::error!("[kernel] DrmIoctlModeAddFB");
-                    if !self.get_drm_device().contain_features(DrmFeatures::MODESET) {
+                    if !self.contain_features(DrmFeatures::MODESET) {
                         return_errno!(Errno::EOPNOTSUPP);
                     }
 
@@ -752,7 +782,7 @@ impl FileIo for DrmFile {
                     Ok(0)
                 }
                 cmd @ DrmIoctlModeRmFB => {
-                    if !self.get_drm_device().contain_features(DrmFeatures::MODESET) {
+                    if !self.contain_features(DrmFeatures::MODESET) {
                         return_errno!(Errno::EOPNOTSUPP);
                     }
 
@@ -768,7 +798,7 @@ impl FileIo for DrmFile {
                     Ok(0)
                 }
                 cmd @ DrmIoctlModePageFlip => {
-                    if !self.get_drm_device().contain_features(DrmFeatures::MODESET) {
+                    if !self.contain_features(DrmFeatures::MODESET) {
                         return_errno!(Errno::EOPNOTSUPP);
                     }
 
@@ -817,7 +847,7 @@ impl FileIo for DrmFile {
                     Ok(0)
                 }
                 cmd @ DrmIoctlModeDirtyFb => {
-                    if !self.get_drm_device().contain_features(DrmFeatures::MODESET) {
+                    if !self.contain_features(DrmFeatures::MODESET) {
                         return_errno!(Errno::EOPNOTSUPP);
                     }
                     let dirty_cmd: DrmModeFbDirtyCmd = cmd.read()?;
@@ -828,7 +858,7 @@ impl FileIo for DrmFile {
                     Ok(0)
                 }
                 cmd @ DrmIoctlModeCreateDumb => {
-                    if !self.get_drm_device().contain_features(DrmFeatures::MODESET) {
+                    if !self.contain_features(DrmFeatures::MODESET) {
                         return_errno!(Errno::EOPNOTSUPP);
                     }
 
@@ -843,12 +873,9 @@ impl FileIo for DrmFile {
                     let dev = self.get_drm_device();
 
                     let gem_object = dev.create_dumb(&mut args, memfd_allocator_fn)?;
-                    let handle = self.next_gem_handle();
                     args.pitch = gem_object.pitch();
                     args.size = gem_object.size();
-                    args.handle = handle;
-
-                    self.add_gem(handle, gem_object);
+                    args.handle = self.add_gem(gem_object)?;
 
                     cmd.write(&args)?;
 
@@ -856,7 +883,7 @@ impl FileIo for DrmFile {
                 }
                 cmd @ DrmIoctlModeMapDumb => {
                     log::error!("[kernel] DrmIoctlModeMapDumb");
-                    if !self.get_drm_device().contain_features(DrmFeatures::MODESET) {
+                    if !self.contain_features(DrmFeatures::MODESET) {
                         return_errno!(Errno::EOPNOTSUPP);
                     }
 
@@ -875,7 +902,7 @@ impl FileIo for DrmFile {
                 }
                 cmd @ DrmIoctlModeDestroyDumb => {
                     log::error!("[kernel] DrmIoctlModeDestroyDumb");
-                    if !self.get_drm_device().contain_features(DrmFeatures::MODESET) {
+                    if !self.contain_features(DrmFeatures::MODESET) {
                         return_errno!(Errno::EOPNOTSUPP);
                     }
 
@@ -888,16 +915,11 @@ impl FileIo for DrmFile {
 
                     let args: DrmModeDestroyDumb = cmd.read()?;
 
-                    if let Some(gem_object) = self.remove_gem(args.handle) {
-                        gem_object.release()?;
-                    } else {
-                        return_errno!(Errno::ENOENT);
-                    }
-
+                    self.destroy_gem(args.handle)?;
                     Ok(0)
                 }
                 cmd @ DrmIoctlModeGetPlaneResources => {
-                    if !self.get_drm_device().contain_features(DrmFeatures::MODESET) {
+                    if !self.contain_features(DrmFeatures::MODESET) {
                         return_errno!(Errno::EOPNOTSUPP);
                     }
 
@@ -926,7 +948,7 @@ impl FileIo for DrmFile {
                     Ok(0)
                 }
                 cmd @ DrmIoctlModeGetPlane => {
-                    if !self.get_drm_device().contain_features(DrmFeatures::MODESET) {
+                    if !self.contain_features(DrmFeatures::MODESET) {
                         return_errno!(Errno::EOPNOTSUPP);
                     }
 
@@ -952,7 +974,7 @@ impl FileIo for DrmFile {
                 }
                 cmd @ DrmIoctlModeAddFB2 => {
                     log::error!("[kernel] DrmIoctlModeAddFB2");
-                    if !self.get_drm_device().contain_features(DrmFeatures::MODESET) {
+                    if !self.contain_features(DrmFeatures::MODESET) {
                         return_errno!(Errno::EOPNOTSUPP);
                     }
                     let mut fb_cmd: DrmModeFbCmd2 = cmd.read()?;
@@ -987,7 +1009,7 @@ impl FileIo for DrmFile {
                     Ok(0)
                 }
                 cmd @ DrmIoctlModeObjectGetProps => {
-                    if !self.get_drm_device().contain_features(DrmFeatures::MODESET) {
+                    if !self.contain_features(DrmFeatures::MODESET) {
                         return_errno!(Errno::EOPNOTSUPP);
                     }
 
@@ -1026,8 +1048,8 @@ impl FileIo for DrmFile {
                     return_errno!(Errno::ENXIO);
                 }
                 cmd @ DrmIoctlModeAtomic => {
-                    if !self.get_drm_device().contain_features(DrmFeatures::ATOMIC)
-                        || !self.get_drm_device().contain_features(DrmFeatures::MODESET)
+                    if !self.contain_features(DrmFeatures::ATOMIC)
+                        || !self.contain_features(DrmFeatures::MODESET)
                         || !self.atomic.load(Ordering::Relaxed)
                     {
                         return_errno!(Errno::EOPNOTSUPP);
@@ -1091,7 +1113,7 @@ impl FileIo for DrmFile {
                     Ok(0)
                 }
                 cmd @ DrmIoctlModeCreatePropBlob => {
-                    if !self.get_drm_device().contain_features(DrmFeatures::MODESET) {
+                    if !self.contain_features(DrmFeatures::MODESET) {
                         return_errno!(Errno::EOPNOTSUPP);
                     }
 
@@ -1108,7 +1130,7 @@ impl FileIo for DrmFile {
                     Ok(0)
                 }
                 cmd @ DrmIoctlModeDestroyPropBlob => {
-                    if !self.get_drm_device().contain_features(DrmFeatures::MODESET) {
+                    if !self.contain_features(DrmFeatures::MODESET) {
                         return_errno!(Errno::EOPNOTSUPP);
                     }
 
@@ -1124,11 +1146,70 @@ impl FileIo for DrmFile {
                     Ok(0)
                 }
                 cmd @ DrmIoctlSyncobjCreate => {
-                    if !self.get_drm_device().contain_features(DrmFeatures::SYNCOBJ) {
+                    if !self.contain_features(DrmFeatures::SYNCOBJ) {
                         return_errno!(Errno::EOPNOTSUPP);
                     }
-                    let _args: DrmSyncobjCreate = cmd.read()?;
+                    let mut args: DrmSyncobjCreate = cmd.read()?;
+                    args.handle = self.create_syncobj()?;
+                    cmd.write(&args)?;
 
+                    Ok(0)
+                }
+                cmd @ DrmIoctlSyncobjDestroy => {
+                    if !self.contain_features(DrmFeatures::SYNCOBJ) {
+                        return_errno!(Errno::EOPNOTSUPP);
+                    }
+                    let args: DrmSyncobjDestroy = cmd.read()?;
+                    self.destroy_syncobj(args.handle)?;
+
+                    Ok(0)
+                }
+                cmd @ DrmIoctlSyncobjWait => {
+                    if !self.contain_features(DrmFeatures::SYNCOBJ) {
+                        return_errno!(Errno::EOPNOTSUPP);
+                    }
+                    let args: DrmSyncobjWait = cmd.read()?;
+                    let flags = DrmSyncobjWaitFlags::from_bits(args.flags).ok_or(Errno::EINVAL)?;
+
+                    // Linux returns success for an empty wait list.
+                    if args.count_handles == 0 {
+                        cmd.write(&args)?;
+                        return Ok(0);
+                    }
+
+                    let handles: Vec<u32> =
+                        read_from_user(args.handles as usize, args.count_handles as usize)?;
+                    for handle in handles {
+                        let syncobj = self.lookup_syncobj(handle).ok_or(Errno::ENOENT)?;
+
+                        if flags.contains(DrmSyncobjWaitFlags::WAIT_FOR_SUBMIT) {
+                            // Ok(syncobj.binary_point_or_create())
+                        } else {
+                            // syncobj.binary_point().ok_or(Errno::EINVAL)?;
+                        }
+                    }
+
+                    Ok(0)
+                }
+                cmd @ DrmIoctlSyncobjReset => {
+                    if !self.contain_features(DrmFeatures::SYNCOBJ) {
+                        return_errno!(Errno::EOPNOTSUPP);
+                    }
+                    let args: DrmSyncobjArray = cmd.read()?;
+
+                    Ok(0)
+                }
+                cmd @ DrmIoctlSyncobjSignal => {
+                    if !self.contain_features(DrmFeatures::SYNCOBJ) {
+                        return_errno!(Errno::EOPNOTSUPP);
+                    }
+                    let args: DrmSyncobjArray = cmd.read()?;
+
+                    Ok(0)
+                }
+                cmd @ DrmIoctlVirtGpuExecBuffer => {
+                    let user_data: VirtGpuExecBuffer = cmd.read()?;
+                    
                     Ok(0)
                 }
                 _ => {

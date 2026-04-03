@@ -451,3 +451,47 @@ pub struct DrmSyncobjCreate {
     pub handle: u32,
     pub flags: u32,
 }
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod)]
+pub struct DrmSyncobjDestroy {
+    pub handle: u32,
+    pub pad: u32,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod)]
+pub struct DrmSyncobjWait {
+    pub handles: u64,
+    pub timeout_nsec: u64,
+    pub count_handles: u32,
+    pub flags: u32,
+    pub first_signaled: u32,
+    pub pad: u32,
+    pub deadline_nsec: u64,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod)]
+pub struct DrmSyncobjArray {
+    pub handles: u64,
+    pub count_handles: u32,
+    pub pad: u32,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod)]
+pub struct VirtGpuExecBuffer {
+    pub flags: u32,
+    pub size: u32,
+    pub command: u64,
+    pub bo_handles: u64,
+    pub num_bo_handles: u32,
+    pub fence_fd: i32,
+    pub ring_idx: u32,
+    pub syncobj_stride: u32,
+    pub num_in_syncobjs: u32,
+    pub num_out_syncobjs: u32,
+    pub in_syncobjs: u64,
+    pub out_syncobjs: u64,
+}

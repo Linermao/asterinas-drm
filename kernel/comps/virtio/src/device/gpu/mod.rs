@@ -241,3 +241,11 @@ pub struct VirtioGpuSetScanout {
     pub scanout_id: u32,
     pub resource_id: u32,
 }
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod)]
+pub struct VirtGpuExecBufferSyncobj {
+    pub handle: u32,
+    pub flags: u32,
+    pub point: u64,
+}

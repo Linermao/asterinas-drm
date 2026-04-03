@@ -147,3 +147,14 @@ drm_ioc!(DrmIoctlModeDestroyPropBlob,   DRM_IOCTL_MODE_DESTROYPROPBLOB,     b'd'
     DrmIoctlFlags::ANY);
 drm_ioc!(DrmIoctlSyncobjCreate,         DRM_IOCTL_SYNCOBJ_CREATE,           b'd', 0xbf, InOutData<DrmSyncobjCreate>,
     DrmIoctlFlags::ANY);
+drm_ioc!(DrmIoctlSyncobjDestroy,        DRM_IOCTL_SYNCOBJ_DESTROY,          b'd', 0xc0, InOutData<DrmSyncobjDestroy>,
+    DrmIoctlFlags::ANY);
+drm_ioc!(DrmIoctlSyncobjWait,           DRM_IOCTL_SYNCOBJ_WAIT,             b'd', 0xc3, InOutData<DrmSyncobjWait>,
+    DrmIoctlFlags::ANY);
+drm_ioc!(DrmIoctlSyncobjReset,          DRM_IOCTL_SYNCOBJ_RESET,            b'd', 0xc4, InOutData<DrmSyncobjArray>,
+    DrmIoctlFlags::ANY);
+drm_ioc!(DrmIoctlSyncobjSignal,         DRM_IOCTL_SYNCOBJ_SIGNAL,           b'd', 0xc5, InOutData<DrmSyncobjArray>,
+    DrmIoctlFlags::ANY);
+// TODO: special device ioctl
+drm_ioc!(DrmIoctlVirtGpuExecBuffer,     DRM_IOCTL_VIRTGPU_EXECBUFFER,       b'd', 0x42, InOutData<VirtGpuExecBuffer>,
+    DrmIoctlFlags::ANY);

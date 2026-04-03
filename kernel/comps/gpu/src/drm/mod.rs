@@ -5,6 +5,7 @@ use ostd::sync::Mutex;
 use crate::drm::{atomic::DrmAtomicOps, gem::DrmGemOps, kms::DrmKmsOps, objects::DrmObjects};
 
 pub mod atomic;
+pub mod fence;
 pub mod drm_modes;
 pub mod gem;
 pub mod ioctl;

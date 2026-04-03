@@ -22,7 +22,7 @@ impl AnyConsoleDevice for DummyFramebufferConsole {
     }
 
     fn set_mode(&self, _mode: ConsoleMode) -> bool {
-        false
+        true
     }
 
     fn mode(&self) -> Option<ConsoleMode> {

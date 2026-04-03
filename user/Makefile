@@ -13,6 +13,7 @@ all:
 	gcc -static ./simpletest/get_resource.c $(UTIL_SRCS) -o build/get_resource $(FLAGS)
 	gcc -static ./simpletest/double_framebuffer.c $(UTIL_SRCS) -o build/double_framebuffer $(FLAGS)
 	gcc -static ./simpletest/resources_test.c $(UTIL_SRCS) -o build/resources_test $(FLAGS)
+	gcc -static ./simpletest/syncobj.c $(UTIL_SRCS) -o build/syncobj $(FLAGS)
 	gcc -static ./page_flip/page_flip.c $(UTIL_SRCS) -o build/page_flip $(FLAGS)
 	gcc -static ./page_flip/test_vblank.c $(UTIL_SRCS) -o build/test_vblank $(FLAGS)
 	gcc -static ./page_flip/vsync.c $(UTIL_SRCS) -o build/vsync $(FLAGS)
