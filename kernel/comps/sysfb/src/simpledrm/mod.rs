@@ -6,7 +6,7 @@ use aster_gpu::drm::{
     atomic::{DrmAtomicOps, DrmAtomicPendingState, helper::DrmAtomicHelper},
     drm_modes::DrmDisplayMode,
     gem::{DrmGemBackend, DrmGemObject, DrmGemOps, MemfdAllocatorType},
-    ioctl::{DrmModeCreateDumb, DrmModeCrtc, DrmModeCrtcPageFlip, DrmModeFbCmd2},
+    ioctl::{DrmIoctlOps, DrmModeCreateDumb, DrmModeCrtc, DrmModeCrtcPageFlip, DrmModeFbCmd2},
     kms::{
         DrmKmsOps,
         vblank::{DrmVblankState, PageFlipEvent, VblankCallback},
@@ -173,6 +173,10 @@ impl DrmGemOps for SimpleDrmDevice {
 
         Ok(handle)
     }
+}
+
+impl DrmIoctlOps for SimpleDrmDevice {
+    
 }
 
 impl DrmDevice for SimpleDrmDevice {

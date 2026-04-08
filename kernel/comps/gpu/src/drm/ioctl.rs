@@ -1,9 +1,80 @@
-use int_to_c_enum::TryFromInt;
+use alloc::{sync::Arc, vec, vec::Vec};
+use core::fmt::Debug;
 
-use crate::drm::{
-    drm_modes::{DrmFormat, DrmModeModeInfo},
-    objects::property::DRM_PROP_NAME_LEN,
+use int_to_c_enum::TryFromInt;
+use ostd_pod::Pod;
+
+use crate::{
+    drm::{
+        DrmError, drm_modes::{DrmFormat, DrmModeModeInfo}, fence::DrmFence, gem::DrmGemObject, objects::property::DRM_PROP_NAME_LEN, syncobj::DrmSyncobj
+    },
+    ostd_pod::IntoBytes,
 };
+
+#[derive(Debug)]
+pub struct DrmRawIoctl {
+    cmd: u32,
+    arg: usize,
+}
+
+impl DrmRawIoctl {
+    pub fn cmd(&self) -> u32 {
+        self.cmd
+    }
+
+    pub fn arg(&self) -> usize {
+        self.arg
+    }
+}
+
+pub trait DrmIoctlCtx: Send + Sync {
+    fn read_bytes(&self, user_addr: usize, buf: &mut [u8]) -> Result<(), DrmError>;
+    fn write_bytes(&self, user_addr: usize, buf: &[u8]) -> Result<(), DrmError>;
+
+    fn ioctl_lookup_gem(&self, handle: u32) -> Option<Arc<dyn DrmGemObject>>;
+    fn ioctl_lookup_syncobj(&self, handle: u32) -> Option<Arc<DrmSyncobj>>;
+
+    fn import_sync_file(&self, fd: i32) -> Result<Arc<dyn DrmFence>, DrmError>;
+    fn export_sync_file(&self, fence: Arc<dyn DrmFence>) -> Result<i32, DrmError>;
+}
+
+impl dyn DrmIoctlCtx + '_ {
+    pub fn read_val<T: Pod>(&self, user_addr: usize) -> Result<T, DrmError> {
+        let mut value = T::new_zeroed();
+        self.read_bytes(user_addr, value.as_mut_bytes())?;
+        Ok(value)
+    }
+    pub fn write_val<T: Pod>(&self, user_addr: usize, value: &T) -> Result<(), DrmError> {
+        self.write_bytes(user_addr, value.as_bytes())
+    }
+    pub fn read_slice<T: Pod>(&self, user_addr: usize, count: usize) -> Result<Vec<T>, DrmError> {
+        if count == 0 {
+            return Ok(Vec::new());
+        }
+        let total_bytes = size_of::<T>().checked_mul(count).ok_or(DrmError::Invalid)?;
+        let mut values = vec![T::new_zeroed(); count];
+        let bytes = values.as_mut_bytes();
+        debug_assert_eq!(bytes.len(), total_bytes);
+        self.read_bytes(user_addr, bytes)?;
+        Ok(values)
+    }
+}
+
+impl DrmRawIoctl {
+    pub fn new(cmd: u32, arg: usize) -> Self {
+        Self { cmd, arg }
+    }
+}
+
+pub trait DrmIoctlOps: Debug + Send + Sync {
+    fn handle_device_ioctls(
+        &self,
+        _raw_ioctl: DrmRawIoctl,
+        _ctx: &dyn DrmIoctlCtx,
+    ) -> Result<i32, DrmError> {
+        Err(DrmError::NotFound)
+    }
+}
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod)]
@@ -477,21 +548,4 @@ pub struct DrmSyncobjArray {
     pub handles: u64,
     pub count_handles: u32,
     pub pad: u32,
-}
-
-#[repr(C)]
-#[derive(Debug, Clone, Copy, Pod)]
-pub struct VirtGpuExecBuffer {
-    pub flags: u32,
-    pub size: u32,
-    pub command: u64,
-    pub bo_handles: u64,
-    pub num_bo_handles: u32,
-    pub fence_fd: i32,
-    pub ring_idx: u32,
-    pub syncobj_stride: u32,
-    pub num_in_syncobjs: u32,
-    pub num_out_syncobjs: u32,
-    pub in_syncobjs: u64,
-    pub out_syncobjs: u64,
 }

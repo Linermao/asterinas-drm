@@ -20,7 +20,7 @@ pub trait Device: Send + Sync + 'static {
     fn id(&self) -> DeviceId;
 
     /// Returns the path where the device should appear in devtmpfs (usually under `/dev`), if any.
-    fn devtmpfs_path(&self) -> Option<String>;
+    fn devtmpfs_path(&self) -> Option<String>;  
 
     /// Opens the device, returning a file-like object that the userspace can interact with by
     /// doing I/O.

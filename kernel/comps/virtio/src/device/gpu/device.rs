@@ -10,7 +10,10 @@ use aster_gpu::drm::{
     atomic::{DrmAtomicOps, DrmAtomicPendingState, helper::DrmAtomicHelper},
     drm_modes::DrmDisplayMode,
     gem::{DrmGemObject, DrmGemOps, MemfdAllocatorType},
-    ioctl::{DrmModeCreateDumb, DrmModeCrtc, DrmModeCrtcPageFlip, DrmModeFbCmd2},
+    ioctl::{
+        DrmIoctlCtx, DrmIoctlOps, DrmModeCreateDumb, DrmModeCrtc, DrmModeCrtcPageFlip,
+        DrmModeFbCmd2, DrmRawIoctl,
+    },
     kms::{
         DrmKmsOps,
         vblank::{PageFlipEvent, VblankCallback},
@@ -37,13 +40,15 @@ use crate::{
     device::{
         VirtioDeviceError,
         gpu::{
-            GpuFeatures, VirtioGpuCmd, VirtioGpuConfig, VirtioGpuCtrlHdr, VirtioGpuDisplayOne,
-            VirtioGpuFormat, VirtioGpuGetCapsetInfo, VirtioGpuGetEdid, VirtioGpuMemEntry,
-            VirtioGpuQueue, VirtioGpuRect, VirtioGpuResourceAttachBacking,
-            VirtioGpuResourceCreate2d, VirtioGpuResourceDetachBacking, VirtioGpuResourceFlush,
-            VirtioGpuResourceUnref, VirtioGpuRespCapsetInfo, VirtioGpuRespDisplayInfo,
-            VirtioGpuRespEdid, VirtioGpuRespOk, VirtioGpuSetScanout, VirtioGpuTransferToHost2d,
+            GpuFeatures, VirtGpuExecBuffer, VirtGpuExecBufferSyncobj, VirtioGpuCmd,
+            VirtioGpuConfig, VirtioGpuCtrlHdr, VirtioGpuDisplayOne, VirtioGpuFormat,
+            VirtioGpuGetCapsetInfo, VirtioGpuGetEdid, VirtioGpuMemEntry, VirtioGpuQueue,
+            VirtioGpuRect, VirtioGpuResourceAttachBacking, VirtioGpuResourceCreate2d,
+            VirtioGpuResourceDetachBacking, VirtioGpuResourceFlush, VirtioGpuResourceUnref,
+            VirtioGpuRespCapsetInfo, VirtioGpuRespDisplayInfo, VirtioGpuRespEdid, VirtioGpuRespOk,
+            VirtioGpuSetScanout, VirtioGpuTransferToHost2d,
             gem::VirtioGemObject,
+            ioctl::{DRM_IOCTL_VIRTGPU_EXECBUFFER, VirtGpuExecBufferFlags},
             output::{VirtioGpuCrtc, VirtioGpuFramebuffer, virtio_gpu_output_init},
         },
     },
@@ -424,6 +429,35 @@ impl DrmAtomicOps for GpuDevice {
         pending_state: &mut DrmAtomicPendingState,
     ) -> Result<(), DrmError> {
         self.atomic_helper_commit_tail(pending_state)
+    }
+}
+
+impl DrmIoctlOps for GpuDevice {
+    fn handle_device_ioctls(
+        &self,
+        raw_ioctl: DrmRawIoctl,
+        ctx: &dyn DrmIoctlCtx,
+    ) -> Result<i32, DrmError> {
+        match raw_ioctl.cmd() {
+            DRM_IOCTL_VIRTGPU_EXECBUFFER => {
+                log::error!("[virtio] yesyesyesyeyseys");
+                let args: VirtGpuExecBuffer = ctx.read_val(raw_ioctl.arg())?;
+                let flags =
+                    VirtGpuExecBufferFlags::from_bits(args.flags).ok_or(DrmError::Invalid)?;
+
+                if flags.contains(VirtGpuExecBufferFlags::FENCE_FD_IN) {
+                    let fence = ctx.import_sync_file(args.fence_fd)?;
+                }
+                
+
+                if !self.has_virgl_3d() {
+                    return Err(DrmError::NotSupported);
+                }
+            }
+            _ => return Err(DrmError::NotFound),
+        }
+
+        Ok(0)
     }
 }
 

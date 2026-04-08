@@ -2,9 +2,10 @@ use alloc::sync::Arc;
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use aster_gpu::drm::{
-    DrmDevice, DrmDeviceCaps, DrmFeatures,
+    DrmDevice, DrmDeviceCaps, DrmError, DrmFeatures,
     atomic::{DrmAtomicFlags, DrmAtomicPendingState},
     drm_modes::DrmModeModeInfo,
+    fence::DrmFence,
     gem::DrmGemObject,
     ioctl::*,
     kms::vblank::{PageFlipEvent, VblankCallback},
@@ -165,6 +166,36 @@ impl DrmFile {
             .remove(&handle)
             .ok_or(Errno::EBUSY)?;
         Ok(())
+    }
+}
+
+impl DrmIoctlCtx for DrmFile {
+    fn read_bytes(&self, user_addr: usize, buf: &mut [u8]) -> core::result::Result<(), DrmError> {
+        current_userspace!()
+            .read_bytes(user_addr, buf)
+            .map_err(|_| DrmError::Invalid)
+    }
+
+    fn write_bytes(&self, user_addr: usize, buf: &[u8]) -> core::result::Result<(), DrmError> {
+        current_userspace!()
+            .write_bytes(user_addr, buf)
+            .map_err(|_| DrmError::Invalid)
+    }
+
+    fn ioctl_lookup_gem(&self, handle: u32) -> Option<Arc<dyn DrmGemObject>> {
+        self.lookup_gem(handle)
+    }
+
+    fn ioctl_lookup_syncobj(&self, handle: u32) -> Option<Arc<DrmSyncobj>> {
+        self.lookup_syncobj(handle)
+    }
+
+    fn import_sync_file(&self, fd: i32) -> core::result::Result<Arc<dyn DrmFence>, DrmError> {
+        todo!()
+    }
+
+    fn export_sync_file(&self, fence: Arc<dyn DrmFence>) -> core::result::Result<i32, DrmError> {
+        todo!()
     }
 }
 
@@ -1207,14 +1238,23 @@ impl FileIo for DrmFile {
 
                     Ok(0)
                 }
-                cmd @ DrmIoctlVirtGpuExecBuffer => {
-                    let user_data: VirtGpuExecBuffer = cmd.read()?;
-                    
-                    Ok(0)
-                }
                 _ => {
-                    log::error!("[kernel] the ioctl {:?} command is unknown", raw_ioctl);
-                    return_errno_with_message!(Errno::ENOTTY, "the ioctl command is unknown");
+                    let dev = self.get_drm_device();
+                    let raw = DrmRawIoctl::new(raw_ioctl.cmd(), raw_ioctl.arg());
+                    let result = dev.handle_device_ioctls(raw, self);
+
+                    Ok(result.map_err(|err| {
+                        match err {
+                            aster_gpu::drm::DrmError::NotFound => {
+                                log::error!(
+                                    "[kernel] the ioctl {:?} command is unknown",
+                                    raw_ioctl
+                                );
+                            }
+                            _ => {}
+                        }
+                        err
+                    })?)
                 }
             }
         )

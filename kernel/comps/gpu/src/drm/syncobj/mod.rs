@@ -1,4 +1,7 @@
+use alloc::sync::Arc;
 use ostd::sync::Mutex;
+
+use crate::drm::fence::DrmFence;
 
 bitflags::bitflags! {
     pub struct DrmSyncobjCreateFlags: u32 {
@@ -30,25 +33,12 @@ bitflags::bitflags! {
 }
 
 #[derive(Debug)]
-struct DrmSyncobjState {
-    is_signaled: bool,
-}
-
-impl DrmSyncobjState {
-    fn new() -> Self {
-        Self { is_signaled: false }
-    }
-}
-
-#[derive(Debug)]
 pub struct DrmSyncobj {
-    state: Mutex<DrmSyncobjState>,
+    fence: Mutex<Arc<dyn DrmFence>>,
 }
 
 impl DrmSyncobj {
     pub fn new() -> Self {
-        Self {
-            state: Mutex::new(DrmSyncobjState::new()),
-        }
+        todo!()
     }
 }

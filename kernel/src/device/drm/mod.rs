@@ -15,6 +15,7 @@ mod file;
 mod ioctl_defs;
 mod memfd;
 mod minor;
+mod syncobj;
 
 #[derive(Debug)]
 struct DrmVmaOffsetManager {

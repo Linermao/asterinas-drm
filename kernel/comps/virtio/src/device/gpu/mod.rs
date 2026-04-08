@@ -5,6 +5,7 @@ use crate::transport::{ConfigManager, VirtioTransport};
 pub(crate) mod device;
 pub(crate) mod gem;
 pub(crate) mod output;
+mod ioctl;
 
 #[repr(u16)]
 pub(crate) enum VirtioGpuQueue {
@@ -248,4 +249,22 @@ pub struct VirtGpuExecBufferSyncobj {
     pub handle: u32,
     pub flags: u32,
     pub point: u64,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod)]
+pub struct VirtGpuExecBuffer {
+    pub flags: u32,
+    pub size: u32,
+    pub command: u64,
+    pub bo_handles: u64,
+    pub num_bo_handles: u32,
+    pub fence_fd: i32,
+    pub ring_idx: u32,
+    pub syncobj_stride: u32,
+    // VirtioGpuExecBufferSyncobj
+    pub num_in_syncobjs: u32,
+    pub num_out_syncobjs: u32,
+    pub in_syncobjs: u64,
+    pub out_syncobjs: u64,
 }

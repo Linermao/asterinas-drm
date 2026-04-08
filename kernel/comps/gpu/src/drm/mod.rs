@@ -2,7 +2,7 @@ use core::{any::Any, fmt::Debug};
 
 use ostd::sync::Mutex;
 
-use crate::drm::{atomic::DrmAtomicOps, gem::DrmGemOps, kms::DrmKmsOps, objects::DrmObjects};
+use crate::drm::{atomic::DrmAtomicOps, gem::DrmGemOps, ioctl::DrmIoctlOps, kms::DrmKmsOps, objects::DrmObjects};
 
 pub mod atomic;
 pub mod fence;
@@ -56,7 +56,7 @@ bitflags::bitflags! {
     }
 }
 
-pub trait DrmDevice: DrmKmsOps + DrmAtomicOps + DrmGemOps + Debug + Any + Send + Sync {
+pub trait DrmDevice: DrmKmsOps + DrmAtomicOps + DrmGemOps + DrmIoctlOps + Debug + Any + Send + Sync {
     fn name(&self) -> &str;
     fn desc(&self) -> &str;
     fn date(&self) -> &str;

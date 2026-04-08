@@ -1,8 +1,10 @@
-/// Minimal in-kernel dma_fence-like abstraction.
-///
-/// This intentionally models only the essentials needed by syncobj import/
-/// export paths today: identity (context/seqno) and signaling state.
-struct DmaFence {
-    context: u64,
-    seqno: u64,
+use core::fmt::Debug;
+use crate::drm::DrmError;
+
+pub trait DrmFence: Debug + Send + Sync {
+    fn is_signaled(&self) -> bool;
+    fn wait(&self) -> Result<(), DrmError>;
+    fn signal(&self);
+    fn context(&self) -> u64;
+    fn seqno(&self) -> u64;
 }

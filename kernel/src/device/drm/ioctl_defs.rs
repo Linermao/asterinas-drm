@@ -155,6 +155,3 @@ drm_ioc!(DrmIoctlSyncobjReset,          DRM_IOCTL_SYNCOBJ_RESET,            b'd'
     DrmIoctlFlags::ANY);
 drm_ioc!(DrmIoctlSyncobjSignal,         DRM_IOCTL_SYNCOBJ_SIGNAL,           b'd', 0xc5, InOutData<DrmSyncobjArray>,
     DrmIoctlFlags::ANY);
-// TODO: special device ioctl
-drm_ioc!(DrmIoctlVirtGpuExecBuffer,     DRM_IOCTL_VIRTGPU_EXECBUFFER,       b'd', 0x42, InOutData<VirtGpuExecBuffer>,
-    DrmIoctlFlags::ANY);
