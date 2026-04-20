@@ -8,6 +8,7 @@ extern crate alloc;
 extern crate ostd_pod;
 
 mod device;
+mod kms;
 mod simpledrm;
 
 use alloc::{sync::Arc, vec::Vec};
@@ -15,6 +16,18 @@ use alloc::{sync::Arc, vec::Vec};
 use aster_framebuffer::FRAMEBUFFER;
 use component::{ComponentInitError, init_component};
 pub use device::{DrmDevice, DrmDeviceCaps, DrmFeatures};
+pub use kms::{
+    DrmKmsOps,
+    object::{
+        DrmKmsObject, DrmKmsObjectStore, DrmKmsObjectType,
+        builder::DrmKmsObjectBuilder,
+        connector::{DrmConnState, DrmConnStatus, DrmConnType, DrmConnector, DrmConnectorSnapshot},
+        crtc::{DrmCrtc, DrmCrtcSnapshot, DrmCrtcState},
+        display::{DrmDisplayInfo, DrmDisplayMode, DrmModeModeInfo},
+        encoder::{DrmEncoder, DrmEncoderState, DrmEncoderType},
+        plane::{DrmPlane, DrmPlaneState, DrmPlaneType},
+    },
+};
 use ostd::sync::Mutex;
 use spin::Once;
 
@@ -101,8 +114,12 @@ fn component_init() -> Result<(), ComponentInitError> {
     COMPONENT.call_once(|| component);
 
     if FRAMEBUFFER.get().is_some() {
-        let device = Arc::new(SimpleDrmDevice::new());
-        register_drm_device(device)?;
+        match SimpleDrmDevice::new() {
+            Ok(device) => register_drm_device(Arc::new(device))?,
+            Err(error) => {
+                ostd::warn!("[kernel] DRM: failed to initialize simpledrm: {:?}", error);
+            }
+        }
     }
 
     Ok(())
