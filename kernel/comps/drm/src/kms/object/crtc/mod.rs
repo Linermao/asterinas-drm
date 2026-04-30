@@ -100,7 +100,7 @@ impl DrmCrtc {
     pub fn cursor_plane_id(&self) -> Option<KmsObjectId> {
         self.cursor_plane_id
     }
-    
+
     pub fn properties(&self) -> &DrmKmsObjectProp {
         &self.properties
     }

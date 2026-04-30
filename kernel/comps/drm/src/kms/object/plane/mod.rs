@@ -130,7 +130,7 @@ impl DrmPlane {
     pub fn format_types(&self) -> &[DrmDisplayFormat] {
         &self.format_types
     }
-    
+
     pub fn properties(&self) -> &DrmKmsObjectProp {
         &self.properties
     }

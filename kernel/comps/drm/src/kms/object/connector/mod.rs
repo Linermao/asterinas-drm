@@ -177,12 +177,12 @@ impl DrmConnector {
         self.possible_encoders
     }
 
-    pub fn state_snapshot(&self) -> DrmConnectorSnapshot {
-        self.state.lock().snapshot()
-    }
-    
     pub fn properties(&self) -> &DrmKmsObjectProp {
         &self.properties
+    }
+
+    pub fn state_snapshot(&self) -> DrmConnectorSnapshot {
+        self.state.lock().snapshot()
     }
 }
 
