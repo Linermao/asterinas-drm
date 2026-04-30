@@ -5,10 +5,19 @@ use core::fmt::Debug;
 
 use ostd::sync::Mutex;
 
-use crate::kms::object::{
-    DrmKmsObject, DrmKmsObjectCast, KmsObjectId, KmsObjectIndex,
-    display::{DrmDisplayInfo, DrmDisplayMode},
+use crate::{
+    DrmError,
+    kms::object::{
+        DrmKmsObject,
+        DrmKmsObjectCast,
+        KmsObjectId,
+        KmsObjectIndex,
+        display::{DrmDisplayInfo, DrmDisplayMode},
+        property::DrmKmsObjectProp,
+    },
 };
+
+pub mod property;
 
 #[repr(u32)]
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
@@ -103,10 +112,16 @@ pub struct DrmConnector {
     type_index: u32,
     state: Mutex<DrmConnState>,
     possible_encoders: u32,
+    properties: DrmKmsObjectProp,
 }
 
 impl DrmConnector {
-    pub fn new(type_: DrmConnType, type_index: u32, possible_encoders: &[KmsObjectIndex]) -> Self {
+    pub fn new(
+        type_: DrmConnType,
+        type_index: u32,
+        possible_encoders: &[KmsObjectIndex],
+        properties: DrmKmsObjectProp,
+    ) -> Self {
         let mut possible_encoders_mask = 0;
         for &index in possible_encoders {
             possible_encoders_mask |= 1 << index;
@@ -117,6 +132,7 @@ impl DrmConnector {
             type_index,
             state: Mutex::new(DrmConnState::default()),
             possible_encoders: possible_encoders_mask,
+            properties,
         }
     }
 
@@ -142,6 +158,10 @@ impl DrmConnector {
             subpixel: state.display_info.subpixel_order(),
             encoder_id: state.encoder_id,
         }
+    }
+
+    pub fn properties(&self) -> &DrmKmsObjectProp {
+        &self.properties
     }
 
     pub fn possible_encoders(&self) -> u32 {
