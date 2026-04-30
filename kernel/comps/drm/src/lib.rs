@@ -38,6 +38,10 @@ pub use kms::{
         crtc::{DrmCrtc, DrmCrtcSnapshot, DrmCrtcState},
         encoder::{DrmEncoder, DrmEncoderSnapshot, DrmEncoderState, DrmEncoderType},
         plane::{DrmPlane, DrmPlaneSnapshot, DrmPlaneState, DrmPlaneType},
+        property::{
+            DRM_PROP_NAME_LEN, DrmKmsObjectProp, DrmProperty, DrmPropertyEnum, DrmPropertyFlags,
+            DrmPropertyKind, DrmPropertySpec, blob::DrmPropertyBlob,
+        },
     },
 };
 use ostd::sync::Mutex;

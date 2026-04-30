@@ -6,8 +6,9 @@ use ostd::sync::Mutex;
 
 use crate::{
     display::DrmDisplayMode,
-    kms::object::{DrmKmsObject, DrmKmsObjectCast, KmsObjectId},
+    kms::object::{DrmKmsObject, DrmKmsObjectCast, KmsObjectId, property::DrmKmsObjectProp},
 };
+pub mod property;
 
 #[derive(Debug, Default)]
 pub struct DrmCrtcState {
@@ -65,6 +66,7 @@ pub struct DrmCrtc {
     gamma_size: u32,
     primary_plane_id: KmsObjectId,
     cursor_plane_id: Option<KmsObjectId>,
+    properties: DrmKmsObjectProp,
 }
 
 impl DrmCrtc {
@@ -72,12 +74,14 @@ impl DrmCrtc {
         gamma_size: u32,
         primary_plane_id: KmsObjectId,
         cursor_plane_id: Option<KmsObjectId>,
+        properties: DrmKmsObjectProp,
     ) -> Self {
         Self {
             state: Mutex::new(DrmCrtcState::default()),
             gamma_size,
             primary_plane_id,
             cursor_plane_id,
+            properties,
         }
     }
 
@@ -95,6 +99,10 @@ impl DrmCrtc {
 
     pub fn cursor_plane_id(&self) -> Option<KmsObjectId> {
         self.cursor_plane_id
+    }
+    
+    pub fn properties(&self) -> &DrmKmsObjectProp {
+        &self.properties
     }
 
     pub fn state_snapshot(&self) -> DrmCrtcSnapshot {

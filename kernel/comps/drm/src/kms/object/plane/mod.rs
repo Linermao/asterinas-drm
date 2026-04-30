@@ -8,8 +8,12 @@ use ostd::sync::Mutex;
 use crate::{
     display::DrmDisplayFormat,
     geometry::DrmRectU32,
-    kms::object::{DrmKmsObject, DrmKmsObjectCast, KmsObjectId, KmsObjectIndex},
+    kms::object::{
+        DrmKmsObject, DrmKmsObjectCast, KmsObjectId, KmsObjectIndex, property::DrmKmsObjectProp,
+    },
 };
+
+pub mod property;
 
 #[repr(u32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,6 +91,7 @@ pub struct DrmPlane {
     state: Mutex<DrmPlaneState>,
     possible_crtcs: u32,
     format_types: Vec<DrmDisplayFormat>,
+    properties: DrmKmsObjectProp,
 }
 
 impl DrmPlane {
@@ -94,6 +99,7 @@ impl DrmPlane {
         type_: DrmPlaneType,
         format_types: Vec<DrmDisplayFormat>,
         possible_crtcs: &[KmsObjectIndex],
+        properties: DrmKmsObjectProp,
     ) -> Self {
         let mut possible_crtcs_mask = 0;
         for &index in possible_crtcs {
@@ -105,6 +111,7 @@ impl DrmPlane {
             state: Mutex::new(DrmPlaneState::default()),
             possible_crtcs: possible_crtcs_mask,
             format_types,
+            properties,
         }
     }
 
@@ -122,6 +129,10 @@ impl DrmPlane {
 
     pub fn format_types(&self) -> &[DrmDisplayFormat] {
         &self.format_types
+    }
+    
+    pub fn properties(&self) -> &DrmKmsObjectProp {
+        &self.properties
     }
 
     pub fn state_snapshot(&self) -> DrmPlaneSnapshot {
