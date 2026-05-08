@@ -8,6 +8,7 @@ extern crate alloc;
 extern crate ostd_pod;
 
 mod device;
+mod gem;
 mod kms;
 mod simpledrm;
 
@@ -16,6 +17,10 @@ use alloc::{sync::Arc, vec::Vec};
 use aster_framebuffer::FRAMEBUFFER;
 use component::{ComponentInitError, init_component};
 pub use device::{DrmDevice, DrmDeviceCaps, DrmFeatures};
+pub use gem::{
+    object::{DrmGemMapPage, DrmGemObject}, DrmGemOps, DrmIoctlGemCtx,
+    vma_manager::{DrmVmaOffsetManager, DrmVmaOffsetNode},
+};
 pub use kms::{
     DrmKmsOps,
     object::{
