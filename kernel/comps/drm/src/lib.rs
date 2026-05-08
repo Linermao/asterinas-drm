@@ -18,7 +18,8 @@ use aster_framebuffer::FRAMEBUFFER;
 use component::{ComponentInitError, init_component};
 pub use device::{DrmDevice, DrmDeviceCaps, DrmFeatures};
 pub use gem::{
-    object::{DrmGemMapPage, DrmGemObject}, DrmGemOps, DrmIoctlGemCtx,
+    DrmGemOps, DrmIoctlGemCtx,
+    object::{DrmGemMapPage, DrmGemObject},
     vma_manager::{DrmVmaOffsetManager, DrmVmaOffsetNode},
 };
 pub use kms::{
@@ -28,8 +29,9 @@ pub use kms::{
         builder::DrmKmsObjectBuilder,
         connector::{DrmConnState, DrmConnStatus, DrmConnType, DrmConnector, DrmConnectorSnapshot},
         crtc::{DrmCrtc, DrmCrtcSnapshot, DrmCrtcState},
-        display::{DrmDisplayInfo, DrmDisplayMode, DrmModeModeInfo},
+        display::{DrmDisplayFormat, DrmDisplayInfo, DrmDisplayMode, DrmModeModeInfo},
         encoder::{DrmEncoder, DrmEncoderState, DrmEncoderType},
+        framebuffer::{DRM_FORMAT_MAX_PLANES, DrmFramebuffer},
         plane::{DrmPlane, DrmPlaneState, DrmPlaneType},
         property::{
             DRM_PROP_NAME_LEN, DrmKmsObjectProp, DrmProperty, DrmPropertyEnum, DrmPropertyFlags,
