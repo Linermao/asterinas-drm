@@ -2,7 +2,7 @@
 
 use core::fmt::Debug;
 
-use crate::{DrmError, DrmRectU32};
+use crate::{DrmError, DrmRectU32, kms::DrmKmsOps};
 
 bitflags::bitflags! {
     pub struct DrmFeatures: u32 {
@@ -32,7 +32,7 @@ bitflags::bitflags! {
 /// while higher-level DRM operations are expected to be layered as
 /// dedicated operation traits.
 ///
-pub trait DrmDevice: Debug + Send + Sync {
+pub trait DrmDevice: DrmKmsOps + Debug + Send + Sync {
     fn name(&self) -> &str;
     fn desc(&self) -> &str;
     fn features(&self) -> &DrmFeatures;
