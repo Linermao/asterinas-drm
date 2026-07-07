@@ -3,7 +3,7 @@
 use core::sync::atomic::Ordering;
 
 use aster_drm::{
-    DrmConnector, DrmCrtc, DrmEncoder, DrmIoctlEventCtx, DrmKmsObject, DrmKmsObjectProp,
+    DrmConnector, DrmCrtc, DrmEncoder, DrmError, DrmIoctlEventCtx, DrmKmsObject, DrmKmsObjectProp,
     DrmKmsObjectType, DrmModeModeInfo, DrmPendingVblankEvent, DrmPlane, DrmProperty,
     DrmPropertyBlob, DrmPropertyFlags, DrmPropertyKind,
 };
@@ -631,7 +631,9 @@ impl DrmFile {
                 let objects = self.device().kms_objects().read();
                 let object_type =
                     DrmKmsObjectType::try_from(args.obj_type).map_err(|_| Errno::EINVAL)?;
-                let properties = objects.get_object_props(args.obj_id, object_type)?;
+                let properties = objects
+                    .get_object_props(args.obj_id, object_type)
+                    .ok_or(DrmError::NotFound)?;
                 self.visible_property_values(properties)?
             };
 

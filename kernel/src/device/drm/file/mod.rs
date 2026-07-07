@@ -2,11 +2,15 @@
 
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
-use aster_drm::{DrmDevice, DrmFeatures, DrmGemObject};
+use aster_drm::{
+    DrmDevice, DrmDevicePrivate, DrmError, DrmFeatures, DrmFence, DrmGemObject, DrmIoctlCommandCtx,
+    DrmSyncObj,
+};
 use hashbrown::HashMap;
 use ostd::mm::VmIo;
 
 use crate::{
+    context::current_userspace,
     device::drm::{
         DrmMinorType, file::kms::DrmFileEvent, has_current_sys_admin, ioctl::*, minor::DrmMinor,
     },
@@ -24,8 +28,12 @@ use crate::{
 };
 
 mod atomic;
-mod gem;
+pub(crate) mod gem;
 mod kms;
+mod sync;
+
+static DRM_MAGIC_ALLOC: AtomicU32 = AtomicU32::new(1);
+static DRM_MAGIC_TABLE: Mutex<BTreeSet<u32>> = Mutex::new(BTreeSet::new());
 
 #[derive(Debug, Default)]
 struct DrmFileCaps {
@@ -62,10 +70,40 @@ struct DrmFileAuthState {
     was_master: bool,
     /// Tracks legacy primary-node authentication state for this file.
     ///
-    /// Currently does not implement legacy auth ioctls
-    /// (`DRM_IOCTL_GET_MAGIC`/`DRM_IOCTL_AUTH_MAGIC`) to transition this flag.
+    /// This flag is also updated by legacy auth ioctls
+    /// (`DRM_IOCTL_GET_MAGIC`/`DRM_IOCTL_AUTH_MAGIC`).
     /// `is_authenticated()` also treats current master as authenticated.
     authenticated: bool,
+}
+
+impl DrmIoctlCommandCtx for DrmFile {
+    fn device_private(&self) -> Option<&dyn DrmDevicePrivate> {
+        self.device_private.as_deref()
+    }
+
+    fn export_fence(&self, fence: Arc<DrmFence>) -> core::result::Result<i32, DrmError> {
+        self.export_fence(fence)
+    }
+
+    fn import_fence(&self, fd: i32) -> core::result::Result<Arc<DrmFence>, DrmError> {
+        self.import_fence(fd)
+    }
+
+    fn lookup_syncobj(&self, handle: u32) -> core::result::Result<Arc<DrmSyncObj>, DrmError> {
+        self.lookup_syncobj(handle).map_err(|_| DrmError::NotFound)
+    }
+
+    fn read_user_bytes(&self, addr: usize, buf: &mut [u8]) -> core::result::Result<(), DrmError> {
+        current_userspace!()
+            .read_bytes(addr, buf)
+            .map_err(|_| DrmError::BadAddress)
+    }
+
+    fn write_user_bytes(&self, addr: usize, buf: &[u8]) -> core::result::Result<(), DrmError> {
+        current_userspace!()
+            .write_bytes(addr, buf)
+            .map_err(|_| DrmError::BadAddress)
+    }
 }
 
 /// Represents an open DRM file descriptor exposed to userspace.
@@ -98,11 +136,15 @@ pub(super) struct DrmFile {
     next_gem_handle: AtomicU32,
     gem_table: Mutex<HashMap<u32, Arc<dyn DrmGemObject>>>,
 
+    next_syncobj_handle: AtomicU32,
+    syncobj_table: Mutex<HashMap<u32, Arc<DrmSyncObj>>>,
+
     events: Arc<DrmFileEvent>,
+    device_private: Option<Box<dyn DrmDevicePrivate>>,
 }
 
 impl DrmFile {
-    pub(super) fn new(file_id: u32, minor: Arc<DrmMinor>) -> Self {
+    pub(super) fn new(file_id: u32, minor: Arc<DrmMinor>) -> Result<Self> {
         let owner_process_pid = Process::current().map_or(0, |process| process.pid());
         let is_master = minor.is_master(file_id);
 
@@ -112,7 +154,9 @@ impl DrmFile {
             authenticated: is_master,
         };
 
-        Self {
+        let device_private = minor.device().create_private()?;
+
+        Ok(Self {
             file_id,
             minor,
             caps: DrmFileCaps::default(),
@@ -121,8 +165,11 @@ impl DrmFile {
             framebuffer_ids: Mutex::new(Vec::new()),
             next_gem_handle: AtomicU32::new(1),
             gem_table: Mutex::new(HashMap::new()),
+            next_syncobj_handle: AtomicU32::new(1),
+            syncobj_table: Mutex::new(HashMap::new()),
             events: Arc::new(DrmFileEvent::new()),
-        }
+            device_private,
+        })
     }
 
     pub(super) fn is_master(&self) -> bool {
@@ -311,6 +358,29 @@ impl PerOpenFileOps for DrmFile {
         dispatch_drm_ioctl!(
             self,
             match raw_ioctl {
+                cmd @ DrmIoctlGetMagic => {
+                    let mut args = DrmAuth { magic: 0 };
+                    args.magic = DRM_MAGIC_ALLOC.fetch_add(1, Ordering::Relaxed);
+                    if args.magic == 0 {
+                        args.magic = DRM_MAGIC_ALLOC.fetch_add(1, Ordering::Relaxed);
+                    }
+
+                    DRM_MAGIC_TABLE.lock().insert(args.magic);
+                    cmd.write(&args)?;
+                    Ok(0)
+                }
+                cmd @ DrmIoctlAuthMagic => {
+                    let args: DrmAuth = cmd.read()?;
+                    let mut table = DRM_MAGIC_TABLE.lock();
+                    if !table.remove(&args.magic) {
+                        return_errno!(Errno::EINVAL);
+                    }
+                    drop(table);
+
+                    self.auth_state.lock().authenticated = true;
+                    Ok(0)
+                }
+                cmd @ DrmIoctlGemClose => self.ioctl_gem_close(cmd),
                 cmd @ DrmIoctlVersion => {
                     let mut args: DrmVersion = cmd.read()?;
 
@@ -514,6 +584,8 @@ impl PerOpenFileOps for DrmFile {
                     self.minor.drop_master(self.file_id);
                     Ok(0)
                 }
+                cmd @ DrmIoctlPrimeHandleToFd => self.ioctl_prime_handle_to_fd(cmd),
+                cmd @ DrmIoctlPrimeFdToHandle => self.ioctl_prime_fd_to_handle(cmd),
                 cmd @ DrmIoctlWaitVblank => self.ioctl_wait_vblank(cmd),
                 cmd @ DrmIoctlModeGetResources => self.ioctl_mode_get_resources(cmd),
                 cmd @ DrmIoctlModeGetCrtc => self.ioctl_mode_get_crtc(cmd),
@@ -536,12 +608,31 @@ impl PerOpenFileOps for DrmFile {
                 cmd @ DrmIoctlModeAtomic => self.ioctl_mode_atomic(cmd),
                 cmd @ DrmIoctlModeCreatePropBlob => self.ioctl_mode_create_blob(cmd),
                 cmd @ DrmIoctlModeDestroyPropBlob => self.ioctl_mode_destroy_blob(cmd),
+                cmd @ DrmIoctlSyncObjCreate => self.ioctl_sync_obj_create(cmd),
+                cmd @ DrmIoctlSyncObjDestroy => self.ioctl_sync_obj_destroy(cmd),
+                cmd @ DrmIoctlSyncObjReset => self.ioctl_sync_obj_reset(cmd),
+                cmd @ DrmIoctlSyncObjSignal => self.ioctl_sync_obj_signal(cmd),
+                cmd @ DrmIoctlSyncObjWait => self.ioctl_sync_obj_wait(cmd),
                 _ => {
-                    ostd::debug!(
-                        "the ioctl command {:#x} is unknown for framebuffer devices",
-                        raw_ioctl.cmd()
-                    );
-                    return_errno_with_message!(Errno::ENOTTY, "the ioctl command is unknown");
+                    let device = self.device();
+                    match device.handle_command(raw_ioctl.cmd(), raw_ioctl.arg(), self) {
+                        Ok(()) => Ok(0),
+                        Err(err) => match err {
+                            DrmError::IoctlNotFound => {
+                                ostd::warn!(
+                                    "drm: unknown ioctl file={} minor={:?} cmd={:#x}",
+                                    self.file_id,
+                                    self.minor_type(),
+                                    raw_ioctl.cmd()
+                                );
+                                return_errno_with_message!(
+                                    Errno::ENOTTY,
+                                    "the ioctl command is unknown"
+                                );
+                            }
+                            _ => Err(err.into()),
+                        },
+                    }
                 }
             }
         )

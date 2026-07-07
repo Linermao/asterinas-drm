@@ -18,29 +18,35 @@ mod atomic;
 mod device;
 mod event;
 mod gem;
+mod geometry;
 mod kms;
 mod simpledrm;
+mod sync;
 
 use alloc::{sync::Arc, vec::Vec};
 
 use aster_framebuffer::FRAMEBUFFER;
-pub use atomic::{DrmAtomicFlags, DrmAtomicObjectRequest};
+pub use atomic::{DrmAtomicFlags, DrmAtomicObjectRequest, DrmAtomicOps};
 use component::{ComponentInitError, init_component};
-pub use device::{DrmDevice, DrmDeviceCaps, DrmFeatures};
+pub use device::{
+    DrmDevice, DrmDeviceBusInfo, DrmDeviceCaps, DrmDevicePrivate, DrmFeatures, DrmIoctlCommandCtx,
+};
 pub use event::DrmIoctlEventCtx;
 pub use gem::{
-    DrmGemOps, DrmIoctlGemCtx,
+    DrmGemOps, DrmIoctlGemCtx, DrmSgEntry,
     object::{DrmGemMapPage, DrmGemObject},
     vma_manager::{DrmVmaOffsetManager, DrmVmaOffsetNode},
 };
+pub use geometry::DrmRect;
 pub use kms::{
     DrmKmsOps,
+    display::{DrmDisplayFormat, DrmDisplayInfo, DrmDisplayMode, DrmModeModeInfo, SubpixelOrder},
+    edid::DrmEdid,
     object::{
-        DrmKmsObject, DrmKmsObjectStore, DrmKmsObjectType,
+        DrmKmsObject, DrmKmsObjectStore, DrmKmsObjectType, KmsObjectId,
         builder::DrmKmsObjectBuilder,
         connector::{DrmConnState, DrmConnStatus, DrmConnType, DrmConnector, DrmConnectorSnapshot},
         crtc::{DrmCrtc, DrmCrtcSnapshot, DrmCrtcState},
-        display::{DrmDisplayFormat, DrmDisplayInfo, DrmDisplayMode, DrmModeModeInfo},
         encoder::{DrmEncoder, DrmEncoderState, DrmEncoderType},
         framebuffer::{DRM_FORMAT_MAX_PLANES, DrmFramebuffer},
         plane::{DrmPlane, DrmPlaneState, DrmPlaneType},
@@ -53,15 +59,9 @@ pub use kms::{
 };
 use ostd::sync::Mutex;
 use spin::Once;
+pub use sync::{DrmFence, DrmSyncObj, DrmSyncObjCreateFlags, DrmSyncObjWaitFlags};
 
 use crate::simpledrm::SimpleDrmDevice;
-
-/// Error type for GPU device registry operations.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Error {
-    AlreadyRegistered,
-    NotFound,
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DrmError {
@@ -75,14 +75,20 @@ pub enum DrmError {
     Busy,
     /// Permission or access violation
     PermissionDenied,
+    /// Bad userspace address
+    BadAddress,
     /// Memory allocation or mapping failure
     NoMemory,
+    /// Resource already exist.
+    AlreadyExist,
+    /// Ioctl not found.
+    IoctlNotFound,
 }
 
-impl From<Error> for ComponentInitError {
-    fn from(error: Error) -> Self {
+impl From<DrmError> for ComponentInitError {
+    fn from(error: DrmError) -> Self {
         match error {
-            Error::AlreadyRegistered => {
+            DrmError::AlreadyExist => {
                 ostd::warn!("The device already registered")
             }
             _ => {}
@@ -91,7 +97,7 @@ impl From<Error> for ComponentInitError {
     }
 }
 
-pub fn register_drm_device(device: Arc<dyn DrmDevice>) -> Result<(), Error> {
+pub fn register_drm_device(device: Arc<dyn DrmDevice>) -> Result<(), DrmError> {
     let component = COMPONENT
         .get()
         .expect("aster-drm component not initialized");
@@ -109,7 +115,7 @@ pub fn registered_drm_devices() -> Vec<Arc<dyn DrmDevice>> {
     component.drm_devices.lock().clone()
 }
 
-pub fn unregister_drm_device(device: &Arc<dyn DrmDevice>) -> Result<Arc<dyn DrmDevice>, Error> {
+pub fn unregister_drm_device(device: &Arc<dyn DrmDevice>) -> Result<Arc<dyn DrmDevice>, DrmError> {
     let component = COMPONENT
         .get()
         .expect("aster-drm component not initialized");
@@ -118,7 +124,7 @@ pub fn unregister_drm_device(device: &Arc<dyn DrmDevice>) -> Result<Arc<dyn DrmD
     if let Some(pos) = devices.iter().position(|d| Arc::ptr_eq(d, device)) {
         Ok(devices.remove(pos))
     } else {
-        Err(Error::NotFound)
+        Err(DrmError::NotFound)
     }
 }
 

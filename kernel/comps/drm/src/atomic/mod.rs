@@ -9,9 +9,10 @@ use crate::{
     DrmConnector, DrmCrtc, DrmDisplayMode, DrmError, DrmFramebuffer, DrmIoctlEventCtx,
     DrmKmsObject, DrmKmsObjectProp, DrmKmsObjectStore, DrmKmsObjectType, DrmKmsOps,
     DrmPendingVblankEvent, DrmPlane, DrmProperty,
+    geometry::DrmRect,
     kms::object::{
         KmsObjectId, connector::helper::DrmPendingConnState, crtc::helper::DrmPendingCrtcState,
-        geometry::RectU32, plane::helper::DrmPendingPlaneState, property::KmsObjectPropValue,
+        plane::helper::DrmPendingPlaneState, property::KmsObjectPropValue,
     },
 };
 
@@ -186,7 +187,7 @@ pub trait DrmAtomicOps: DrmKmsOps + Debug + Send + Sync {
                 let mode_width = display_mode.hdisplay() as u32;
                 let mode_height = display_mode.vdisplay() as u32;
                 let fixed_point_scale = 1u32 << 16;
-                let src_rect = RectU32::new(
+                let src_rect = DrmRect::new(
                     x.checked_mul(fixed_point_scale).ok_or(DrmError::Invalid)?,
                     y.checked_mul(fixed_point_scale).ok_or(DrmError::Invalid)?,
                     mode_width
@@ -196,7 +197,7 @@ pub trait DrmAtomicOps: DrmKmsOps + Debug + Send + Sync {
                         .checked_mul(fixed_point_scale)
                         .ok_or(DrmError::Invalid)?,
                 );
-                let crtc_rect = RectU32::new(0, 0, mode_width, mode_height);
+                let crtc_rect = DrmRect::new(0, 0, mode_width, mode_height);
 
                 atomic_state.crtc_states.insert(
                     crtc_id,
@@ -224,8 +225,8 @@ pub trait DrmAtomicOps: DrmKmsOps + Debug + Send + Sync {
                 atomic_state.plane_states.insert(
                     plane_id,
                     DrmPendingPlaneState::new(
-                        Some(RectU32::default()),
-                        Some(RectU32::default()),
+                        Some(DrmRect::default()),
+                        Some(DrmRect::default()),
                         Some(None),
                         Some(None),
                     ),

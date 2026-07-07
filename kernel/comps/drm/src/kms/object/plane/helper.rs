@@ -4,21 +4,22 @@ use crate::{
     DrmCrtc, DrmDisplayMode, DrmError, DrmFramebuffer, DrmKmsObjectStore, DrmKmsObjectType,
     DrmPlane, DrmProperty,
     atomic::DrmAtomicEffect,
-    kms::object::{KmsObjectId, geometry::RectU32, property::KmsObjectPropValue},
+    geometry::DrmRect,
+    kms::object::{KmsObjectId, property::KmsObjectPropValue},
 };
 
 #[derive(Debug, Default)]
 pub struct DrmPendingPlaneState {
-    crtc_rect: Option<RectU32>,
-    src_rect: Option<RectU32>,
+    crtc_rect: Option<DrmRect>,
+    src_rect: Option<DrmRect>,
     pub(crate) crtc_id: Option<Option<KmsObjectId>>,
     fb_id: Option<Option<KmsObjectId>>,
 }
 
 impl DrmPendingPlaneState {
     pub fn new(
-        crtc_rect: Option<RectU32>,
-        src_rect: Option<RectU32>,
+        crtc_rect: Option<DrmRect>,
+        src_rect: Option<DrmRect>,
         crtc_id: Option<Option<KmsObjectId>>,
         fb_id: Option<Option<KmsObjectId>>,
     ) -> Self {

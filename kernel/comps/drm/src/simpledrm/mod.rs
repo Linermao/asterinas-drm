@@ -14,11 +14,8 @@ use crate::{
     gem::{DrmGemOps, DrmIoctlGemCtx, vma_manager::DrmVmaOffsetManager},
     kms::{
         DrmKmsOps,
-        object::{
-            DrmKmsObjectStore, KmsObjectId,
-            builder::DrmKmsObjectBuilder,
-            display::{DrmDisplayFormat, SubpixelOrder},
-        },
+        display::{DrmDisplayFormat, SubpixelOrder},
+        object::{DrmKmsObjectStore, KmsObjectId, builder::DrmKmsObjectBuilder},
     },
 };
 

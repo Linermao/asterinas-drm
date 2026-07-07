@@ -6,16 +6,18 @@ use hashbrown::HashMap;
 
 use crate::{
     DrmConnType, DrmEncoderType, DrmError, DrmKmsObjectType, DrmPlaneType,
-    kms::object::{
-        DrmKmsObject, DrmKmsObjectStore, KmsObjectId, KmsObjectIndex,
-        connector::{DrmConnector, property::DrmConnectorProps},
-        crtc::{DrmCrtc, property::DrmCrtcProps},
+    kms::{
         display::DrmDisplayFormat,
-        encoder::DrmEncoder,
-        plane::{DrmPlane, property::DrmPlaneProps},
-        property::{
-            DrmKmsObjectProp, DrmPropertyKind, DrmPropertySpec, KmsObjectPropValue,
-            blob::DrmPropertyBlob,
+        object::{
+            DrmKmsObject, DrmKmsObjectStore, KmsObjectId, KmsObjectIndex,
+            connector::{DrmConnector, property::DrmConnectorProps},
+            crtc::{DrmCrtc, property::DrmCrtcProps},
+            encoder::DrmEncoder,
+            plane::{DrmPlane, property::DrmPlaneProps},
+            property::{
+                DrmKmsObjectProp, DrmPropertyKind, DrmPropertySpec, KmsObjectPropValue,
+                blob::DrmPropertyBlob,
+            },
         },
     },
 };

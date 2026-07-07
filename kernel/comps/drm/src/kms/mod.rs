@@ -7,9 +7,14 @@ use ostd::sync::RwLock;
 
 use crate::{
     DrmError, DrmIoctlEventCtx,
-    kms::object::{DrmKmsObjectStore, KmsObjectId, display::DrmDisplayMode},
+    kms::{
+        display::DrmDisplayMode,
+        object::{DrmKmsObjectStore, KmsObjectId},
+    },
 };
 
+pub mod display;
+pub mod edid;
 pub mod object;
 pub mod vblank;
 

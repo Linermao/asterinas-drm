@@ -1,11 +1,15 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use core::fmt::Debug;
+use alloc::{boxed::Box, sync::Arc};
+use core::{any::Any, fmt::Debug};
+
+use ostd_pod::Pod;
+use zerocopy::{FromZeros, IntoBytes};
 
 use crate::{
-    DrmError,
+    DrmError, DrmFence, DrmSyncObj,
     atomic::DrmAtomicOps,
-    gem::{DrmGemOps, vma_manager::DrmVmaOffsetManager},
+    gem::{DrmGemOps, DrmIoctlGemCtx, vma_manager::DrmVmaOffsetManager},
     kms::DrmKmsOps,
 };
 
@@ -30,6 +34,30 @@ bitflags::bitflags! {
     }
 }
 
+pub trait DrmIoctlCommandCtx: DrmIoctlGemCtx + Debug {
+    fn device_private(&self) -> Option<&dyn DrmDevicePrivate>;
+    fn export_fence(&self, fence: Arc<DrmFence>) -> Result<i32, DrmError>;
+    fn import_fence(&self, fd: i32) -> Result<Arc<DrmFence>, DrmError>;
+    fn lookup_syncobj(&self, handle: u32) -> Result<Arc<DrmSyncObj>, DrmError>;
+    fn read_user_bytes(&self, addr: usize, buf: &mut [u8]) -> Result<(), DrmError>;
+    fn write_user_bytes(&self, addr: usize, buf: &[u8]) -> Result<(), DrmError>;
+}
+
+impl dyn DrmIoctlCommandCtx + '_ {
+    pub fn read_ioctl_arg<T: FromZeros + IntoBytes + Pod>(
+        &self,
+        arg: usize,
+    ) -> Result<T, DrmError> {
+        let mut value = T::new_zeroed();
+        self.read_user_bytes(arg, value.as_mut_bytes())?;
+        Ok(value)
+    }
+}
+
+pub trait DrmDevicePrivate: Any + Debug + Send + Sync {
+    fn as_any(&self) -> &dyn Any;
+}
+
 /// Defines the top-level contract of a DRM device instance.
 ///
 /// `DrmDevice` is the composition root for device-facing DRM behavior.
@@ -40,9 +68,28 @@ bitflags::bitflags! {
 pub trait DrmDevice: DrmKmsOps + DrmGemOps + DrmAtomicOps + Debug + Send + Sync {
     fn name(&self) -> &str;
     fn desc(&self) -> &str;
+    fn bus_info(&self) -> Option<DrmDeviceBusInfo> {
+        None
+    }
     fn features(&self) -> &DrmFeatures;
     fn caps(&self) -> &DrmDeviceCaps;
     fn vma_manager(&self) -> &DrmVmaOffsetManager;
+    fn create_private(&self) -> Result<Option<Box<dyn DrmDevicePrivate>>, DrmError> {
+        Ok(None)
+    }
+    fn handle_command(
+        &self,
+        _cmd: u32,
+        _arg: usize,
+        _ctx: &dyn DrmIoctlCommandCtx,
+    ) -> Result<(), DrmError> {
+        Err(DrmError::NotFound)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DrmDeviceBusInfo {
+    Pci { vendor_id: u16, device_id: u16 },
 }
 
 impl dyn DrmDevice {
@@ -176,7 +223,10 @@ impl Default for DrmDeviceCaps {
             cursor_width_px: 64,
             cursor_height_px: 64,
             has_async_page_flip: false,
-            has_fb_modifiers: true,
+            // Match the current DRM/KMS implementation: framebuffer modifiers
+            // are not supported yet, so userspace must stay on the non-modifier
+            // `ADDFB2` path.
+            has_fb_modifiers: false,
             prefer_shadow_buffer: true,
             has_dumb_buffer: true,
             has_flip_target: false,

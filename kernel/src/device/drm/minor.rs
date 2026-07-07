@@ -7,13 +7,13 @@ use aster_drm::DrmDevice;
 use device_id::{DeviceId, MajorId, MinorId};
 
 use crate::{
-    device::{Device, DeviceType, DevtmpfsInodeMeta, drm::file::DrmFile},
+    device::{
+        Device, DeviceType, DevtmpfsInodeMeta,
+        drm::{DRM_MAJOR_ID, DRM_RENDER_MINOR_BASE, file::DrmFile},
+    },
     fs::file::PerOpenFileOps,
     prelude::*,
 };
-
-const DRM_MAJOR_ID: u16 = 226;
-const RENDER_MINOR_BASE: u32 = 128;
 
 #[derive(Debug, Clone, Copy)]
 pub(super) enum DrmMinorType {
@@ -104,7 +104,7 @@ impl DrmMinor {
 impl Device for DrmMinor {
     fn id(&self) -> DeviceId {
         let minor_id = match self.type_ {
-            DrmMinorType::Render => self.index + RENDER_MINOR_BASE,
+            DrmMinorType::Render => self.index + DRM_RENDER_MINOR_BASE,
             _ => self.index,
         };
         DeviceId::new(MajorId::new(DRM_MAJOR_ID), MinorId::new(minor_id))
@@ -121,7 +121,7 @@ impl Device for DrmMinor {
             }
             DrmMinorType::Render => Some(DevtmpfsInodeMeta::new(format!(
                 "dri/renderD{}",
-                self.index + RENDER_MINOR_BASE
+                self.index + DRM_RENDER_MINOR_BASE
             ))),
             _ => None,
         }
@@ -141,6 +141,6 @@ impl Device for DrmMinor {
             }
         }
 
-        Ok(Box::new(DrmFile::new(file_id, drm_minor)))
+        Ok(Box::new(DrmFile::new(file_id, drm_minor)?))
     }
 }

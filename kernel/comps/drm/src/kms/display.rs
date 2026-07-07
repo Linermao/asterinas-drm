@@ -4,7 +4,7 @@ use ostd_pod::Pod;
 
 use crate::{DrmError, DrmPropertyBlob};
 
-const DRM_DISPLAY_MODE_LEN: usize = 32;
+pub(super) const DRM_DISPLAY_MODE_NAME_LEN: usize = 32;
 const DRM_DEFAULT_VREFRESH_HZ: u32 = 60;
 
 bitflags::bitflags! {
@@ -55,7 +55,7 @@ pub struct DrmDisplayMode {
     flags: u32,
     type_: u32,
 
-    name: [u8; DRM_DISPLAY_MODE_LEN],
+    name: [u8; DRM_DISPLAY_MODE_NAME_LEN],
 }
 
 impl Default for DrmDisplayMode {
@@ -72,10 +72,10 @@ impl DrmDisplayMode {
     /// resulting mode is a simple fallback mode rather than a detailed timing
     /// mode discovered from EDID or a panel description.
     pub fn new(width: u16, height: u16, vrefresh_hz: u32) -> Self {
-        let mut name = [0u8; DRM_DISPLAY_MODE_LEN];
+        let mut name = [0u8; DRM_DISPLAY_MODE_NAME_LEN];
         let s = alloc::format!("{width}x{height}");
         let n = s.as_bytes();
-        let len = n.len().min(DRM_DISPLAY_MODE_LEN - 1);
+        let len = n.len().min(DRM_DISPLAY_MODE_NAME_LEN - 1);
         name[..len].copy_from_slice(&n[..len]);
 
         Self {
@@ -172,7 +172,7 @@ pub enum SubpixelOrder {
     None = 5,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub struct DrmDisplayInfo {
     mm_width: u32,
     mm_height: u32,
@@ -231,7 +231,7 @@ pub struct DrmModeModeInfo {
     pub flags: u32,
     pub type_: u32,
 
-    pub name: [u8; DRM_DISPLAY_MODE_LEN],
+    pub name: [u8; DRM_DISPLAY_MODE_NAME_LEN],
 }
 
 impl Into<DrmDisplayMode> for DrmModeModeInfo {

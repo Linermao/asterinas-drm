@@ -7,10 +7,11 @@ use ostd::sync::Mutex;
 
 use crate::{
     DrmError,
-    kms::object::{
-        DrmKmsObject, DrmKmsObjectCast, KmsObjectId, KmsObjectIndex,
+    kms::{
         display::{DrmDisplayInfo, DrmDisplayMode},
-        property::DrmKmsObjectProp,
+        object::{
+            DrmKmsObject, DrmKmsObjectCast, KmsObjectId, KmsObjectIndex, property::DrmKmsObjectProp,
+        },
     },
 };
 

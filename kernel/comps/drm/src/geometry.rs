@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: MPL-2.0
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct RectU32 {
+pub struct DrmRect {
     x: u32,
     y: u32,
     w: u32,
     h: u32,
 }
 
-impl RectU32 {
+impl DrmRect {
     pub fn new(x: u32, y: u32, w: u32, h: u32) -> Self {
         Self { x, y, w, h }
     }

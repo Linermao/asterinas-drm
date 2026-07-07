@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use alloc::sync::Arc;
+use alloc::{sync::Arc, vec::Vec};
 use core::{any::Any, fmt::Debug};
 
 use ostd::{
@@ -8,7 +8,7 @@ use ostd::{
     mm::{UFrame, VmReader, VmWriter},
 };
 
-use crate::{DrmError, gem::vma_manager::DrmVmaOffsetNode};
+use crate::{DrmError, DrmSgEntry, gem::vma_manager::DrmVmaOffsetNode};
 
 #[derive(Debug)]
 pub enum DrmGemMapPage {
@@ -19,11 +19,13 @@ pub enum DrmGemMapPage {
 }
 
 pub trait DrmGemObject: Debug + Any + Sync + Send {
+    fn as_any(&self) -> &dyn Any;
     fn read(&self, offset: usize, writer: &mut VmWriter) -> Result<(), DrmError>;
     fn write(&self, offset: usize, reader: &mut VmReader) -> Result<(), DrmError>;
     fn size(&self) -> usize;
     fn pitch(&self) -> u32;
     fn vma_node(&self) -> &Arc<DrmVmaOffsetNode>;
+    fn sg_entries(&self) -> Result<Vec<DrmSgEntry>, DrmError>;
     /// Returns the page backing the page-aligned object-relative byte offset.
     fn map_page(&self, offset: usize) -> Result<DrmGemMapPage, DrmError>;
 }

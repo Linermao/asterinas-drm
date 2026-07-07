@@ -1039,6 +1039,44 @@ pub struct MappingHandle<'a, 'b, 'c> {
 impl MappingHandle<'_, '_, '_> {
     const DEVICE_RSS_TYPE: RssType = RssType::File;
 
+    fn ensure_mapped_page(
+        &mut self,
+        map_range: &Range<Vaddr>,
+        page_prop: PageProperty,
+    ) -> bool {
+        let preempt_guard = disable_preempt();
+        let mut cursor = self.vm_space.cursor_mut(&preempt_guard, map_range).unwrap();
+
+        let Some((_, item)) = cursor.query().ok() else {
+            return false;
+        };
+
+        let Some(item) = item else {
+            return false;
+        };
+
+        let existing_prop = item.prop();
+        if VmPerms::from(existing_prop.flags).contains(VmPerms::from(page_prop.flags))
+            && existing_prop.cache == page_prop.cache
+        {
+            return true;
+        }
+
+        let protected_range = cursor.protect_next(map_range.len(), |flags, cache| {
+            *flags |= page_prop.flags;
+            *cache = page_prop.cache;
+        });
+        if let Some(protected_range) = protected_range {
+            cursor
+                .flusher()
+                .issue_tlb_flush(TlbFlushOp::for_range(protected_range));
+            cursor.flusher().dispatch_tlb_flush();
+            return true;
+        }
+
+        false
+    }
+
     /// Returns a reference to the underlying VM mapping.
     pub fn vm_mapping(&self) -> &VmMapping {
         self.vm_mapping
@@ -1073,12 +1111,15 @@ impl MappingHandle<'_, '_, '_> {
         let page_prop =
             PageProperty::new_user(PageFlags::from(self.vm_mapping.perms & perms), cache_policy);
 
+        if self.ensure_mapped_page(&map_range, page_prop) {
+            return;
+        }
+
         let preempt_guard = disable_preempt();
         let mut cursor = self
             .vm_space
             .cursor_mut(&preempt_guard, &map_range)
             .unwrap();
-        // FIXME: What should we do if something is already mapped at `offset`?
         cursor.map(frame, page_prop);
         self.rss_delta.add(Self::DEVICE_RSS_TYPE, 1);
     }
@@ -1113,12 +1154,15 @@ impl MappingHandle<'_, '_, '_> {
         let page_prop =
             PageProperty::new_user(PageFlags::from(self.vm_mapping.perms & perms), cache_policy);
 
+        if self.ensure_mapped_page(&map_range, page_prop) {
+            return;
+        }
+
         let preempt_guard = disable_preempt();
         let mut cursor = self
             .vm_space
             .cursor_mut(&preempt_guard, &map_range)
             .unwrap();
-        // FIXME: What should we do if something is already mapped at `offset`?
         cursor.map_iomem(io_mem, page_prop, map_len, 0);
     }
 }

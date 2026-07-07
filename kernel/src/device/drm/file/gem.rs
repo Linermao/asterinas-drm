@@ -1,16 +1,26 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use core::sync::atomic::Ordering;
+use core::{fmt::Display, sync::atomic::Ordering};
 
 use aster_drm::{
     DRM_FORMAT_MAX_PLANES, DrmDisplayFormat, DrmError, DrmFramebuffer, DrmGemMapPage, DrmGemObject,
     DrmIoctlGemCtx, DrmKmsObject, DrmKmsObjectType, DrmPlane,
 };
+use ostd::task::Task;
 
 use crate::{
     device::drm::{file::DrmFile, gem::DrmGemShmemObject, ioctl::*},
-    fs::file::{Mappable, MappedObject},
+    events::IoEvents,
+    fs::{
+        file::{
+            AccessMode, CreationFlags, FileLike, Mappable, MappableObject, MappedObject,
+            file_table::{FdFlags, FileDesc, RawFileDesc},
+        },
+        pseudofs::AnonInodeFs,
+        vfs::path::Path,
+    },
     prelude::*,
+    process::signal::{PollHandle, Pollable},
     vm::{perms::VmPerms, vmar::MappingHandle},
 };
 
@@ -22,6 +32,48 @@ impl DrmIoctlGemCtx for DrmFile {
     ) -> core::result::Result<Arc<dyn DrmGemObject>, DrmError> {
         let obj = DrmGemShmemObject::new(size, pitch)?;
         Ok(Arc::new(obj))
+    }
+
+    fn add_gem_object(
+        &self,
+        gem_object: Arc<dyn DrmGemObject>,
+    ) -> core::result::Result<u32, DrmError> {
+        gem_object.vma_node().allow(self.file_id)?;
+        let handle = self.next_gem_handle();
+        self.gem_table.lock().insert(handle, gem_object);
+        Ok(handle)
+    }
+
+    fn replace_gem_object(
+        &self,
+        handle: u32,
+        gem_object: Arc<dyn DrmGemObject>,
+    ) -> core::result::Result<(), DrmError> {
+        gem_object.vma_node().allow(self.file_id)?;
+
+        let mut gem_table = self.gem_table.lock();
+        let old_gem_object = gem_table.get(&handle).cloned().ok_or(DrmError::NotFound)?;
+        gem_table.insert(handle, gem_object.clone());
+        drop(gem_table);
+
+        if !Arc::ptr_eq(old_gem_object.vma_node(), gem_object.vma_node()) {
+            old_gem_object.vma_node().revoke(self.file_id);
+        }
+
+        Ok(())
+    }
+
+    fn lookup_gem_object(&self, handle: u32) -> Option<Arc<dyn DrmGemObject>> {
+        self.gem_table.lock().get(&handle).cloned()
+    }
+
+    fn map_gem_handle(&self, handle: u32) -> core::result::Result<u64, DrmError> {
+        let gem_object = self.lookup_gem_object(handle).ok_or(DrmError::NotFound)?;
+
+        let dev = self.device();
+        dev.vma_manager().add(&gem_object)?;
+
+        Ok(gem_object.vma_node().offset_addr())
     }
 }
 
@@ -103,33 +155,96 @@ impl MappedObject for DrmGemMappedObject {
     }
 }
 
-impl DrmFile {
-    fn lookup_gem(&self, handle: u32) -> Result<Arc<dyn DrmGemObject>> {
-        self.gem_table
-            .lock()
-            .get(&handle)
-            .cloned()
-            .ok_or(Errno::ENONET.into())
+// TODO:
+#[derive(Debug)]
+struct DrmPrimeFile {
+    gem_object: Arc<dyn DrmGemObject>,
+    access_mode: AccessMode,
+    pseudo_path: Path,
+}
+
+impl DrmPrimeFile {
+    fn new(gem_object: Arc<dyn DrmGemObject>, access_mode: AccessMode) -> Self {
+        let pseudo_path = AnonInodeFs::new_path(|_| "anon_inode:[drm-prime]".to_string());
+        Self {
+            gem_object,
+            access_mode,
+            pseudo_path,
+        }
     }
 
+    fn gem_object(&self) -> Arc<dyn DrmGemObject> {
+        self.gem_object.clone()
+    }
+}
+
+impl Mappable for DrmPrimeFile {
+    fn map(&self, offset: usize, handle: MappingHandle) -> Result<Box<dyn MappedObject>> {
+        if !offset.is_multiple_of(PAGE_SIZE) {
+            return_errno!(Errno::EINVAL);
+        }
+
+        let map_size = handle.vm_mapping().map_size();
+        let end_offset = offset
+            .checked_add(map_size)
+            .ok_or_else(|| Error::new(Errno::EOVERFLOW))?;
+        if end_offset > self.gem_object().size() {
+            return_errno!(Errno::EINVAL);
+        }
+
+        Ok(Box::new(DrmGemMappedObject::new(self.gem_object(), offset)))
+    }
+}
+
+impl Pollable for DrmPrimeFile {
+    fn poll(&self, mask: IoEvents, _poller: Option<&mut PollHandle>) -> IoEvents {
+        (IoEvents::IN | IoEvents::OUT | IoEvents::RDNORM) & mask
+    }
+}
+
+impl FileLike for DrmPrimeFile {
+    fn mappable(&self) -> Result<MappableObject<'_>> {
+        Ok(MappableObject::Device(self))
+    }
+
+    fn access_mode(&self) -> AccessMode {
+        self.access_mode
+    }
+
+    fn path(&self) -> &Path {
+        &self.pseudo_path
+    }
+
+    fn dump_proc_fdinfo(self: Arc<Self>, fd_flags: FdFlags) -> Box<dyn Display> {
+        struct FdInfo {
+            inner: Arc<DrmPrimeFile>,
+            fd_flags: FdFlags,
+        }
+
+        impl Display for FdInfo {
+            fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+                let mut flags = self.inner.access_mode() as u32;
+                if self.fd_flags.contains(FdFlags::CLOEXEC) {
+                    flags |= CreationFlags::O_CLOEXEC.bits();
+                }
+
+                writeln!(f, "pos:\t{}", 0)?;
+                writeln!(f, "flags:\t0{:o}", flags)?;
+                writeln!(f, "mnt_id:\t{}", AnonInodeFs::mount_node().id())?;
+                writeln!(f, "ino:\t{}", AnonInodeFs::shared_inode().ino())
+            }
+        }
+
+        Box::new(FdInfo {
+            inner: self,
+            fd_flags,
+        })
+    }
+}
+
+impl DrmFile {
     fn next_gem_handle(&self) -> u32 {
         self.next_gem_handle.fetch_add(1, Ordering::SeqCst)
-    }
-
-    fn add_gem_object(&self, gem_object: Arc<dyn DrmGemObject>) -> Result<u32> {
-        gem_object.vma_node().allow(self.file_id)?;
-        let handle = self.next_gem_handle();
-        self.gem_table.lock().insert(handle, gem_object);
-        Ok(handle)
-    }
-
-    fn map_gem_handle(&self, handle: u32) -> Result<u64> {
-        let gem_object = self.lookup_gem(handle)?;
-
-        let dev = self.device();
-        dev.vma_manager().add(&gem_object)?;
-
-        Ok(gem_object.vma_node().offset_addr())
     }
 
     fn remove_gem_object(&self, handle: u32) {
@@ -137,6 +252,75 @@ impl DrmFile {
         if let Some(gem_object) = gem_object {
             gem_object.vma_node().revoke(self.file_id);
         }
+    }
+
+    pub(super) fn ioctl_prime_fd_to_handle(&self, cmd: DrmIoctlPrimeFdToHandle) -> Result<i32> {
+        let mut args = cmd.read()?;
+        let fd = FileDesc::try_from(args.fd)?;
+
+        let gem_object = {
+            let current_task = Task::current().ok_or_else(|| Error::new(Errno::ESRCH))?;
+            let thread_local = current_task
+                .as_thread_local()
+                .ok_or_else(|| Error::new(Errno::ESRCH))?;
+            let file_table_ref = thread_local.borrow_file_table();
+            let file_table = file_table_ref.unwrap().read();
+            let file = file_table.get_file(fd)?.clone();
+            let Some(prime_file) = file.downcast_ref::<DrmPrimeFile>() else {
+                return_errno!(Errno::EINVAL);
+            };
+            prime_file.gem_object()
+        };
+
+        args.handle = self.add_gem_object(gem_object)?;
+        cmd.write(&args)?;
+
+        Ok(0)
+    }
+
+    pub(super) fn ioctl_prime_handle_to_fd(&self, cmd: DrmIoctlPrimeHandleToFd) -> Result<i32> {
+        const DRM_PRIME_RDWR: u32 = AccessMode::O_RDWR as u32;
+        const DRM_PRIME_CLOEXEC: u32 = CreationFlags::O_CLOEXEC.bits();
+        const DRM_PRIME_HANDLE_TO_FD_ALLOWED_FLAGS: u32 = DRM_PRIME_RDWR | DRM_PRIME_CLOEXEC;
+
+        let mut args = cmd.read()?;
+        if args.flags & !DRM_PRIME_HANDLE_TO_FD_ALLOWED_FLAGS != 0 {
+            return_errno!(Errno::EINVAL);
+        }
+
+        let access_mode = if args.flags & DRM_PRIME_RDWR != 0 {
+            AccessMode::O_RDWR
+        } else {
+            AccessMode::O_RDONLY
+        };
+
+        let fd_flags = if args.flags & DRM_PRIME_CLOEXEC != 0 {
+            FdFlags::CLOEXEC
+        } else {
+            FdFlags::empty()
+        };
+
+        let gem_object = self.lookup_gem_object(args.handle).ok_or(Errno::ENOENT)?;
+        let prime_file = DrmPrimeFile::new(gem_object, access_mode);
+
+        let current_task = Task::current().ok_or_else(|| Error::new(Errno::ESRCH))?;
+        let thread_local = current_task
+            .as_thread_local()
+            .ok_or_else(|| Error::new(Errno::ESRCH))?;
+        let mut file_table_ref = thread_local.borrow_file_table_mut();
+        let mut file_table = file_table_ref.unwrap().write();
+        let fd = file_table.insert(Arc::new(prime_file), fd_flags);
+
+        args.fd = RawFileDesc::from(fd);
+        cmd.write(&args)?;
+
+        Ok(0)
+    }
+
+    pub(super) fn ioctl_gem_close(&self, cmd: DrmIoctlGemClose) -> Result<i32> {
+        let args = cmd.read()?;
+        self.remove_gem_object(args.handle);
+        Ok(0)
     }
 
     fn create_framebuffer(&self, fb_cmd2: &DrmModeFbCmd2) -> Result<u32> {
@@ -188,7 +372,9 @@ impl DrmFile {
         let pixel_format = DrmDisplayFormat::try_from(fb_cmd2.pixel_format)
             .map_err(|_| Error::new(Errno::EINVAL))?;
 
-        let primary_gem = self.lookup_gem(fb_cmd2.handles[0])?;
+        let primary_gem = self
+            .lookup_gem_object(fb_cmd2.handles[0])
+            .ok_or(Errno::ENOENT)?;
         if fb_cmd2.pitches[0] == 0 {
             return_errno!(Errno::EINVAL);
         }

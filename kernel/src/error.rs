@@ -378,6 +378,9 @@ impl From<aster_drm::DrmError> for Error {
             aster_drm::DrmError::NotSupported => Error::new(Errno::EOPNOTSUPP),
             aster_drm::DrmError::NotFound => Error::new(Errno::ENOENT),
             aster_drm::DrmError::PermissionDenied => Error::new(Errno::EACCES),
+            aster_drm::DrmError::BadAddress => Error::new(Errno::EFAULT),
+            aster_drm::DrmError::AlreadyExist => Error::new(Errno::EEXIST),
+            aster_drm::DrmError::IoctlNotFound => Error::new(Errno::ENOTTY),
         }
     }
 }

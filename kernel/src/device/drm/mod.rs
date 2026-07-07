@@ -15,6 +15,10 @@ mod file;
 mod gem;
 mod ioctl;
 mod minor;
+mod sysfs;
+
+const DRM_MAJOR_ID: u16 = 226;
+const DRM_RENDER_MINOR_BASE: u32 = 128;
 
 pub(super) fn init_in_first_kthread() -> Result<()> {
     let devices = aster_drm::registered_drm_devices();
@@ -77,6 +81,12 @@ fn register_drm_dev(index: u32, device: &Arc<dyn DrmDevice>) -> Result<()> {
 
         let drm_minor = DrmMinor::new(index, device.clone(), DrmMinorType::Primary);
         char::register(drm_minor)?;
+
+        sysfs::register_device(
+            index,
+            device.has_feature(DrmFeatures::RENDER),
+            device.bus_info(),
+        )?;
     }
     Ok(())
 }

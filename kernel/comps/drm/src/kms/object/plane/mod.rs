@@ -5,9 +5,14 @@ use core::fmt::Debug;
 
 use ostd::sync::Mutex;
 
-use crate::kms::object::{
-    DrmKmsObject, DrmKmsObjectCast, KmsObjectId, KmsObjectIndex, display::DrmDisplayFormat,
-    geometry::RectU32, property::DrmKmsObjectProp,
+use crate::{
+    geometry::DrmRect,
+    kms::{
+        display::DrmDisplayFormat,
+        object::{
+            DrmKmsObject, DrmKmsObjectCast, KmsObjectId, KmsObjectIndex, property::DrmKmsObjectProp,
+        },
+    },
 };
 
 pub mod helper;
@@ -23,19 +28,19 @@ pub enum DrmPlaneType {
 
 #[derive(Debug, Default)]
 pub struct DrmPlaneState {
-    src_rect_px: RectU32,
-    crtc_rect_px: RectU32,
+    src_rect_px: DrmRect,
+    crtc_rect_px: DrmRect,
 
     fb_id: Option<KmsObjectId>,
     crtc_id: Option<KmsObjectId>,
 }
 
 impl DrmPlaneState {
-    pub fn set_src_rect(&mut self, src_rect: RectU32) {
+    pub fn set_src_rect(&mut self, src_rect: DrmRect) {
         self.src_rect_px = src_rect;
     }
 
-    pub fn set_crtc_rect(&mut self, crtc_rect: RectU32) {
+    pub fn set_crtc_rect(&mut self, crtc_rect: DrmRect) {
         self.crtc_rect_px = crtc_rect;
     }
 
@@ -50,18 +55,18 @@ impl DrmPlaneState {
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct DrmPlaneSnapshot {
-    src_rect_px: RectU32,
-    crtc_rect_px: RectU32,
+    src_rect_px: DrmRect,
+    crtc_rect_px: DrmRect,
     fb_id: Option<KmsObjectId>,
     crtc_id: Option<KmsObjectId>,
 }
 
 impl DrmPlaneSnapshot {
-    pub fn src_rect(&self) -> RectU32 {
+    pub fn src_rect(&self) -> DrmRect {
         self.src_rect_px
     }
 
-    pub fn crtc_rect(&self) -> RectU32 {
+    pub fn crtc_rect(&self) -> DrmRect {
         self.crtc_rect_px
     }
 
@@ -142,11 +147,11 @@ impl DrmPlane {
         self.state.lock().set_fb_id(fb_id);
     }
 
-    pub fn set_src_rect(&self, src_rect: RectU32) {
+    pub fn set_src_rect(&self, src_rect: DrmRect) {
         self.state.lock().set_src_rect(src_rect);
     }
 
-    pub fn set_crtc_rect(&self, crtc_rect: RectU32) {
+    pub fn set_crtc_rect(&self, crtc_rect: DrmRect) {
         self.state.lock().set_crtc_rect(crtc_rect);
     }
 }

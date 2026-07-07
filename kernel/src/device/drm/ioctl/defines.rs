@@ -2,7 +2,7 @@
 
 use crate::{
     device::drm::ioctl::{DrmIoctlFlags, drm_ioc, types::*},
-    util::ioctl::{InData, InOutData, NoData},
+    util::ioctl::{InData, InOutData, NoData, OutData},
 };
 
 drm_ioc!(
@@ -11,6 +11,41 @@ drm_ioc!(
     0x00,
     InOutData<DrmVersion>,
     DrmIoctlFlags::RENDER_ALLOW
+);
+drm_ioc!(
+    DrmIoctlGetUnique,
+    DRM_IOCTL_GET_UNIQUE,
+    0x01,
+    InOutData<DrmUnique>,
+    DrmIoctlFlags::DEFAULT
+);
+drm_ioc!(
+    DrmIoctlGetMagic,
+    DRM_IOCTL_GET_MAGIC,
+    0x02,
+    OutData<DrmAuth>,
+    DrmIoctlFlags::DEFAULT
+);
+drm_ioc!(
+    DrmIoctlSetVersion,
+    DRM_IOCTL_SET_VERSION,
+    0x07,
+    InOutData<DrmSetVersion>,
+    DrmIoctlFlags::DEFAULT
+);
+drm_ioc!(
+    DrmIoctlGemClose,
+    DRM_IOCTL_GEM_CLOSE,
+    0x09,
+    InData<DrmGemClose>,
+    DrmIoctlFlags::RENDER_ALLOW.union(DrmIoctlFlags::GEM)
+);
+drm_ioc!(
+    DrmIoctlAuthMagic,
+    DRM_IOCTL_AUTH_MAGIC,
+    0x11,
+    InData<DrmAuth>,
+    DrmIoctlFlags::DEFAULT
 );
 drm_ioc!(
     DrmIoctlGetCap,
@@ -39,6 +74,20 @@ drm_ioc!(
     0x1f,
     NoData,
     DrmIoctlFlags::DEFAULT
+);
+drm_ioc!(
+    DrmIoctlPrimeHandleToFd,
+    DRM_IOCTL_PRIME_HANDLE_TO_FD,
+    0x2d,
+    InOutData<DrmPrimeHandle>,
+    DrmIoctlFlags::RENDER_ALLOW.union(DrmIoctlFlags::GEM)
+);
+drm_ioc!(
+    DrmIoctlPrimeFdToHandle,
+    DRM_IOCTL_PRIME_FD_TO_HANDLE,
+    0x2e,
+    InOutData<DrmPrimeHandle>,
+    DrmIoctlFlags::RENDER_ALLOW.union(DrmIoctlFlags::GEM)
 );
 drm_ioc!(
     DrmIoctlWaitVblank,
@@ -195,4 +244,39 @@ drm_ioc!(
     0xbe,
     InOutData<DrmModeDestroyBlob>,
     DrmIoctlFlags::MODESET
+);
+drm_ioc!(
+    DrmIoctlSyncObjCreate,
+    DRM_IOCTL_SYNCOBJ_CREATE,
+    0xbf,
+    InOutData<DrmSyncObjCreate>,
+    DrmIoctlFlags::RENDER_ALLOW.union(DrmIoctlFlags::SYNCOBJ)
+);
+drm_ioc!(
+    DrmIoctlSyncObjDestroy,
+    DRM_IOCTL_SYNCOBJ_DESTROY,
+    0xc0,
+    InOutData<DrmSyncObjDestroy>,
+    DrmIoctlFlags::RENDER_ALLOW.union(DrmIoctlFlags::SYNCOBJ)
+);
+drm_ioc!(
+    DrmIoctlSyncObjWait,
+    DRM_IOCTL_SYNCOBJ_WAIT,
+    0xc3,
+    InOutData<DrmSyncObjWait>,
+    DrmIoctlFlags::RENDER_ALLOW.union(DrmIoctlFlags::SYNCOBJ)
+);
+drm_ioc!(
+    DrmIoctlSyncObjReset,
+    DRM_IOCTL_SYNCOBJ_RESET,
+    0xc4,
+    InOutData<DrmSyncObjArray>,
+    DrmIoctlFlags::RENDER_ALLOW.union(DrmIoctlFlags::SYNCOBJ)
+);
+drm_ioc!(
+    DrmIoctlSyncObjSignal,
+    DRM_IOCTL_SYNCOBJ_SIGNAL,
+    0xc5,
+    InOutData<DrmSyncObjArray>,
+    DrmIoctlFlags::RENDER_ALLOW.union(DrmIoctlFlags::SYNCOBJ)
 );

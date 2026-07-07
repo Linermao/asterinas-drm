@@ -4,7 +4,7 @@ use alloc::vec::Vec;
 
 use crate::{
     DrmKmsObject,
-    kms::object::{DrmKmsObjectCast, display::DrmDisplayFormat},
+    kms::{display::DrmDisplayFormat, object::DrmKmsObjectCast},
 };
 
 /// Represents a blob object referenced by blob-typed DRM properties.

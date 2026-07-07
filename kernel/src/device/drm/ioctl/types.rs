@@ -19,6 +19,29 @@ pub struct DrmVersion {
     pub desc: usize,
 }
 
+#[repr(C)]
+#[padding_struct]
+#[derive(Debug, Clone, Copy, Pod)]
+pub struct DrmUnique {
+    pub unique_len: i32,
+    pub unique: u64,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod)]
+pub struct DrmAuth {
+    pub magic: u32,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod)]
+pub struct DrmSetVersion {
+    pub drm_di_major: i32,
+    pub drm_di_minor: i32,
+    pub drm_dd_major: i32,
+    pub drm_dd_minor: i32,
+}
+
 #[repr(u64)]
 #[derive(Debug, TryFromInt)]
 pub enum DrmGetCapability {
@@ -69,6 +92,21 @@ pub enum DrmSetCapability {
 pub struct DrmSetClientCap {
     pub capability: u64,
     pub value: u64,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod)]
+pub struct DrmPrimeHandle {
+    pub handle: u32,
+    pub flags: u32,
+    pub fd: i32,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod)]
+pub struct DrmGemClose {
+    pub handle: u32,
+    pub pad: u32,
 }
 
 // Linux UAPI defines this as union drm_wait_vblank.
@@ -358,4 +396,38 @@ pub struct DrmModeCreateBlob {
 #[derive(Debug, Clone, Copy, Pod)]
 pub struct DrmModeDestroyBlob {
     pub blob_id: u32,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod)]
+pub struct DrmSyncObjCreate {
+    pub handle: u32,
+    pub flags: u32,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod)]
+pub struct DrmSyncObjDestroy {
+    pub handle: u32,
+    pub pad: u32,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod)]
+pub struct DrmSyncObjWait {
+    pub handles: u64,
+    pub timeout_nsec: i64,
+    pub count_handles: u32,
+    pub flags: u32,
+    pub first_signaled: u32,
+    pub pad: u32,
+    pub deadline_nsec: u64,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod)]
+pub struct DrmSyncObjArray {
+    pub handles: u64,
+    pub count_handles: u32,
+    pub pad: u32,
 }

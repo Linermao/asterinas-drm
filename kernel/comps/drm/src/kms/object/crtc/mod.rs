@@ -8,10 +8,8 @@ use ostd::sync::{Mutex, WaitQueue};
 use crate::{
     DrmError, DrmPendingVblankEvent,
     kms::{
-        object::{
-            DrmKmsObject, DrmKmsObjectCast, KmsObjectId, display::DrmDisplayMode,
-            property::DrmKmsObjectProp,
-        },
+        display::DrmDisplayMode,
+        object::{DrmKmsObject, DrmKmsObjectCast, KmsObjectId, property::DrmKmsObjectProp},
         vblank::DrmVblankState,
     },
 };

@@ -23,10 +23,8 @@ use crate::{
 pub mod builder;
 pub mod connector;
 pub mod crtc;
-pub mod display;
 pub mod encoder;
 pub mod framebuffer;
-pub mod geometry;
 pub mod plane;
 pub mod property;
 
@@ -186,6 +184,35 @@ impl DrmKmsObjectStore {
         }
     }
 
+    pub fn get_object_index(
+        &self,
+        id: KmsObjectId,
+        type_: DrmKmsObjectType,
+    ) -> Option<KmsObjectIndex> {
+        let object = self.object_by_id.get(&id)?;
+        let object_ids = match (type_, object) {
+            (DrmKmsObjectType::Any | DrmKmsObjectType::Plane, DrmKmsObject::Plane(_)) => {
+                &self.plane_ids
+            }
+            (DrmKmsObjectType::Any | DrmKmsObjectType::Crtc, DrmKmsObject::Crtc(_)) => {
+                &self.crtc_ids
+            }
+            (DrmKmsObjectType::Any | DrmKmsObjectType::Encoder, DrmKmsObject::Encoder(_)) => {
+                &self.encoder_ids
+            }
+            (DrmKmsObjectType::Any | DrmKmsObjectType::Connector, DrmKmsObject::Connector(_)) => {
+                &self.connector_ids
+            }
+            (
+                DrmKmsObjectType::Any | DrmKmsObjectType::Framebuffer,
+                DrmKmsObject::Framebuffer(_),
+            ) => &self.framebuffer_ids,
+            _ => return None,
+        };
+
+        object_ids.iter().position(|object_id| *object_id == id)
+    }
+
     pub fn get_object<T: DrmKmsObjectCast>(&self, id: KmsObjectId) -> Option<&T> {
         let obj = self.object_by_id.get(&id)?;
         T::cast(obj)
@@ -199,26 +226,26 @@ impl DrmKmsObjectStore {
         &self,
         id: KmsObjectId,
         type_: DrmKmsObjectType,
-    ) -> Result<&DrmKmsObjectProp, DrmError> {
-        let object = self.object_by_id.get(&id).ok_or(DrmError::NotFound)?;
+    ) -> Option<&DrmKmsObjectProp> {
+        let object = self.object_by_id.get(&id)?;
 
         match object {
             DrmKmsObject::Plane(plane)
                 if matches!(type_, DrmKmsObjectType::Any | DrmKmsObjectType::Plane) =>
             {
-                Ok(plane.properties())
+                Some(plane.properties())
             }
             DrmKmsObject::Crtc(crtc)
                 if matches!(type_, DrmKmsObjectType::Any | DrmKmsObjectType::Crtc) =>
             {
-                Ok(crtc.properties())
+                Some(crtc.properties())
             }
             DrmKmsObject::Connector(connector)
                 if matches!(type_, DrmKmsObjectType::Any | DrmKmsObjectType::Connector) =>
             {
-                Ok(connector.properties())
+                Some(connector.properties())
             }
-            _ => Err(DrmError::Invalid),
+            _ => None,
         }
     }
 
