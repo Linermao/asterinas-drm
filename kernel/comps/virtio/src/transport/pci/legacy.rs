@@ -3,7 +3,7 @@
 use alloc::{boxed::Box, sync::Arc};
 use core::fmt::Debug;
 
-use aster_pci::{cfg_space::BarAccess, common_device::PciCommonDevice};
+use aster_pci::{PciDeviceId, cfg_space::BarAccess, common_device::PciCommonDevice};
 use aster_util::safe_ptr::SafePtr;
 use ostd::{
     bus::BusProbeError,
@@ -152,6 +152,10 @@ impl VirtioPciLegacyTransport {
 impl VirtioTransport for VirtioPciLegacyTransport {
     fn device_type(&self) -> VirtioDeviceType {
         self.device_type
+    }
+
+    fn pci_device_id(&self) -> Option<PciDeviceId> {
+        Some(*self.common_device.device_id())
     }
 
     fn set_queue(

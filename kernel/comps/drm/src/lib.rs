@@ -71,6 +71,8 @@ pub enum DrmError {
     NotFound,
     /// Operation not supported by this driver / device
     NotSupported,
+    /// Operation is recognized but not implemented by this driver / device.
+    FunctionNotImplemented,
     /// Resource temporarily unavailable (busy, in use)
     Busy,
     /// Permission or access violation

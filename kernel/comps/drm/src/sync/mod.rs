@@ -4,9 +4,13 @@ use alloc::sync::Arc;
 use core::{
     fmt,
     sync::atomic::{AtomicBool, Ordering},
+    time::Duration,
 };
 
-use ostd::sync::{Mutex, WaitQueue, Waker};
+use aster_time::{Timeout, monotonic_timer_manager};
+use ostd::sync::{Mutex, WaitQueue, Waiter, Waker};
+
+use crate::DrmError;
 
 bitflags::bitflags! {
     pub struct DrmSyncObjCreateFlags: u32 {
@@ -26,6 +30,7 @@ bitflags::bitflags! {
 pub struct DrmFence {
     signaled: AtomicBool,
     wait_queue: WaitQueue,
+    error: Option<DrmError>,
 }
 
 impl fmt::Debug for DrmFence {
@@ -41,7 +46,12 @@ impl DrmFence {
         Self {
             signaled: AtomicBool::new(signaled),
             wait_queue: WaitQueue::new(),
+            error: None,
         }
+    }
+
+    pub fn error(&self) -> Option<DrmError> {
+        self.error.clone()
     }
 
     pub fn is_signaled(&self) -> bool {
@@ -59,6 +69,59 @@ impl DrmFence {
     pub fn wait(&self) {
         self.wait_queue
             .wait_until(|| self.is_signaled().then_some(()));
+    }
+
+    pub fn wait_timeout(&self, timeout: Option<Duration>) -> Result<(), DrmError> {
+        let deadline = timeout.map(|duration| {
+            monotonic_timer_manager()
+                .read_time()
+                .saturating_add(duration)
+        });
+        self.wait_deadline(deadline)
+    }
+
+    fn wait_deadline(&self, deadline: Option<Duration>) -> Result<(), DrmError> {
+        if self.is_signaled() {
+            return Ok(());
+        }
+        if deadline.is_some_and(|deadline| monotonic_timer_manager().read_time() >= deadline) {
+            return Err(DrmError::Busy);
+        }
+
+        let (waiter, _) = Waiter::new_pair();
+        let timer = deadline.map(|deadline| {
+            let waker = waiter.waker();
+            let timer = monotonic_timer_manager().create_timer(move |_guard| {
+                waker.wake_up();
+            });
+            timer.lock().set_timeout(Timeout::When(deadline));
+            timer
+        });
+
+        let result = waiter.wait_until_or_cancelled(
+            || {
+                self.register_waiter(waiter.waker());
+                self.is_signaled().then_some(())
+            },
+            || {
+                if timer
+                    .as_ref()
+                    .is_some_and(|timer| timer.lock().remain() == Duration::ZERO)
+                {
+                    return Err(DrmError::Busy);
+                }
+
+                Ok(())
+            },
+        );
+
+        if let Some(timer) = timer
+            && result != Err(DrmError::Busy)
+        {
+            timer.lock().cancel();
+        }
+
+        result
     }
 
     pub fn register_waiter(&self, waker: Arc<Waker>) {
@@ -111,6 +174,72 @@ impl DrmSyncObj {
                 return;
             }
         }
+    }
+
+    pub fn wait_timeout(&self, timeout: Option<Duration>) -> Result<(), DrmError> {
+        let deadline = timeout.map(|duration| {
+            monotonic_timer_manager()
+                .read_time()
+                .saturating_add(duration)
+        });
+        self.wait_deadline(deadline)
+    }
+
+    fn wait_deadline(&self, deadline: Option<Duration>) -> Result<(), DrmError> {
+        loop {
+            let fence = self.wait_fence_submitted_deadline(deadline)?;
+            fence.wait_deadline(deadline)?;
+            if self.is_signaled() {
+                return Ok(());
+            }
+        }
+    }
+
+    fn wait_fence_submitted_deadline(
+        &self,
+        deadline: Option<Duration>,
+    ) -> Result<Arc<DrmFence>, DrmError> {
+        if let Some(fence) = self.state.lock().fence.clone() {
+            return Ok(fence);
+        }
+        if deadline.is_some_and(|deadline| monotonic_timer_manager().read_time() >= deadline) {
+            return Err(DrmError::Busy);
+        }
+
+        let (waiter, _) = Waiter::new_pair();
+        let timer = deadline.map(|deadline| {
+            let waker = waiter.waker();
+            let timer = monotonic_timer_manager().create_timer(move |_guard| {
+                waker.wake_up();
+            });
+            timer.lock().set_timeout(Timeout::When(deadline));
+            timer
+        });
+
+        let result = waiter.wait_until_or_cancelled(
+            || {
+                self.register_waiter(waiter.waker());
+                self.state.lock().fence.clone()
+            },
+            || {
+                if timer
+                    .as_ref()
+                    .is_some_and(|timer| timer.lock().remain() == Duration::ZERO)
+                {
+                    return Err(DrmError::Busy);
+                }
+
+                Ok(())
+            },
+        );
+
+        if let Some(timer) = timer
+            && !result.as_ref().is_err_and(|err| *err == DrmError::Busy)
+        {
+            timer.lock().cancel();
+        }
+
+        result
     }
 
     pub fn reset(&self) {

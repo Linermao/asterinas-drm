@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 
+use aster_drm::DrmError;
 use int_to_c_enum::TryFromInt;
 
 use crate::{queue, transport::VirtioTransportError};
@@ -8,6 +9,7 @@ pub mod block;
 pub mod console;
 pub mod entropy;
 pub mod filesystem;
+pub mod gpu;
 pub mod input;
 pub mod network;
 pub mod socket;

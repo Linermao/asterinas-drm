@@ -225,6 +225,9 @@ impl DrmFile {
 impl Drop for DrmFile {
     fn drop(&mut self) {
         self.minor.drop_master(self.file_id);
+        if let Some(device_private) = &self.device_private {
+            device_private.release();
+        }
 
         for gem_object in self
             .gem_table

@@ -56,6 +56,7 @@ impl dyn DrmIoctlCommandCtx + '_ {
 
 pub trait DrmDevicePrivate: Any + Debug + Send + Sync {
     fn as_any(&self) -> &dyn Any;
+    fn release(&self);
 }
 
 /// Defines the top-level contract of a DRM device instance.

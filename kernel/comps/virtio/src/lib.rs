@@ -23,7 +23,7 @@ use ostd::{error, warn};
 use spin::Once;
 use transport::{DeviceStatus, mmio::VIRTIO_MMIO_DRIVER, pci::VIRTIO_PCI_DRIVER};
 
-use crate::transport::VirtioTransport;
+use crate::{device::gpu::device::GpuDevice, transport::VirtioTransport};
 
 // Set this crate's log prefix for `ostd::log`.
 macro_rules! __log_prefix {
@@ -79,6 +79,7 @@ fn virtio_component_init() -> Result<(), ComponentInitError> {
             VirtioDeviceType::Block => BlockDevice::init(transport),
             VirtioDeviceType::Console => ConsoleDevice::init(transport),
             VirtioDeviceType::Entropy => EntropyDevice::init(transport),
+            VirtioDeviceType::Gpu => GpuDevice::init(transport),
             VirtioDeviceType::Input => InputDevice::init(transport),
             VirtioDeviceType::Network => NetworkDevice::init(transport),
             VirtioDeviceType::Socket => SocketDevice::init(transport),
@@ -117,6 +118,7 @@ fn negotiate_features(transport: &mut Box<dyn VirtioTransport>) {
         VirtioDeviceType::Block => BlockDevice::negotiate_features(device_specified_features),
         VirtioDeviceType::Input => InputDevice::negotiate_features(device_specified_features),
         VirtioDeviceType::Console => ConsoleDevice::negotiate_features(device_specified_features),
+        VirtioDeviceType::Gpu => GpuDevice::negotiate_features(device_specified_features),
         VirtioDeviceType::Socket => SocketDevice::negotiate_features(device_specified_features),
         VirtioDeviceType::FileSystem => {
             FileSystemDevice::negotiate_features(device_specified_features)
