@@ -376,6 +376,7 @@ impl From<aster_drm::DrmError> for Error {
             aster_drm::DrmError::Busy => Error::new(Errno::EBUSY),
             aster_drm::DrmError::NoMemory => Error::new(Errno::ENOMEM),
             aster_drm::DrmError::NotSupported => Error::new(Errno::EOPNOTSUPP),
+            aster_drm::DrmError::FunctionNotImplemented => Error::new(Errno::ENOSYS),
             aster_drm::DrmError::NotFound => Error::new(Errno::ENOENT),
             aster_drm::DrmError::PermissionDenied => Error::new(Errno::EACCES),
             aster_drm::DrmError::BadAddress => Error::new(Errno::EFAULT),

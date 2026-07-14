@@ -3,7 +3,7 @@
 use alloc::{boxed::Box, sync::Arc};
 use core::fmt::Debug;
 
-use aster_pci::cfg_space::BarAccess;
+use aster_pci::{PciDeviceId, cfg_space::BarAccess};
 use aster_util::safe_ptr::SafePtr;
 use ostd::{
     arch::device::io_port::{PortRead, PortWrite},
@@ -34,6 +34,11 @@ pub trait VirtioTransport: Sync + Send + Debug {
     /// Get device type.
     fn device_type(&self) -> VirtioDeviceType;
 
+    /// Returns the backing PCI device ID when this transport is PCI-based.
+    fn pci_device_id(&self) -> Option<PciDeviceId> {
+        None
+    }
+
     /// Get device features.
     fn read_device_features(&self) -> u64;
 
@@ -62,6 +67,11 @@ pub trait VirtioTransport: Sync + Send + Debug {
 
     /// Get access to the device config BAR space.
     fn device_config_bar(&self) -> Option<(BarAccess, usize)>;
+
+    /// Gets a virtio shared memory region by shared memory ID.
+    fn shared_memory_region(&self, _id: u8) -> Option<VirtioSharedMemoryRegion> {
+        None
+    }
 
     // ====================Virtqueue related APIs====================
 
@@ -107,6 +117,31 @@ pub trait VirtioTransport: Sync + Send + Debug {
         &mut self,
         func: Box<IrqCallbackFunction>,
     ) -> Result<(), VirtioTransportError>;
+}
+
+#[derive(Clone, Debug)]
+pub struct VirtioSharedMemoryRegion {
+    id: u8,
+    memory: IoMem,
+    length: u64,
+}
+
+impl VirtioSharedMemoryRegion {
+    pub(super) fn new(id: u8, memory: IoMem, length: u64) -> Self {
+        Self { id, memory, length }
+    }
+
+    pub fn id(&self) -> u8 {
+        self.id
+    }
+
+    pub fn memory(&self) -> &IoMem {
+        &self.memory
+    }
+
+    pub fn length(&self) -> u64 {
+        self.length
+    }
 }
 
 /// Manage PCI device/notify configuration space (legacy/modern).

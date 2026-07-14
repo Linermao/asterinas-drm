@@ -247,11 +247,13 @@ impl DrmFile {
         self.next_gem_handle.fetch_add(1, Ordering::SeqCst)
     }
 
-    fn remove_gem_object(&self, handle: u32) {
-        let gem_object = self.gem_table.lock().remove(&handle);
-        if let Some(gem_object) = gem_object {
-            gem_object.vma_node().revoke(self.file_id);
-        }
+    fn remove_gem_object(&self, handle: u32) -> Result<()> {
+        let Some(gem_object) = self.gem_table.lock().remove(&handle) else {
+            return_errno!(Errno::EINVAL);
+        };
+
+        gem_object.vma_node().revoke(self.file_id);
+        Ok(())
     }
 
     pub(super) fn ioctl_prime_fd_to_handle(&self, cmd: DrmIoctlPrimeFdToHandle) -> Result<i32> {
@@ -319,7 +321,7 @@ impl DrmFile {
 
     pub(super) fn ioctl_gem_close(&self, cmd: DrmIoctlGemClose) -> Result<i32> {
         let args = cmd.read()?;
-        self.remove_gem_object(args.handle);
+        self.remove_gem_object(args.handle)?;
         Ok(0)
     }
 
@@ -501,7 +503,7 @@ impl DrmFile {
         }
 
         let args = cmd.read()?;
-        self.remove_gem_object(args.handle);
+        self.remove_gem_object(args.handle)?;
 
         Ok(0)
     }

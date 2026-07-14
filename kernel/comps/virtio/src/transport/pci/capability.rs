@@ -14,13 +14,16 @@ pub enum VirtioPciCpabilityType {
     IsrCfg = 3,
     DeviceCfg = 4,
     PciCfg = 5,
+    SharedMemoryCfg = 8,
+    VendorCfg = 9,
 }
 
 #[derive(Clone, Debug)]
 pub struct VirtioPciCapabilityData {
     cfg_type: VirtioPciCpabilityType,
-    offset: u32,
-    length: u32,
+    id: u8,
+    offset: u64,
+    length: u64,
     option: Option<u32>,
     memory_bar: Option<IoMem>,
 }
@@ -30,11 +33,15 @@ impl VirtioPciCapabilityData {
         self.memory_bar.as_ref()
     }
 
-    pub fn offset(&self) -> u32 {
+    pub fn id(&self) -> u8 {
+        self.id
+    }
+
+    pub fn offset(&self) -> u64 {
         self.offset
     }
 
-    pub fn length(&self) -> u32 {
+    pub fn length(&self) -> u64 {
         self.length
     }
 
@@ -54,14 +61,31 @@ impl VirtioPciCapabilityData {
             3 => VirtioPciCpabilityType::IsrCfg,
             4 => VirtioPciCpabilityType::DeviceCfg,
             5 => VirtioPciCpabilityType::PciCfg,
+            8 => VirtioPciCpabilityType::SharedMemoryCfg,
+            9 => VirtioPciCpabilityType::VendorCfg,
             _ => panic!("Unsupported virtio capability type: {:?}", cfg_type),
         };
 
-        let offset = vendor_cap.read32(8).unwrap();
-        let length = vendor_cap.read32(12).unwrap();
-
         let capability_length = vendor_cap.read8(2).unwrap();
-        let option = if capability_length > 0x10 {
+        let id = vendor_cap.read8(5).unwrap();
+
+        let offset_low = vendor_cap.read32(8).unwrap();
+        let length_low = vendor_cap.read32(12).unwrap();
+        let has_cap64 = capability_length >= 0x18 && cfg_type != VirtioPciCpabilityType::NotifyCfg;
+        let offset = if has_cap64 {
+            let offset_high = vendor_cap.read32(16).unwrap();
+            ((offset_high as u64) << 32) | u64::from(offset_low)
+        } else {
+            u64::from(offset_low)
+        };
+        let length = if has_cap64 {
+            let length_high = vendor_cap.read32(20).unwrap();
+            ((length_high as u64) << 32) | u64::from(length_low)
+        } else {
+            u64::from(length_low)
+        };
+
+        let option = if cfg_type == VirtioPciCpabilityType::NotifyCfg && capability_length > 0x10 {
             Some(vendor_cap.read32(16).unwrap())
         } else {
             None
@@ -86,6 +110,7 @@ impl VirtioPciCapabilityData {
 
         Self {
             cfg_type,
+            id,
             offset,
             length,
             option,

@@ -24,17 +24,24 @@ macro_rules! __log_prefix {
 
 mod clocksource;
 mod rtc;
+mod timer;
 mod tsc;
 
 pub static VDSO_DATA_HIGH_RES_UPDATE_FN: Once<fn(Instant, u64)> = Once::new();
 
 static RTC_DRIVER: Once<Arc<dyn Driver + Send + Sync>> = Once::new();
+static MONOTONIC_TIMER_MANAGER: Once<Arc<TimerManager>> = Once::new();
 
 #[init_component]
 fn time_init() -> Result<(), ComponentInitError> {
     let rtc = rtc::init_rtc_driver();
     RTC_DRIVER.call_once(|| rtc);
     tsc::init();
+
+    let timer_manager = TimerManager::new(Arc::new(read_monotonic_time));
+    MONOTONIC_TIMER_MANAGER.call_once(|| timer_manager.clone());
+    ostd::timer::register_callback_on_cpu(move || timer_manager.process_expired_timers());
+
     Ok(())
 }
 
@@ -66,3 +73,10 @@ pub fn read_monotonic_time() -> Duration {
 pub fn default_clocksource() -> Arc<ClockSource> {
     tsc::CLOCK.get().unwrap().clone()
 }
+
+/// Returns the monotonic timer manager.
+pub fn monotonic_timer_manager() -> &'static Arc<TimerManager> {
+    MONOTONIC_TIMER_MANAGER.get().unwrap()
+}
+
+pub use timer::{Timeout, Timer, TimerGuard, TimerManager};
