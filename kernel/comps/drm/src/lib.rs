@@ -59,7 +59,10 @@ pub use kms::{
 };
 use ostd::sync::Mutex;
 use spin::Once;
-pub use sync::{DrmFence, DrmSyncObj, DrmSyncObjCreateFlags, DrmSyncObjWaitFlags};
+pub use sync::{
+    DrmFence, DrmFenceCallback, DrmFenceStatus, DrmSyncObj, DrmSyncObjCreateFlags,
+    DrmSyncObjQueryFlags, DrmSyncObjWaitCondition, DrmSyncObjWaitFlags,
+};
 
 use crate::simpledrm::SimpleDrmDevice;
 

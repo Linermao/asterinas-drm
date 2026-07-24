@@ -431,3 +431,56 @@ pub struct DrmSyncObjArray {
     pub count_handles: u32,
     pub pad: u32,
 }
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod)]
+pub struct DrmSyncObjHandle {
+    pub handle: u32,
+    pub flags: u32,
+    pub fd: i32,
+    pub pad: u32,
+    pub point: u64,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod)]
+pub struct DrmSyncObjTimelineWait {
+    pub handles: u64,
+    pub points: u64,
+    pub timeout_nsec: i64,
+    pub count_handles: u32,
+    pub flags: u32,
+    pub first_signaled: u32,
+    pub pad: u32,
+    pub deadline_nsec: u64,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod)]
+pub struct DrmSyncObjTimelineArray {
+    pub handles: u64,
+    pub points: u64,
+    pub count_handles: u32,
+    pub flags: u32,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod)]
+pub struct DrmSyncObjTransfer {
+    pub src_handle: u32,
+    pub dst_handle: u32,
+    pub src_point: u64,
+    pub dst_point: u64,
+    pub flags: u32,
+    pub pad: u32,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod)]
+pub struct DrmSyncObjEventfd {
+    pub handle: u32,
+    pub flags: u32,
+    pub point: u64,
+    pub fd: i32,
+    pub pad: u32,
+}

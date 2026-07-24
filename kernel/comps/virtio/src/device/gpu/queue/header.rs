@@ -127,9 +127,7 @@ impl VirtioGpuCtxDestroy {
         let mut hdr = VirtioGpuCtrlHdr::new(VirtioGpuCtrlType::CtxDestroy);
         hdr.ctx_id = context_id;
 
-        Self {
-            hdr
-        }
+        Self { hdr }
     }
 }
 

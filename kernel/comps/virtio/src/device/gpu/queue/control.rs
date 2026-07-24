@@ -604,7 +604,10 @@ impl GpuDevice {
         Ok(())
     }
 
-    pub fn destroy_context(&self, request: VirtioGpuCtxDestroy) -> Result<(), VirtioGpuCommandError> {
+    pub fn destroy_context(
+        &self,
+        request: VirtioGpuCtxDestroy,
+    ) -> Result<(), VirtioGpuCommandError> {
         let (request_slice, response_slice) = Self::prepare_control_command(
             size_of::<VirtioGpuCtxDestroy>(),
             size_of::<VirtioGpuCtrlHdr>(),
@@ -615,7 +618,7 @@ impl GpuDevice {
             .map_err(VirtioGpuCommandError::ResourceAlloc)?;
 
         self.submit_control_command_async(&request_slice, &response_slice, None)?;
-        
+
         Ok(())
     }
 
@@ -657,6 +660,75 @@ impl GpuDevice {
         Ok(())
     }
 
+    pub fn create_blob_resource(
+        &self,
+        request: VirtioGpuResourceCreateBlob,
+        entries: &[VirtioGpuMemEntry],
+        fence: Arc<DrmFence>,
+    ) -> Result<(), VirtioGpuCommandError> {
+        let entries_size = entries
+            .len()
+            .checked_mul(size_of::<VirtioGpuMemEntry>())
+            .ok_or(VirtioGpuCommandError::InvalidValue)?;
+        let request_size = size_of::<VirtioGpuResourceCreateBlob>()
+            .checked_add(entries_size)
+            .ok_or(VirtioGpuCommandError::InvalidValue)?;
+        let (request_slice, response_slice) =
+            Self::prepare_control_command(request_size, size_of::<VirtioGpuCtrlHdr>())?;
+
+        request_slice
+            .write_val(0, &request)
+            .map_err(VirtioGpuCommandError::ResourceAlloc)?;
+        request_slice
+            .write_slice(size_of::<VirtioGpuResourceCreateBlob>(), entries)
+            .map_err(VirtioGpuCommandError::ResourceAlloc)?;
+
+        self.submit_control_command_async(&request_slice, &response_slice, Some(fence))?;
+
+        Ok(())
+    }
+
+    pub fn map_blob_resource(
+        &self,
+        request: VirtioGpuResourceMapBlob,
+    ) -> Result<u32, VirtioGpuCommandError> {
+        let (request_slice, response_slice) = Self::prepare_control_command(
+            size_of::<VirtioGpuResourceMapBlob>(),
+            size_of::<VirtioGpuRespMapInfo>(),
+        )?;
+
+        request_slice
+            .write_val(0, &request)
+            .map_err(VirtioGpuCommandError::ResourceAlloc)?;
+
+        self.submit_control_command_sync(
+            &request_slice,
+            &response_slice,
+            VirtioGpuCtrlType::RespOkMapInfo,
+        )?;
+
+        let response = response_slice
+            .read_val::<VirtioGpuRespMapInfo>(0)
+            .map_err(VirtioGpuCommandError::ResourceAlloc)?;
+        Ok(response.map_info)
+    }
+
+    pub fn unmap_blob_resource(
+        &self,
+        request: VirtioGpuResourceUnmapBlob,
+    ) -> Result<(), VirtioGpuCommandError> {
+        let (request_slice, response_slice) = Self::prepare_control_command(
+            size_of::<VirtioGpuResourceUnmapBlob>(),
+            size_of::<VirtioGpuCtrlHdr>(),
+        )?;
+
+        request_slice
+            .write_val(0, &request)
+            .map_err(VirtioGpuCommandError::ResourceAlloc)?;
+
+        self.submit_control_command_async(&request_slice, &response_slice, None)
+    }
+
     pub fn attach_backing_sg_entries(
         &self,
         request: VirtioGpuResourceAttachBacking,
@@ -685,7 +757,7 @@ impl GpuDevice {
         Ok(())
     }
 
-    pub fn detach_backing_sg_entries (
+    pub fn detach_backing_sg_entries(
         &self,
         request: VirtioGpuResourceDetachBacking,
     ) -> Result<(), VirtioGpuCommandError> {
@@ -698,15 +770,10 @@ impl GpuDevice {
             .write_val(0, &request)
             .map_err(VirtioGpuCommandError::ResourceAlloc)?;
 
-        self.submit_control_command_async(
-            &request_slice,
-            &response_slice,
-            None,
-        )?;
+        self.submit_control_command_async(&request_slice, &response_slice, None)?;
 
         Ok(())
     }
-
 
     pub fn attach_context_resource(
         &self,
@@ -734,7 +801,7 @@ impl GpuDevice {
         &self,
         request: VirtioGpuCmdSubmit,
         commands: Vec<u8>,
-        fence: Arc<DrmFence>,
+        fence: Option<Arc<DrmFence>>,
     ) -> Result<(), VirtioGpuCommandError> {
         let request_size = size_of::<VirtioGpuCmdSubmit>()
             .checked_add(commands.len())
@@ -749,7 +816,7 @@ impl GpuDevice {
             .write_bytes(size_of::<VirtioGpuCmdSubmit>(), &commands)
             .map_err(VirtioGpuCommandError::ResourceAlloc)?;
 
-        self.submit_control_command_async(&request_slice, &response_slice, Some(fence))?;
+        self.submit_control_command_async(&request_slice, &response_slice, fence)?;
 
         Ok(())
     }
@@ -792,7 +859,7 @@ impl GpuDevice {
     pub fn unref_resource(
         &self,
         request: VirtioGpuResourceUnref,
-        gem_object: Arc<dyn DrmGemObject>,
+        _gem_object: Arc<dyn DrmGemObject>,
     ) -> Result<(), VirtioGpuCommandError> {
         let (request_slice, response_slice) = Self::prepare_control_command(
             size_of::<VirtioGpuResourceUnref>(),

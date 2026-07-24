@@ -67,7 +67,7 @@ bitflags! {
     }
 }
 
-struct EventFile {
+pub(crate) struct EventFile {
     counter: Mutex<u64>,
     pollee: Pollee,
     flags: Mutex<Flags>,
@@ -158,6 +158,11 @@ impl EventFile {
         }
 
         return_errno_with_message!(Errno::EINVAL, "new value exceeds MAX_COUNTER_VALUE");
+    }
+
+    /// Increments the eventfd counter for an in-kernel notification.
+    pub(crate) fn signal(&self) -> Result<()> {
+        self.add_counter_val(1)
     }
 }
 

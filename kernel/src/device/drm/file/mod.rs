@@ -613,9 +613,16 @@ impl PerOpenFileOps for DrmFile {
                 cmd @ DrmIoctlModeDestroyPropBlob => self.ioctl_mode_destroy_blob(cmd),
                 cmd @ DrmIoctlSyncObjCreate => self.ioctl_sync_obj_create(cmd),
                 cmd @ DrmIoctlSyncObjDestroy => self.ioctl_sync_obj_destroy(cmd),
+                cmd @ DrmIoctlSyncObjHandleToFd => self.ioctl_sync_obj_handle_to_fd(cmd),
+                cmd @ DrmIoctlSyncObjFdToHandle => self.ioctl_sync_obj_fd_to_handle(cmd),
                 cmd @ DrmIoctlSyncObjReset => self.ioctl_sync_obj_reset(cmd),
                 cmd @ DrmIoctlSyncObjSignal => self.ioctl_sync_obj_signal(cmd),
                 cmd @ DrmIoctlSyncObjWait => self.ioctl_sync_obj_wait(cmd),
+                cmd @ DrmIoctlSyncObjTimelineWait => self.ioctl_sync_obj_timeline_wait(cmd),
+                cmd @ DrmIoctlSyncObjQuery => self.ioctl_sync_obj_query(cmd),
+                cmd @ DrmIoctlSyncObjTransfer => self.ioctl_sync_obj_transfer(cmd),
+                cmd @ DrmIoctlSyncObjTimelineSignal => self.ioctl_sync_obj_timeline_signal(cmd),
+                cmd @ DrmIoctlSyncObjEventfd => self.ioctl_sync_obj_eventfd(cmd),
                 _ => {
                     let device = self.device();
                     match device.handle_command(raw_ioctl.cmd(), raw_ioctl.arg(), self) {

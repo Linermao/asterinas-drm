@@ -28,7 +28,10 @@ use ostd::{
 };
 use zerocopy::IntoBytes;
 
-use super::gem::VirtioGpuGemObject;
+use super::gem::{
+    VirtioGpuGemObject, VirtioGpuHostBlobObject, VirtioGpuHostVisibleAllocation,
+    VirtioGpuHostVisibleMemory,
+};
 use crate::{
     device::{
         VirtioDeviceError,
@@ -50,6 +53,7 @@ const VIRTIO_GPU_FALLBACK_VREFRESH: u32 = 60;
 const CONTROL_QUEUE_SIZE: u16 = 64;
 const CURSOR_QUEUE_SIZE: u16 = 16;
 const VIRTGPU_WAIT_TIMEOUT: Duration = Duration::from_secs(15);
+const VIRTIO_GPU_SHM_ID_HOST_VISIBLE: u8 = 1;
 
 #[derive(Debug, Clone)]
 struct VirtioGpuContext {
@@ -122,6 +126,7 @@ pub struct GpuDevice {
     bus_info: Option<DrmDeviceBusInfo>,
     virtio_gpu_features: VirtioGpuFeatures,
     config: VirtioGpuConfig,
+    host_visible_memory: Option<Arc<VirtioGpuHostVisibleMemory>>,
 
     capsets: HashMap<u32, VirtioGpuCapsetInfo>,
     display_info: RwLock<HashMap<u32, VirtioGpuDisplayInfo>>,
@@ -207,6 +212,20 @@ impl GpuDevice {
         let virtio_gpu_features = VirtioGpuFeatures::from_bits_truncate(Self::negotiate_features(
             transport.read_device_features(),
         ));
+        let host_visible_memory = transport
+            .shared_memory_region(VIRTIO_GPU_SHM_ID_HOST_VISIBLE)
+            .and_then(|region| {
+                match VirtioGpuHostVisibleMemory::new(region.memory().clone(), region.length()) {
+                    Ok(memory) => Some(memory),
+                    Err(err) => {
+                        ostd::warn!(
+                            "virtio-gpu host-visible shared-memory region is unusable: {:?}",
+                            err
+                        );
+                        None
+                    }
+                }
+            });
 
         transport.finish_init();
 
@@ -230,13 +249,15 @@ impl GpuDevice {
                     | DrmFeatures::RENDER
                     | DrmFeatures::MODESET
                     | DrmFeatures::ATOMIC
-                    | DrmFeatures::SYNCOBJ,
+                    | DrmFeatures::SYNCOBJ
+                    | DrmFeatures::SYNCOBJ_TIMELINE,
                 kms_objects: RwLock::new(kms_objects),
                 vma_manager: DrmVmaOffsetManager::new(),
 
                 bus_info,
                 virtio_gpu_features,
                 config,
+                host_visible_memory,
 
                 capsets,
                 display_info: RwLock::new(display_info),
@@ -396,7 +417,6 @@ impl GpuDevice {
         }
 
         // Gather explicit synchronization dependencies before submitting commands.
-        let mut in_syncobjs = Vec::<Arc<DrmSyncObj>>::with_capacity(in_syncobj_count);
         let mut reset_syncobjs = Vec::<Arc<DrmSyncObj>>::new();
         for index in 0..in_syncobj_count {
             let offset = index.checked_mul(syncobj_stride).ok_or(DrmError::Invalid)?;
@@ -407,19 +427,18 @@ impl GpuDevice {
             let virtio_syncobj = ctx.read_ioctl_arg::<DrmVirtgpuExecbufferSyncobj>(addr)?;
             let syncobj_flags = VirtioGpuExecbufferSyncobjFlags::from_bits(virtio_syncobj.flags)
                 .ok_or(DrmError::Invalid)?;
-            if virtio_syncobj.point != 0 {
-                return Err(DrmError::NotSupported);
-            }
-
             let syncobj = ctx.lookup_syncobj(virtio_syncobj.handle)?;
+            let fence = syncobj
+                .fence_at(virtio_syncobj.point)
+                .ok_or(DrmError::Invalid)?;
             if syncobj_flags.contains(VirtioGpuExecbufferSyncobjFlags::RESET) {
                 reset_syncobjs.push(syncobj.clone());
             }
-            in_syncobjs.push(syncobj);
+            in_fences.push(fence);
         }
 
         let submit_fence = Arc::new(DrmFence::new(false));
-        let mut out_syncobjs = Vec::<Arc<DrmSyncObj>>::with_capacity(out_syncobj_count);
+        let mut out_syncobjs = Vec::<(Arc<DrmSyncObj>, u64)>::with_capacity(out_syncobj_count);
         for index in 0..out_syncobj_count {
             let offset = index.checked_mul(syncobj_stride).ok_or(DrmError::Invalid)?;
             let addr = usize::try_from(args.out_syncobjs)
@@ -430,19 +449,12 @@ impl GpuDevice {
             if virtio_syncobj.flags != 0 {
                 return Err(DrmError::Invalid);
             }
-            if virtio_syncobj.point != 0 {
-                return Err(DrmError::NotSupported);
-            }
-
             let syncobj = ctx.lookup_syncobj(virtio_syncobj.handle)?;
-            out_syncobjs.push(syncobj);
+            out_syncobjs.push((syncobj, virtio_syncobj.point));
         }
 
         for fence in in_fences {
             fence.wait_timeout(Some(VIRTGPU_WAIT_TIMEOUT))?;
-        }
-        for syncobj in in_syncobjs {
-            syncobj.wait_timeout(Some(VIRTGPU_WAIT_TIMEOUT))?;
         }
         for syncobj in reset_syncobjs {
             syncobj.reset();
@@ -460,8 +472,8 @@ impl GpuDevice {
                 .track_fence(submit_fence.clone());
         }
 
-        let request = VirtioGpuCmdSubmit::new(command_size as u32, context_id, ring_idx);
-        self.submit_3d_command(request, commands, submit_fence.clone())
+        let request = VirtioGpuCmdSubmit::new(args.size, context_id, ring_idx);
+        self.submit_3d_command(request, commands, Some(submit_fence.clone()))
             .map_err(|err| {
                 // No host work was submitted. Wake waiters that may have observed the
                 // pre-registered fence while the command was being enqueued.
@@ -469,8 +481,8 @@ impl GpuDevice {
                 err
             })?;
 
-        for syncobj in out_syncobjs {
-            syncobj.set_fence(submit_fence.clone());
+        for (syncobj, point) in out_syncobjs {
+            syncobj.add_point(point, submit_fence.clone())?;
         }
 
         if flags.contains(VirtioGpuExecbufferFlags::FENCE_FD_OUT) {
@@ -491,14 +503,10 @@ impl GpuDevice {
             }
             VirtioGpuParam::CapsetQueryFix => 1,
             VirtioGpuParam::ResourceBlob => {
-                // self.virtio_gpu_features
-                //     .contains(VirtioGpuFeatures::RESOURCE_BLOB) as u32
-                0
+                self.virtio_gpu_features
+                    .contains(VirtioGpuFeatures::RESOURCE_BLOB) as u32
             }
-            VirtioGpuParam::HostVisible => {
-                // TODO
-                0
-            }
+            VirtioGpuParam::HostVisible => self.host_visible_memory.is_some() as u32,
             VirtioGpuParam::CrossDevice => {
                 self.virtio_gpu_features
                     .contains(VirtioGpuFeatures::RESOURCE_UUID) as u32
@@ -631,8 +639,10 @@ impl GpuDevice {
         args.res_handle = virtio_gem_object.resource_id();
 
         args.size = u32::try_from(virtio_gem_object.size()).map_err(|_| DrmError::Invalid)?;
-        // TODO:
-        args.blob_mem = 0;
+        args.blob_mem = virtio_gem_object
+            .blob_mem()
+            .map(|blob_mem| blob_mem as u32)
+            .unwrap_or(0);
         ctx.write_user_bytes(arg, args.as_bytes())?;
 
         Ok(())
@@ -657,6 +667,10 @@ impl GpuDevice {
             .as_any()
             .downcast_ref::<VirtioGpuGemObject>()
             .ok_or(DrmError::Invalid)?;
+
+        if virtio_gem_object.is_guest_only_blob() {
+            return Err(DrmError::Invalid);
+        }
 
         let request = VirtioGpuTransferHost3d::new(
             VirtioGpuCtrlType::TransferFromHost3d,
@@ -696,6 +710,10 @@ impl GpuDevice {
             .downcast_ref::<VirtioGpuGemObject>()
             .ok_or(DrmError::Invalid)?;
 
+        if virtio_gem_object.is_guest_only_blob() {
+            return Err(DrmError::Invalid);
+        }
+
         if self.virtio_gpu_features.contains(VirtioGpuFeatures::VIRGL) {
             let context_id = self.ensure_context_created(ctx)?;
 
@@ -732,14 +750,188 @@ impl GpuDevice {
         Ok(())
     }
 
+    fn map_host_visible_blob(
+        &self,
+        resource_id: u32,
+        size: usize,
+    ) -> Result<VirtioGpuHostVisibleAllocation, DrmError> {
+        let host_visible_memory = self
+            .host_visible_memory
+            .as_ref()
+            .ok_or(DrmError::NotSupported)?;
+        let allocation = host_visible_memory.allocate(size)?;
+        let offset = u64::try_from(allocation.offset()).map_err(|_| DrmError::Invalid)?;
+        let request = VirtioGpuResourceMapBlob::new(resource_id, offset);
+        let map_info = self.map_blob_resource(request)?;
+
+        // TODO: Apply the cache policy reported in `map_info` to userspace
+        // mappings. `IoMem::slice` currently preserves the PCI BAR mapping's
+        // cache policy, so honoring CACHED/WC requires an API that can safely
+        // derive an `IoMem` mapping with the device-selected policy.
+        let _ = map_info;
+
+        Ok(allocation)
+    }
+
     fn ioctl_resource_create_blob(
         &self,
         arg: usize,
         ctx: &dyn DrmIoctlCommandCtx,
     ) -> Result<(), DrmError> {
-        let _args = ctx.read_ioctl_arg::<DrmVirtgpuResourceCreateBlob>(arg)?;
+        let mut args = ctx.read_ioctl_arg::<DrmVirtgpuResourceCreateBlob>(arg)?;
 
-        Err(DrmError::FunctionNotImplemented)
+        if !self
+            .virtio_gpu_features
+            .contains(VirtioGpuFeatures::RESOURCE_BLOB)
+        {
+            return Err(DrmError::Invalid);
+        }
+
+        let blob_flags = VirtioGpuBlobFlags::from_bits(args.blob_flags).ok_or(DrmError::Invalid)?;
+        if blob_flags.contains(VirtioGpuBlobFlags::USE_CROSS_DEVICE) {
+            if !self
+                .virtio_gpu_features
+                .contains(VirtioGpuFeatures::RESOURCE_UUID)
+            {
+                return Err(DrmError::Invalid);
+            }
+
+            // TODO: Assign a UUID to the resource after creating it and keep the
+            // exported-object state with the GEM object.
+            return Err(DrmError::FunctionNotImplemented);
+        }
+
+        if args.pad != 0 {
+            return Err(DrmError::Invalid);
+        }
+
+        let mem_flags =
+            VirtioGpuBlobMemFlags::try_from(args.blob_mem).map_err(|_| DrmError::Invalid)?;
+        if mem_flags == VirtioGpuBlobMemFlags::Host
+            && blob_flags.contains(VirtioGpuBlobFlags::USE_MAPPABLE)
+            && self.host_visible_memory.is_none()
+        {
+            return Err(DrmError::NotSupported);
+        }
+
+        let context_id = match mem_flags {
+            VirtioGpuBlobMemFlags::Guest => {
+                if args.blob_id != 0 || args.cmd_size != 0 {
+                    return Err(DrmError::Invalid);
+                }
+                0
+            }
+            VirtioGpuBlobMemFlags::Host | VirtioGpuBlobMemFlags::HostGuest => {
+                if !self.virtio_gpu_features.contains(VirtioGpuFeatures::VIRGL)
+                    || !args.cmd_size.is_multiple_of(4)
+                {
+                    return Err(DrmError::Invalid);
+                }
+
+                let context_id = self.ensure_context_created(ctx)?;
+                let command_size = usize::try_from(args.cmd_size).map_err(|_| DrmError::Invalid)?;
+                if command_size > VIRTGPU_EXECBUFFER_MAX_COMMAND_SIZE {
+                    return Err(DrmError::Invalid);
+                }
+                if command_size != 0 {
+                    // The capset-specific command stream creates the context-local
+                    // object identified by `blob_id`; the following CREATE_BLOB
+                    // request binds that object to a virtio-gpu resource ID.
+                    let mut commands = vec![0u8; command_size];
+                    ctx.read_user_bytes(args.cmd as usize, &mut commands)?;
+
+                    let request = VirtioGpuCmdSubmit::new(args.cmd_size, context_id, None);
+                    self.submit_3d_command(request, commands, None)?;
+                }
+
+                context_id
+            }
+        };
+
+        // TODO: Validate `size` against `VIRTGPU_PARAM_BLOB_ALIGNMENT` once the
+        // device-specific blob alignment parameter is supported.
+        let size = usize::try_from(args.size)
+            .map_err(|_| DrmError::Invalid)?
+            .checked_next_multiple_of(PAGE_SIZE)
+            .ok_or(DrmError::Invalid)?;
+
+        let guest_backing = match mem_flags {
+            VirtioGpuBlobMemFlags::Guest | VirtioGpuBlobMemFlags::HostGuest => {
+                Some(ctx.create_shmem_gem(size, 0)?)
+            }
+            VirtioGpuBlobMemFlags::Host => None,
+        };
+        let entries: Vec<VirtioGpuMemEntry> = match &guest_backing {
+            Some(gem_object) => gem_object
+                .sg_entries()?
+                .into_iter()
+                .map(VirtioGpuMemEntry::from)
+                .collect(),
+            None => Vec::new(),
+        };
+        let nr_entries = u32::try_from(entries.len()).map_err(|_| DrmError::Invalid)?;
+
+        let resource_id = self.next_resource_id();
+        let fence = Arc::new(DrmFence::new(false));
+        let request = VirtioGpuResourceCreateBlob::new(
+            context_id,
+            resource_id,
+            args.blob_mem,
+            args.blob_flags,
+            nr_entries,
+            args.blob_id,
+            args.size,
+        );
+        self.create_blob_resource(request, &entries, fence.clone())?;
+
+        // Host blob + mappable.
+        let gem_object: Arc<dyn DrmGemObject> = match guest_backing {
+            Some(gem_object) => gem_object,
+            None => {
+                let mapping = if blob_flags.contains(VirtioGpuBlobFlags::USE_MAPPABLE) {
+                    match self.map_host_visible_blob(resource_id, size) {
+                        Ok(mapping) => Some(mapping),
+                        Err(map_error) => {
+                            let cleanup_object: Arc<dyn DrmGemObject> =
+                                Arc::new(VirtioGpuHostBlobObject::new(size, None)?);
+                            let cleanup_request = VirtioGpuResourceUnref::new(resource_id);
+                            if let Err(cleanup_error) =
+                                self.unref_resource(cleanup_request, cleanup_object)
+                            {
+                                // TODO: Queue failed resource cleanup on a normal
+                                // task-context worker. The current control queue
+                                // cannot retain cleanup work when it is full.
+                                ostd::warn!(
+                                    "virtio-gpu failed to clean up blob resource {} after map failure: {:?}",
+                                    resource_id,
+                                    cleanup_error
+                                );
+                            }
+                            return Err(map_error);
+                        }
+                    }
+                } else {
+                    None
+                };
+                Arc::new(VirtioGpuHostBlobObject::new(size, mapping)?)
+            }
+        };
+
+        let virtio_object = Arc::new(VirtioGpuGemObject::new_blob(
+            self.weak_self.clone(),
+            true,
+            gem_object,
+            resource_id,
+            mem_flags,
+            Some(fence),
+        ));
+
+        args.bo_handle = ctx.add_gem_object(virtio_object)?;
+        args.res_handle = resource_id;
+
+        ctx.write_user_bytes(arg, args.as_bytes())?;
+
+        Ok(())
     }
 
     fn ioctl_wait(&self, arg: usize, ctx: &dyn DrmIoctlCommandCtx) -> Result<(), DrmError> {

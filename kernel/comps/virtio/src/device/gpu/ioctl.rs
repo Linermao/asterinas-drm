@@ -180,9 +180,13 @@ pub(super) struct DrmVirtgpu3dTransferFromHost {
     pub layer_stride: u32,
 }
 
-pub(super) const VIRTGPU_BLOB_MEM_GUEST: u32 = 0x0001;
-pub(super) const VIRTGPU_BLOB_MEM_HOST3D: u32 = 0x0002;
-pub(super) const VIRTGPU_BLOB_MEM_HOST3D_GUEST: u32 = 0x0003;
+#[repr(u32)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, TryFromInt)]
+pub(super) enum VirtioGpuBlobMemFlags {
+    Guest = 1,
+    Host = 2,
+    HostGuest = 3,
+}
 
 bitflags::bitflags! {
     pub(super) struct VirtioGpuBlobFlags: u32 {
@@ -204,6 +208,9 @@ pub(super) struct DrmVirtgpuResourceCreateBlob {
     pub cmd_size: u32,
     pub cmd: u64,
     pub blob_id: u64,
+    // TODO: New args will be added in Linux 7.2 version.
+    // pub blob_hints: u32,
+    // pub pad2: u32,
 }
 
 #[repr(C)]

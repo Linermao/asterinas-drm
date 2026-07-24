@@ -38,8 +38,10 @@
     xorg.xwd
     xorg.xhost
     xscope
+    pulseaudio
     xtrace
     openarena 
+    veloren
     vkmark
   ];
 

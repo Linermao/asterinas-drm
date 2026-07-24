@@ -37,7 +37,7 @@ mod connect;
 mod constants;
 mod dup;
 mod epoll;
-mod eventfd;
+pub(crate) mod eventfd;
 mod execve;
 mod exit;
 mod exit_group;

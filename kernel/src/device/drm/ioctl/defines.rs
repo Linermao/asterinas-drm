@@ -280,3 +280,62 @@ drm_ioc!(
     InOutData<DrmSyncObjArray>,
     DrmIoctlFlags::RENDER_ALLOW.union(DrmIoctlFlags::SYNCOBJ)
 );
+drm_ioc!(
+    DrmIoctlSyncObjHandleToFd,
+    DRM_IOCTL_SYNCOBJ_HANDLE_TO_FD,
+    0xc1,
+    InOutData<DrmSyncObjHandle>,
+    DrmIoctlFlags::RENDER_ALLOW.union(DrmIoctlFlags::SYNCOBJ)
+);
+drm_ioc!(
+    DrmIoctlSyncObjFdToHandle,
+    DRM_IOCTL_SYNCOBJ_FD_TO_HANDLE,
+    0xc2,
+    InOutData<DrmSyncObjHandle>,
+    DrmIoctlFlags::RENDER_ALLOW.union(DrmIoctlFlags::SYNCOBJ)
+);
+drm_ioc!(
+    DrmIoctlSyncObjTimelineWait,
+    DRM_IOCTL_SYNCOBJ_TIMELINE_WAIT,
+    0xca,
+    InOutData<DrmSyncObjTimelineWait>,
+    DrmIoctlFlags::RENDER_ALLOW
+        .union(DrmIoctlFlags::SYNCOBJ)
+        .union(DrmIoctlFlags::SYNCOBJ_TIMELINE)
+);
+drm_ioc!(
+    DrmIoctlSyncObjQuery,
+    DRM_IOCTL_SYNCOBJ_QUERY,
+    0xcb,
+    InOutData<DrmSyncObjTimelineArray>,
+    DrmIoctlFlags::RENDER_ALLOW
+        .union(DrmIoctlFlags::SYNCOBJ)
+        .union(DrmIoctlFlags::SYNCOBJ_TIMELINE)
+);
+drm_ioc!(
+    DrmIoctlSyncObjTransfer,
+    DRM_IOCTL_SYNCOBJ_TRANSFER,
+    0xcc,
+    InOutData<DrmSyncObjTransfer>,
+    DrmIoctlFlags::RENDER_ALLOW
+        .union(DrmIoctlFlags::SYNCOBJ)
+        .union(DrmIoctlFlags::SYNCOBJ_TIMELINE)
+);
+drm_ioc!(
+    DrmIoctlSyncObjTimelineSignal,
+    DRM_IOCTL_SYNCOBJ_TIMELINE_SIGNAL,
+    0xcd,
+    InOutData<DrmSyncObjTimelineArray>,
+    DrmIoctlFlags::RENDER_ALLOW
+        .union(DrmIoctlFlags::SYNCOBJ)
+        .union(DrmIoctlFlags::SYNCOBJ_TIMELINE)
+);
+drm_ioc!(
+    DrmIoctlSyncObjEventfd,
+    DRM_IOCTL_SYNCOBJ_EVENTFD,
+    0xcf,
+    InOutData<DrmSyncObjEventfd>,
+    DrmIoctlFlags::RENDER_ALLOW
+        .union(DrmIoctlFlags::SYNCOBJ)
+        .union(DrmIoctlFlags::SYNCOBJ_TIMELINE)
+);
