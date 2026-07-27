@@ -6,11 +6,7 @@ use aster_drm::{
     DrmError, DrmFence, DrmSyncObj, DrmSyncObjCreateFlags, DrmSyncObjQueryFlags,
     DrmSyncObjWaitCondition, DrmSyncObjWaitFlags,
 };
-use ostd::{
-    mm::VmIo,
-    sync::Waiter,
-    task::{Task, TaskOptions},
-};
+use ostd::{mm::VmIo, sync::Waiter, task::Task};
 
 use crate::{
     device::drm::{file::DrmFile, ioctl::*},
@@ -26,6 +22,7 @@ use crate::{
     prelude::*,
     process::signal::{PollHandle, Pollable, Pollee},
     syscall::eventfd::EventFile,
+    thread::kernel_thread::ThreadOptions,
     time::{clocks::MonotonicClock, timer::Timeout, wait::ManagedTimeout},
 };
 
@@ -58,7 +55,7 @@ impl DrmSyncFile {
         let pollee = Pollee::new();
         let notify_pollee = pollee.clone();
         let notify_fence = fence.clone();
-        let _ = TaskOptions::new(move || {
+        let _ = ThreadOptions::new(move || {
             notify_fence.wait();
             notify_pollee.notify(IoEvents::IN | IoEvents::OUT | IoEvents::RDNORM);
         })
@@ -618,7 +615,7 @@ impl DrmFile {
         let point = args.point;
         // TODO: Replace this per-registration task with a native syncobj callback
         // registry to avoid retaining one sleeping task per registration.
-        TaskOptions::new(move || {
+        let _ = ThreadOptions::new(move || {
             if wait_available {
                 syncobj.wait_point_available(point);
             } else {
@@ -630,7 +627,7 @@ impl DrmFile {
                 let _ = event_file.signal();
             }
         })
-        .spawn()?;
+        .spawn();
 
         Ok(0)
     }

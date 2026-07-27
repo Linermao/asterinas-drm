@@ -1,30 +1,36 @@
 // SPDX-License-Identifier: MPL-2.0
 
 use alloc::{
-    collections::{BTreeMap, vec_deque::VecDeque},
+    boxed::Box,
+    collections::VecDeque,
     fmt,
     sync::{Arc, Weak},
     vec,
     vec::Vec,
 };
-use core::hint;
+use core::{
+    hint, mem,
+    sync::atomic::{AtomicBool, Ordering},
+};
 
-use aster_drm::{DrmEdid, DrmError, DrmFence, DrmGemObject};
-use aster_softirq::{BottomHalfDisabled, Taskless};
+use aster_drm::{DrmEdid, DrmError, DrmFence, DrmGemObject, DrmTaskSpawner};
+use aster_softirq::BottomHalfDisabled;
 use aster_util::mem_obj_slice::Slice;
 use hashbrown::HashMap;
 use ostd::{
     mm::{HasSize, PAGE_SIZE, VmIo, dma::DmaStream},
-    sync::{Mutex, SpinLock, Waiter, Waker},
+    sync::{Mutex, SpinLock, WaitQueue, Waiter, Waker},
 };
+use spin::Once;
 
 use crate::{
     device::gpu::{
         VirtioGpuDeviceError,
         device::GpuDevice,
+        gem::VirtioGpuHostVisibleAllocation,
         queue::{VirtioGpuCommandError, header::*},
     },
-    queue::VirtQueue,
+    queue::{AddBufsError, VirtQueue},
 };
 
 enum PendingControlCompletion {
@@ -46,53 +52,153 @@ struct PendingCommand {
     request_slice: Slice<Arc<DmaStream>>,
     response_slice: Slice<Arc<DmaStream>>,
     completion: PendingControlCompletion,
-    fence_id: Option<u64>,
+    fence: Option<(u64, Arc<DrmFence>)>,
+    keepalive: Option<PendingCommandKeepalive>,
+}
+
+enum PendingCommandKeepalive {
+    GemObject(Arc<dyn DrmGemObject>),
+    HostVisibleAllocation(Arc<VirtioGpuHostVisibleAllocation>),
+}
+
+impl fmt::Debug for PendingCommandKeepalive {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::GemObject(gem_object) => formatter
+                .debug_tuple("GemObject")
+                .field(gem_object)
+                .finish(),
+            Self::HostVisibleAllocation(allocation) => formatter
+                .debug_tuple("HostVisibleAllocation")
+                .field(allocation)
+                .finish(),
+        }
+    }
+}
+
+struct ControlQueueState {
+    queue: VirtQueue,
+    pending_commands: HashMap<u16, PendingCommand>,
+    deferred_commands: VecDeque<PendingCommand>,
+}
+
+pub(in crate::device::gpu) struct ControlQueueCallbackSignal {
+    pending: AtomicBool,
+    stopped: AtomicBool,
+    wait_queue: WaitQueue,
+}
+
+impl ControlQueueCallbackSignal {
+    fn new() -> Self {
+        Self {
+            pending: AtomicBool::new(false),
+            stopped: AtomicBool::new(false),
+            wait_queue: WaitQueue::new(),
+        }
+    }
+
+    pub(in crate::device::gpu) fn schedule(&self) {
+        self.pending.store(true, Ordering::Release);
+        self.wait_queue.wake_one();
+    }
+
+    fn stop(&self) {
+        self.stopped.store(true, Ordering::Release);
+        self.wait_queue.wake_one();
+    }
+
+    fn wait(&self) -> bool {
+        self.wait_queue.wait_until(|| {
+            if self.stopped.load(Ordering::Acquire) {
+                return Some(false);
+            }
+
+            self.pending.swap(false, Ordering::AcqRel).then_some(true)
+        })
+    }
 }
 
 pub struct ControlQueueManager {
-    queue: SpinLock<VirtQueue, BottomHalfDisabled>,
+    state: SpinLock<ControlQueueState, BottomHalfDisabled>,
     next_fence_id: Mutex<u64>,
-    fence_timeline: SpinLock<BTreeMap<u64, Arc<DrmFence>>, BottomHalfDisabled>,
-    pending_commands: SpinLock<HashMap<u16, PendingCommand>, BottomHalfDisabled>,
-    deferred_commands: SpinLock<VecDeque<PendingCommand>, BottomHalfDisabled>,
-    taskless: Arc<Taskless>,
+    weak_device: Weak<GpuDevice>,
+    callback_signal: Arc<ControlQueueCallbackSignal>,
+    task_spawner: Once<Arc<dyn DrmTaskSpawner>>,
+    callback_task: Once<()>,
 }
 
 impl ControlQueueManager {
     pub fn new(queue: VirtQueue, weak_device: &Weak<GpuDevice>) -> Self {
-        let taskless = {
-            let weak_device = weak_device.clone();
-            Taskless::new(move || {
-                if let Some(device) = weak_device.upgrade() {
-                    device.handle_control_queue_irq();
-                }
-            })
-        };
-
         Self {
-            queue: SpinLock::new(queue),
+            state: SpinLock::new(ControlQueueState {
+                queue,
+                pending_commands: HashMap::new(),
+                deferred_commands: VecDeque::new(),
+            }),
             next_fence_id: Mutex::new(1),
-            fence_timeline: SpinLock::new(BTreeMap::new()),
-            pending_commands: SpinLock::new(HashMap::new()),
-            deferred_commands: SpinLock::new(VecDeque::new()),
-            taskless,
+            weak_device: weak_device.clone(),
+            callback_signal: Arc::new(ControlQueueCallbackSignal::new()),
+            task_spawner: Once::new(),
+            callback_task: Once::new(),
         }
     }
 
-    pub fn taskless(&self) -> Arc<Taskless> {
-        self.taskless.clone()
+    pub(in crate::device::gpu) fn callback_signal(&self) -> Arc<ControlQueueCallbackSignal> {
+        self.callback_signal.clone()
+    }
+
+    pub(in crate::device::gpu) fn init_task_context(&self, task_spawner: Arc<dyn DrmTaskSpawner>) {
+        self.task_spawner.call_once(|| task_spawner);
+    }
+
+    fn ensure_callback_task(&self) -> Result<(), VirtioGpuCommandError> {
+        let task_spawner = self
+            .task_spawner
+            .get()
+            .ok_or(VirtioGpuCommandError::QueueUnavailable)?;
+        self.callback_task.call_once(|| {
+            // Component initialization happens before the first kernel thread.
+            // The kernel supplies this spawner later, and the first normal
+            // command starts the worker lazily.
+            task_spawner.spawn(Box::new({
+                let weak_device = self.weak_device.clone();
+                let callback_signal = self.callback_signal.clone();
+                move || {
+                    while callback_signal.wait() {
+                        let Some(device) = weak_device.upgrade() else {
+                            break;
+                        };
+                        device.handle_control_queue_callback();
+                    }
+                }
+            }));
+        });
+        Ok(())
     }
 }
 
 impl fmt::Debug for ControlQueueManager {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let state = self.state.lock();
         f.debug_struct("ControlQueueManager")
-            .field("queue", &self.queue)
-            .field("pending_fence_count", &self.fence_timeline.lock().len())
-            .field("pending_command_count", &self.pending_commands.lock().len())
-            .field("deferred_unref_count", &self.deferred_commands.lock().len())
-            .field("taskless", &"Taskless")
+            .field("queue", &state.queue)
+            .field("pending_command_count", &state.pending_commands.len())
+            .field("deferred_command_count", &state.deferred_commands.len())
+            .field(
+                "task_context_initialized",
+                &self.task_spawner.get().is_some(),
+            )
+            .field(
+                "callback_task_initialized",
+                &self.callback_task.get().is_some(),
+            )
             .finish()
+    }
+}
+
+impl Drop for ControlQueueManager {
+    fn drop(&mut self) {
+        self.callback_signal.stop();
     }
 }
 
@@ -164,36 +270,64 @@ impl GpuDevice {
         request_slice: &Slice<Arc<DmaStream>>,
         response_slice: &Slice<Arc<DmaStream>>,
         fence: Option<Arc<DrmFence>>,
+        keepalive: Option<PendingCommandKeepalive>,
     ) -> Result<(), VirtioGpuCommandError> {
-        request_slice
-            .sync_to_device()
-            .map_err(VirtioGpuCommandError::ResourceAlloc)?;
-        response_slice
-            .sync_to_device()
-            .map_err(VirtioGpuCommandError::ResourceAlloc)?;
+        let queue_manager = self.control_queue_manager();
+        if let Err(error) = queue_manager.ensure_callback_task() {
+            if let Some(keepalive) = keepalive {
+                mem::forget(keepalive);
+            }
+            return Err(error);
+        }
+
+        if let Err(error) = request_slice.sync_to_device() {
+            if let Some(keepalive) = keepalive {
+                mem::forget(keepalive);
+            }
+            return Err(VirtioGpuCommandError::ResourceAlloc(error));
+        }
+        if let Err(error) = response_slice.sync_to_device() {
+            if let Some(keepalive) = keepalive {
+                mem::forget(keepalive);
+            }
+            return Err(VirtioGpuCommandError::ResourceAlloc(error));
+        }
 
         // Hold this across preparation and insertion so fence ID order follows
         // fenced command order, without performing DMA synchronization under the
         // control-queue spin lock.
-        let queue_manager = self.control_queue_manager();
         let mut fence_guard = queue_manager.next_fence_id.lock();
 
         let pending_fence = if let Some(fence) = fence {
             let next_fence_id = *fence_guard;
 
-            let mut request_header = request_slice
-                .read_val::<VirtioGpuCtrlHdr>(0)
-                .map_err(VirtioGpuCommandError::ResourceAlloc)?;
+            let mut request_header = match request_slice.read_val::<VirtioGpuCtrlHdr>(0) {
+                Ok(request_header) => request_header,
+                Err(error) => {
+                    if let Some(keepalive) = keepalive {
+                        mem::forget(keepalive);
+                    }
+                    return Err(VirtioGpuCommandError::ResourceAlloc(error));
+                }
+            };
             request_header.flags |= VirtioGpuFlags::FENCE.bits();
             request_header.fence_id = next_fence_id;
-            request_slice
-                .write_val(0, &request_header)
-                .map_err(VirtioGpuCommandError::ResourceAlloc)?;
-            request_slice
-                .sync_to_device()
-                .map_err(VirtioGpuCommandError::ResourceAlloc)?;
+            if let Err(error) = request_slice.write_val(0, &request_header) {
+                if let Some(keepalive) = keepalive {
+                    mem::forget(keepalive);
+                }
+                return Err(VirtioGpuCommandError::ResourceAlloc(error));
+            }
+            if let Err(error) = request_slice.sync_to_device() {
+                if let Some(keepalive) = keepalive {
+                    mem::forget(keepalive);
+                }
+                return Err(VirtioGpuCommandError::ResourceAlloc(error));
+            }
 
-            *fence_guard += 1;
+            *fence_guard = next_fence_id
+                .checked_add(1)
+                .ok_or(VirtioGpuCommandError::InvalidValue)?;
 
             Some((next_fence_id, fence))
         } else {
@@ -204,28 +338,11 @@ impl GpuDevice {
             request_slice: request_slice.slice(0..request_slice.size()),
             response_slice: response_slice.slice(0..response_slice.size()),
             completion: PendingControlCompletion::Async,
-            fence_id: pending_fence.as_ref().map(|(fence_id, _)| *fence_id),
+            fence: pending_fence,
+            keepalive,
         };
 
-        let mut control_queue = queue_manager.queue.lock();
-        let token = control_queue
-            .add_dma_bufs(
-                &[&pending_command.request_slice],
-                &[&pending_command.response_slice],
-            )
-            .map_err(|_| VirtioGpuCommandError::QueueUnavailable)?;
-
-        queue_manager
-            .pending_commands
-            .lock()
-            .insert(token, pending_command);
-        if let Some((fence_id, fence)) = pending_fence {
-            queue_manager.fence_timeline.lock().insert(fence_id, fence);
-        }
-
-        if control_queue.should_notify() {
-            control_queue.notify();
-        }
+        Self::enqueue_control_command(queue_manager, pending_command);
 
         Ok(())
     }
@@ -236,6 +353,9 @@ impl GpuDevice {
         response_slice: &Slice<Arc<DmaStream>>,
         expected_type: VirtioGpuCtrlType,
     ) -> Result<(), VirtioGpuCommandError> {
+        let queue_manager = self.control_queue_manager();
+        queue_manager.ensure_callback_task()?;
+
         request_slice
             .sync_to_device()
             .map_err(VirtioGpuCommandError::ResourceAlloc)?;
@@ -248,25 +368,11 @@ impl GpuDevice {
             request_slice: request_slice.slice(0..request_slice.size()),
             response_slice: response_slice.slice(0..response_slice.size()),
             completion: PendingControlCompletion::Sync(waker),
-            fence_id: None,
+            fence: None,
+            keepalive: None,
         };
 
-        let queue_manager = self.control_queue_manager();
-        {
-            let mut control_queue = queue_manager.queue.lock();
-
-            let token = control_queue
-                .add_dma_bufs(&[request_slice], &[response_slice])
-                .map_err(|_| VirtioGpuCommandError::QueueUnavailable)?;
-            queue_manager
-                .pending_commands
-                .lock()
-                .insert(token, pending_command);
-
-            if control_queue.should_notify() {
-                control_queue.notify();
-            }
-        }
+        Self::enqueue_control_command(queue_manager, pending_command);
 
         waiter.wait();
         response_slice
@@ -278,139 +384,164 @@ impl GpuDevice {
         Ok(())
     }
 
-    fn handle_control_queue_irq(&self) {
-        loop {
-            let queue_manager = self.control_queue_manager();
-            let token = {
-                let mut control_queue = queue_manager.queue.lock();
-                match control_queue.pop_used_with_min_bytes(size_of::<VirtioGpuCtrlHdr>()) {
-                    Ok((token, _)) => token,
-                    Err(_) => return,
+    fn enqueue_control_command(
+        queue_manager: &ControlQueueManager,
+        pending_command: PendingCommand,
+    ) {
+        let mut state = queue_manager.state.lock();
+        if !state.deferred_commands.is_empty() {
+            // Never let a newer command bypass the software queue. Virtio-gpu
+            // resource creation, backing attachment, rendering, and cleanup all
+            // rely on control-queue submission order.
+            state.deferred_commands.push_back(pending_command);
+            return;
+        }
+
+        let pending_command = match Self::try_add_control_command(&mut state, pending_command) {
+            Ok(()) => {
+                if state.queue.should_notify() {
+                    state.queue.notify();
                 }
-            };
-
-            let Some(pending_command) = queue_manager.pending_commands.lock().remove(&token) else {
-                ostd::warn!("virtio-gpu completed unknown control command");
-                continue;
-            };
-
-            match pending_command.completion {
-                PendingControlCompletion::Sync(waker) => {
-                    waker.wake_up();
-                }
-                PendingControlCompletion::Async => {
-                    let response_header = match pending_command.response_slice.sync_from_device() {
-                        Ok(()) => match pending_command
-                            .response_slice
-                            .read_val::<VirtioGpuCtrlHdr>(0)
-                        {
-                            Ok(response_header) => Some(response_header),
-                            Err(err) => {
-                                ostd::warn!(
-                                    "virtio-gpu failed to read async control response: {:?}",
-                                    err
-                                );
-                                None
-                            }
-                        },
-                        Err(err) => {
-                            ostd::warn!(
-                                "virtio-gpu failed to sync async control response: {:?}",
-                                err
-                            );
-                            None
-                        }
-                    };
-
-                    if let Some(response_header) = response_header
-                        && response_header.type_ >= VirtioGpuCtrlType::RespErrUnspec as u32
-                    {
-                        let request_type = pending_command
-                            .request_slice
-                            .read_val::<VirtioGpuCtrlHdr>(0)
-                            .ok()
-                            .and_then(|header| VirtioGpuCtrlType::try_from(header.type_).ok())
-                            .unwrap_or(VirtioGpuCtrlType::Unknown);
-                        let response_type = VirtioGpuCtrlType::try_from(response_header.type_)
-                            .unwrap_or(VirtioGpuCtrlType::Unknown);
-                        ostd::warn!(
-                            "virtio-gpu async control command failed: request={:?}, response={:?}, flags={:#x}, fence_id={}",
-                            request_type,
-                            response_type,
-                            response_header.flags,
-                            response_header.fence_id
-                        );
-                    }
-
-                    if let Some(response_header) = response_header {
-                        if response_header.flags & VirtioGpuFlags::FENCE.bits() != 0 {
-                            let signaled_fences = {
-                                let mut fence_timeline = queue_manager.fence_timeline.lock();
-
-                                let fence_id = response_header.fence_id;
-                                if !fence_timeline.contains_key(&fence_id) {
-                                    ostd::warn!(
-                                        "virtio-gpu completed an unknown fence: response_fence_id={}",
-                                        fence_id
-                                    );
-                                }
-
-                                let later_fences = match fence_id.checked_add(1) {
-                                    Some(next_fence_id) => fence_timeline.split_off(&next_fence_id),
-                                    None => BTreeMap::new(),
-                                };
-                                core::mem::replace(&mut *fence_timeline, later_fences)
-                            };
-
-                            for (_, fence) in signaled_fences {
-                                fence.signal();
-                            }
-                        } else if let Some(expected_fence_id) = pending_command.fence_id {
-                            ostd::warn!(
-                                "virtio-gpu fenced command completed without a fence response: expected_fence_id={}",
-                                expected_fence_id
-                            );
-                        }
-                    } else if let Some(expected_fence_id) = pending_command.fence_id {
-                        ostd::warn!(
-                            "virtio-gpu fenced command completed with an unreadable response: expected_fence_id={}",
-                            expected_fence_id
-                        );
-                    }
-                }
+                return;
             }
+            Err(pending_command) => pending_command,
+        };
+        state.deferred_commands.push_back(pending_command);
+    }
 
-            self.retry_deferred_unrefs();
+    fn try_add_control_command(
+        state: &mut ControlQueueState,
+        pending_command: PendingCommand,
+    ) -> Result<(), PendingCommand> {
+        let result = state.queue.add_dma_bufs(
+            &[&pending_command.request_slice],
+            &[&pending_command.response_slice],
+        );
+        match result {
+            Ok(token) => {
+                state.pending_commands.insert(token, pending_command);
+                Ok(())
+            }
+            Err(AddBufsError::BufferTooSmall) => Err(pending_command),
+            Err(AddBufsError::InvalidArgs) => {
+                unreachable!("a control command always has one input and one output buffer")
+            }
         }
     }
 
-    fn retry_deferred_unrefs(&self) {
-        let queue_manager = self.control_queue_manager();
-        let mut control_queue = queue_manager.queue.lock();
-        let Some(pending_command) = queue_manager.deferred_commands.lock().pop_front() else {
-            return;
-        };
-
-        let token = match control_queue.add_dma_bufs(
-            &[&pending_command.request_slice],
-            &[&pending_command.response_slice],
-        ) {
-            Ok(token) => token,
-            Err(_) => {
-                queue_manager
-                    .deferred_commands
-                    .lock()
-                    .push_front(pending_command);
-                return;
+    fn submit_deferred_commands(state: &mut ControlQueueState) -> bool {
+        let mut submitted = false;
+        while let Some(pending_command) = state.deferred_commands.pop_front() {
+            match Self::try_add_control_command(state, pending_command) {
+                Ok(()) => submitted = true,
+                Err(pending_command) => {
+                    state.deferred_commands.push_front(pending_command);
+                    break;
+                }
             }
-        };
-        queue_manager
-            .pending_commands
-            .lock()
-            .insert(token, pending_command);
+        }
+        submitted
+    }
 
-        if control_queue.should_notify() {
-            control_queue.notify();
+    fn handle_control_queue_callback(&self) {
+        let queue_manager = self.control_queue_manager();
+        let completed_commands = {
+            let mut state = queue_manager.state.lock();
+            let mut completed_commands = Vec::new();
+
+            while let Ok((token, _)) = state
+                .queue
+                .pop_used_with_min_bytes(size_of::<VirtioGpuCtrlHdr>())
+            {
+                let Some(pending_command) = state.pending_commands.remove(&token) else {
+                    ostd::warn!("virtio-gpu completed unknown control command");
+                    continue;
+                };
+                completed_commands.push(pending_command);
+            }
+
+            if Self::submit_deferred_commands(&mut state) && state.queue.should_notify() {
+                state.queue.notify();
+            }
+
+            completed_commands
+        };
+
+        for pending_command in completed_commands {
+            // DMA synchronization, waking tasks, and releasing cleanup
+            // keepalives are intentionally done in task context.
+            self.complete_control_command(pending_command);
+        }
+    }
+
+    fn complete_control_command(&self, pending_command: PendingCommand) {
+        let PendingCommand {
+            request_slice,
+            response_slice,
+            completion,
+            fence,
+            mut keepalive,
+        } = pending_command;
+
+        match completion {
+            PendingControlCompletion::Sync(waker) => {
+                waker.wake_up();
+            }
+            PendingControlCompletion::Async => {
+                let response_result = response_slice
+                    .sync_from_device()
+                    .map_err(VirtioGpuCommandError::ResourceAlloc)
+                    .and_then(|()| {
+                        check_response_type(&response_slice, VirtioGpuCtrlType::RespOkNodata)
+                    });
+                let request_type = request_slice
+                    .read_val::<VirtioGpuCtrlHdr>(0)
+                    .ok()
+                    .and_then(|header| VirtioGpuCtrlType::try_from(header.type_).ok())
+                    .unwrap_or(VirtioGpuCtrlType::Unknown);
+
+                if let Err(error) = &response_result {
+                    ostd::warn!(
+                        "virtio-gpu async control command failed: request={:?}, error={:?}",
+                        request_type,
+                        error
+                    );
+                    if let Some(keepalive) = keepalive.take() {
+                        // A failed UNREF or UNMAP does not permit releasing the
+                        // memory that may still be visible to the host.
+                        mem::forget(keepalive);
+                    }
+                }
+
+                if let Some((expected_fence_id, fence)) = fence {
+                    let completion_result = response_result
+                        .map_err(DrmError::from)
+                        .and_then(|response_header| {
+                            let has_fence =
+                                response_header.flags & VirtioGpuFlags::FENCE.bits() != 0;
+                            if !has_fence || response_header.fence_id != expected_fence_id {
+                                ostd::warn!(
+                                    "virtio-gpu returned an invalid fence response: request={:?}, expected_fence_id={}, response_fence_id={}, response_flags={:#x}",
+                                    request_type,
+                                    expected_fence_id,
+                                    response_header.fence_id,
+                                    response_header.flags
+                                );
+                                return Err(DrmError::Invalid);
+                            }
+                            Ok(())
+                        });
+
+                    match completion_result {
+                        Ok(()) => {
+                            fence.signal();
+                        }
+                        Err(error) => {
+                            fence.signal_error(error);
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -423,7 +554,7 @@ impl GpuDevice {
             .write_val(0, &request)
             .map_err(VirtioGpuCommandError::ResourceAlloc)?;
 
-        self.submit_control_command_async(&request_slice, &response_slice, None)?;
+        self.submit_control_command_async(&request_slice, &response_slice, None, None)?;
 
         Ok(())
     }
@@ -599,7 +730,7 @@ impl GpuDevice {
             .write_val(0, &request)
             .map_err(VirtioGpuCommandError::ResourceAlloc)?;
 
-        self.submit_control_command_async(&request_slice, &response_slice, None)?;
+        self.submit_control_command_async(&request_slice, &response_slice, None, None)?;
 
         Ok(())
     }
@@ -617,7 +748,7 @@ impl GpuDevice {
             .write_val(0, &request)
             .map_err(VirtioGpuCommandError::ResourceAlloc)?;
 
-        self.submit_control_command_async(&request_slice, &response_slice, None)?;
+        self.submit_control_command_async(&request_slice, &response_slice, None, None)?;
 
         Ok(())
     }
@@ -636,7 +767,7 @@ impl GpuDevice {
             .write_val(0, &request)
             .map_err(VirtioGpuCommandError::ResourceAlloc)?;
 
-        self.submit_control_command_async(&request_slice, &response_slice, Some(fence))?;
+        self.submit_control_command_async(&request_slice, &response_slice, Some(fence), None)?;
 
         Ok(())
     }
@@ -655,7 +786,12 @@ impl GpuDevice {
             .write_val(0, &request)
             .map_err(VirtioGpuCommandError::ResourceAlloc)?;
 
-        self.submit_control_command_async(&request_slice, &response_slice, Some(fence.clone()))?;
+        self.submit_control_command_async(
+            &request_slice,
+            &response_slice,
+            Some(fence.clone()),
+            None,
+        )?;
 
         Ok(())
     }
@@ -683,7 +819,7 @@ impl GpuDevice {
             .write_slice(size_of::<VirtioGpuResourceCreateBlob>(), entries)
             .map_err(VirtioGpuCommandError::ResourceAlloc)?;
 
-        self.submit_control_command_async(&request_slice, &response_slice, Some(fence))?;
+        self.submit_control_command_async(&request_slice, &response_slice, Some(fence), None)?;
 
         Ok(())
     }
@@ -713,20 +849,29 @@ impl GpuDevice {
         Ok(response.map_info)
     }
 
-    pub fn unmap_blob_resource(
+    pub(in crate::device::gpu) fn unmap_blob_resource(
         &self,
         request: VirtioGpuResourceUnmapBlob,
+        allocation: Arc<VirtioGpuHostVisibleAllocation>,
     ) -> Result<(), VirtioGpuCommandError> {
-        let (request_slice, response_slice) = Self::prepare_control_command(
+        let keepalive = PendingCommandKeepalive::HostVisibleAllocation(allocation);
+        let (request_slice, response_slice) = match Self::prepare_control_command(
             size_of::<VirtioGpuResourceUnmapBlob>(),
             size_of::<VirtioGpuCtrlHdr>(),
-        )?;
+        ) {
+            Ok(slices) => slices,
+            Err(error) => {
+                mem::forget(keepalive);
+                return Err(error);
+            }
+        };
 
-        request_slice
-            .write_val(0, &request)
-            .map_err(VirtioGpuCommandError::ResourceAlloc)?;
+        if let Err(error) = request_slice.write_val(0, &request) {
+            mem::forget(keepalive);
+            return Err(VirtioGpuCommandError::ResourceAlloc(error));
+        }
 
-        self.submit_control_command_async(&request_slice, &response_slice, None)
+        self.submit_control_command_async(&request_slice, &response_slice, None, Some(keepalive))
     }
 
     pub fn attach_backing_sg_entries(
@@ -752,7 +897,7 @@ impl GpuDevice {
             .write_slice(size_of::<VirtioGpuResourceAttachBacking>(), &entries)
             .map_err(VirtioGpuCommandError::ResourceAlloc)?;
 
-        self.submit_control_command_async(&request_slice, &response_slice, None)?;
+        self.submit_control_command_async(&request_slice, &response_slice, None, None)?;
 
         Ok(())
     }
@@ -770,7 +915,7 @@ impl GpuDevice {
             .write_val(0, &request)
             .map_err(VirtioGpuCommandError::ResourceAlloc)?;
 
-        self.submit_control_command_async(&request_slice, &response_slice, None)?;
+        self.submit_control_command_async(&request_slice, &response_slice, None, None)?;
 
         Ok(())
     }
@@ -816,7 +961,7 @@ impl GpuDevice {
             .write_bytes(size_of::<VirtioGpuCmdSubmit>(), &commands)
             .map_err(VirtioGpuCommandError::ResourceAlloc)?;
 
-        self.submit_control_command_async(&request_slice, &response_slice, fence)?;
+        self.submit_control_command_async(&request_slice, &response_slice, fence, None)?;
 
         Ok(())
     }
@@ -833,7 +978,7 @@ impl GpuDevice {
             .write_val(0, &request)
             .map_err(VirtioGpuCommandError::ResourceAlloc)?;
 
-        self.submit_control_command_async(&request_slice, &response_slice, None)?;
+        self.submit_control_command_async(&request_slice, &response_slice, None, None)?;
         Ok(())
     }
 
@@ -851,26 +996,34 @@ impl GpuDevice {
             .write_val(0, &request)
             .map_err(VirtioGpuCommandError::ResourceAlloc)?;
 
-        self.submit_control_command_async(&request_slice, &response_slice, Some(fence))?;
+        self.submit_control_command_async(&request_slice, &response_slice, Some(fence), None)?;
 
         Ok(())
     }
 
-    pub fn unref_resource(
+    pub(in crate::device::gpu) fn unref_resource(
         &self,
         request: VirtioGpuResourceUnref,
-        _gem_object: Arc<dyn DrmGemObject>,
+        gem_object: Arc<dyn DrmGemObject>,
     ) -> Result<(), VirtioGpuCommandError> {
-        let (request_slice, response_slice) = Self::prepare_control_command(
+        let keepalive = PendingCommandKeepalive::GemObject(gem_object);
+        let (request_slice, response_slice) = match Self::prepare_control_command(
             size_of::<VirtioGpuResourceUnref>(),
             size_of::<VirtioGpuCtrlHdr>(),
-        )?;
+        ) {
+            Ok(slices) => slices,
+            Err(error) => {
+                mem::forget(keepalive);
+                return Err(error);
+            }
+        };
 
-        request_slice
-            .write_val(0, &request)
-            .map_err(VirtioGpuCommandError::ResourceAlloc)?;
+        if let Err(error) = request_slice.write_val(0, &request) {
+            mem::forget(keepalive);
+            return Err(VirtioGpuCommandError::ResourceAlloc(error));
+        }
 
-        self.submit_control_command_async(&request_slice, &response_slice, None)?;
+        self.submit_control_command_async(&request_slice, &response_slice, None, Some(keepalive))?;
 
         Ok(())
     }

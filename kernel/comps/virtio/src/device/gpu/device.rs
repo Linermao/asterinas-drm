@@ -16,8 +16,8 @@ use aster_drm::{
     DrmDeviceCaps, DrmDevicePrivate, DrmDisplayFormat, DrmDisplayInfo, DrmDisplayMode, DrmEdid,
     DrmEncoderType, DrmError, DrmFeatures, DrmFence, DrmFramebuffer, DrmGemObject, DrmGemOps,
     DrmIoctlCommandCtx, DrmIoctlEventCtx, DrmIoctlGemCtx, DrmKmsObjectBuilder, DrmKmsObjectStore,
-    DrmKmsObjectType, DrmKmsOps, DrmPlane, DrmPlaneType, DrmSyncObj, DrmVmaOffsetManager,
-    KmsObjectId, SubpixelOrder, register_drm_device,
+    DrmKmsObjectType, DrmKmsOps, DrmPlane, DrmPlaneType, DrmSyncObj, DrmTaskSpawner,
+    DrmVmaOffsetManager, KmsObjectId, SubpixelOrder, register_drm_device,
 };
 use aster_softirq::BottomHalfDisabled;
 use hashbrown::{HashMap, HashSet};
@@ -271,9 +271,9 @@ impl GpuDevice {
             }
         });
 
-        let control_taskless = device.control_queue_manager.taskless();
+        let control_callback_signal = device.control_queue_manager.callback_signal();
         let handle_control_queue_irq = move |_: &TrapFrame| {
-            control_taskless.schedule();
+            control_callback_signal.schedule();
         };
 
         {
@@ -1338,6 +1338,10 @@ impl DrmGemOps for GpuDevice {
 }
 
 impl DrmDevice for GpuDevice {
+    fn init_task_context(&self, task_spawner: Arc<dyn DrmTaskSpawner>) {
+        self.control_queue_manager.init_task_context(task_spawner);
+    }
+
     fn name(&self) -> &str {
         DEVICE_NAME
     }

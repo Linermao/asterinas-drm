@@ -374,21 +374,12 @@ impl Drop for VirtioGpuGemObject {
             .and_then(VirtioGpuHostBlobObject::take_mapping);
         if let Some(host_mapping) = host_mapping {
             let request = VirtioGpuResourceUnmapBlob::new(self.resource_id);
-            if let Err(err) = device.unmap_blob_resource(request) {
-                // TODO: Retain failed cleanup operations in a normal task-context
-                // worker. Releasing this aperture range before UNMAP is queued
-                // could alias a still-mapped host resource, while retaining it in
-                // the IRQ bottom half could run sleeping cleanup from Taskless.
-                core::mem::forget(host_mapping);
+            if let Err(err) = device.unmap_blob_resource(request, Arc::new(host_mapping)) {
                 ostd::warn!(
                     "virtio-gpu failed to unmap blob resource {} on GEM drop: {:?}",
                     self.resource_id,
                     err
                 );
-            } else {
-                // The range may be reused once UNMAP is ordered on controlq; a
-                // later MAP using the same range is necessarily queued after it.
-                drop(host_mapping);
             }
         }
 

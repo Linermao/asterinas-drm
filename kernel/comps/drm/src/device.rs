@@ -59,6 +59,12 @@ pub trait DrmDevicePrivate: Any + Debug + Send + Sync {
     fn release(&self);
 }
 
+/// Spawns DRM background work in a kernel task context.
+pub trait DrmTaskSpawner: Send + Sync {
+    /// Spawns a task that executes `task_fn`.
+    fn spawn(&self, task_fn: Box<dyn FnOnce() + Send>);
+}
+
 /// Defines the top-level contract of a DRM device instance.
 ///
 /// `DrmDevice` is the composition root for device-facing DRM behavior.
@@ -78,6 +84,8 @@ pub trait DrmDevice: DrmKmsOps + DrmGemOps + DrmAtomicOps + Debug + Send + Sync 
     fn create_private(&self) -> Result<Option<Box<dyn DrmDevicePrivate>>, DrmError> {
         Ok(None)
     }
+    /// Provides task-context services after the first kernel thread is available.
+    fn init_task_context(&self, _task_spawner: Arc<dyn DrmTaskSpawner>) {}
     fn handle_command(
         &self,
         _cmd: u32,

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use aster_drm::{DrmDevice, DrmFeatures};
+use aster_drm::{DrmDevice, DrmFeatures, DrmTaskSpawner};
 
 use crate::{
     device::{
@@ -9,6 +9,7 @@ use crate::{
     },
     prelude::*,
     process::{credentials::capabilities::CapSet, posix_thread::AsPosixThread},
+    thread::kernel_thread::ThreadOptions,
 };
 
 mod file;
@@ -20,6 +21,14 @@ mod sysfs;
 const DRM_MAJOR_ID: u16 = 226;
 const DRM_RENDER_MINOR_BASE: u32 = 128;
 
+struct KernelDrmTaskSpawner;
+
+impl DrmTaskSpawner for KernelDrmTaskSpawner {
+    fn spawn(&self, task_fn: Box<dyn FnOnce() + Send>) {
+        let _ = ThreadOptions::new(task_fn).spawn();
+    }
+}
+
 pub(super) fn init_in_first_kthread() -> Result<()> {
     let devices = aster_drm::registered_drm_devices();
 
@@ -28,8 +37,10 @@ pub(super) fn init_in_first_kthread() -> Result<()> {
     }
 
     let mut any_success = false;
+    let task_spawner: Arc<dyn DrmTaskSpawner> = Arc::new(KernelDrmTaskSpawner);
 
     for (index, device) in devices.iter().enumerate() {
+        device.init_task_context(task_spawner.clone());
         match register_drm_dev(index as u32, device) {
             Ok(_) => {
                 ostd::info!("DRM device {:?} probe correctly!", device.name());

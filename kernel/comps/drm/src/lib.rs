@@ -30,6 +30,7 @@ pub use atomic::{DrmAtomicFlags, DrmAtomicObjectRequest, DrmAtomicOps};
 use component::{ComponentInitError, init_component};
 pub use device::{
     DrmDevice, DrmDeviceBusInfo, DrmDeviceCaps, DrmDevicePrivate, DrmFeatures, DrmIoctlCommandCtx,
+    DrmTaskSpawner,
 };
 pub use event::DrmIoctlEventCtx;
 pub use gem::{
