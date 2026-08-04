@@ -46,6 +46,13 @@ export XDG_RUNTIME_DIR=/run/user/0
 XKB_DATA="/run/current-system/sw/share/X11/xkb"
 MODULE_PATH="/run/current-system/sw/lib/xorg/modules"
 
+# Asterinas does not run systemd-tmpfiles at boot, so a stale Xorg lock can
+# survive a reboot and make the next Xorg instance mistake display :0 for an
+# active server. Only remove the display files when no Xorg process exists.
+if ! pgrep -x Xorg >/dev/null 2>&1; then
+    rm -f /tmp/.X0-lock /tmp/.X11-unix/X0
+fi
+
 nohup Xorg :0 vt1 \
   -modulepath "$MODULE_PATH" \
   -xkbdir "$XKB_DATA" \
@@ -60,6 +67,18 @@ nohup Xorg :0 vt1 \
 
 # Step 3: run xfce4
 export DISPLAY=:0
+
+# Keep Xorg on the native VirGL path, then make applications launched by the
+# desktop use Zink over the Venus Vulkan device. Restricting the ICD prevents
+# Mesa from silently falling back to llvmpipe when the Venus device is usable.
+export VK_DRIVER_FILES=/run/opengl-driver/share/vulkan/icd.d/virtio_icd.x86_64.json
+export MESA_LOADER_DRIVER_OVERRIDE=zink
+export GALLIUM_DRIVER=zink
+# The Asterinas X server does not expose explicit DRM format modifiers yet.
+# Kopper's DRI2 fallback is required for games to present rendered frames.
+export LIBGL_KOPPER_DRI2=true
+export MESA_VK_WSI_PRESENT_MODE=immediate
+
 LOG=/var/log/xfce-session.log
 mkdir -p "$(dirname "$LOG")"
 : > "$LOG"                 # truncate/create

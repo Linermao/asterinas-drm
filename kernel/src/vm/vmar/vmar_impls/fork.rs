@@ -112,7 +112,11 @@ fn cow_copy_pt(src: &mut CursorMut<'_>, dst: &mut CursorMut<'_>, size: usize) ->
                 // Manually advance the source cursor.
                 // In the `MappedRam` case, the cursor is advanced by `protect_next`.
                 // However, this does not apply to the `MappedIoMem` case.
-                src.jump(mapped_va + PAGE_SIZE).unwrap();
+                let next_va = mapped_va + PAGE_SIZE;
+                if next_va == end_va {
+                    break;
+                }
+                src.jump(next_va).unwrap();
             }
         }
 

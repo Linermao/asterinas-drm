@@ -25,7 +25,7 @@
 
   # List packages installed in system profile.
   # You can use https://search.nixos.org/ to find more packages (and options).
-  environment.systemPackages = with pkgs; [ 
+  environment.systemPackages = with pkgs; [
     hello-asterinas
     mesa-demos
     glmark2
@@ -34,13 +34,12 @@
     neverball
     kmscube
     superTuxKart
-    xorg.xdpyinfo
-    xorg.xwd
-    xorg.xhost
+    redeclipse
+    speed_dreams
     xscope
     pulseaudio
     xtrace
-    openarena 
+    openarena
     veloren
     vkmark
   ];
