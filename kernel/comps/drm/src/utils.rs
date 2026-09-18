@@ -463,6 +463,62 @@ impl From<DrmDisplayMode> for DrmModeModeInfo {
     }
 }
 
+impl TryFrom<DrmModeModeInfo> for DrmDisplayMode {
+    type Error = Error;
+
+    fn try_from(mode_info: DrmModeModeInfo) -> Result<Self> {
+        if mode_info.clock > i32::MAX as u32 || mode_info.vrefresh > i32::MAX as u32 {
+            return_errno_with_message!(
+                Errno::ERANGE,
+                "the DRM display mode clock or refresh rate is out of range"
+            );
+        }
+
+        if mode_info.clock == 0 {
+            return_errno_with_message!(Errno::EINVAL, "the DRM display mode clock is zero");
+        }
+
+        if mode_info.hdisplay == 0
+            || mode_info.hsync_start < mode_info.hdisplay
+            || mode_info.hsync_end < mode_info.hsync_start
+            || mode_info.htotal < mode_info.hsync_end
+        {
+            return_errno_with_message!(
+                Errno::EINVAL,
+                "the DRM display mode has invalid horizontal timings"
+            );
+        }
+
+        if mode_info.vdisplay == 0
+            || mode_info.vsync_start < mode_info.vdisplay
+            || mode_info.vsync_end < mode_info.vsync_start
+            || mode_info.vtotal < mode_info.vsync_end
+        {
+            return_errno_with_message!(
+                Errno::EINVAL,
+                "the DRM display mode has invalid vertical timings"
+            );
+        }
+
+        Ok(Self {
+            clock: mode_info.clock,
+            hdisplay: mode_info.hdisplay,
+            hsync_start: mode_info.hsync_start,
+            hsync_end: mode_info.hsync_end,
+            htotal: mode_info.htotal,
+            hskew: mode_info.hskew,
+            vdisplay: mode_info.vdisplay,
+            vsync_start: mode_info.vsync_start,
+            vsync_end: mode_info.vsync_end,
+            vtotal: mode_info.vtotal,
+            vscan: mode_info.vscan,
+            flags: mode_info.flags,
+            type_: mode_info.type_,
+            name: mode_info.name,
+        })
+    }
+}
+
 /// Encodes four bytes as a Linux DRM FOURCC pixel-format identifier.
 ///
 /// Each byte occupies eight bits of the resulting value, with the first byte
