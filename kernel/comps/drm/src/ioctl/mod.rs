@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 
+mod gem;
 mod general;
 mod kms;
 
@@ -23,6 +24,10 @@ impl DrmFile {
             cmd @ DrmIoctlGetMagic => {
                 self.check_ioctl_requirements(DrmIoctlAccess::empty(), DrmFeatures::empty())?;
                 self.drm_get_magic(cmd)
+            }
+            cmd @ DrmIoctlGemClose => {
+                self.check_ioctl_requirements(DrmIoctlAccess::RENDER_ALLOW, DrmFeatures::GEM)?;
+                self.drm_gem_close(cmd)
             }
             cmd @ DrmIoctlGetCap => {
                 self.check_ioctl_requirements(DrmIoctlAccess::RENDER_ALLOW, DrmFeatures::empty())?;
@@ -80,6 +85,28 @@ impl DrmFile {
             cmd @ DrmIoctlModeObjectGetProps => {
                 self.check_ioctl_requirements(DrmIoctlAccess::empty(), DrmFeatures::MODESET)?;
                 self.drm_mode_object_get_props(cmd)
+            }
+            // GEM ioctl cmds.
+            cmd @ DrmIoctlModeCreateDumb => {
+                self.check_ioctl_requirements(
+                    DrmIoctlAccess::empty(),
+                    DrmFeatures::MODESET | DrmFeatures::GEM,
+                )?;
+                self.drm_mode_create_dumb(cmd)
+            }
+            cmd @ DrmIoctlModeMapDumb => {
+                self.check_ioctl_requirements(
+                    DrmIoctlAccess::empty(),
+                    DrmFeatures::MODESET | DrmFeatures::GEM,
+                )?;
+                self.drm_mode_map_dumb(cmd)
+            }
+            cmd @ DrmIoctlModeDestroyDumb => {
+                self.check_ioctl_requirements(
+                    DrmIoctlAccess::empty(),
+                    DrmFeatures::MODESET | DrmFeatures::GEM,
+                )?;
+                self.drm_mode_destroy_dumb(cmd)
             }
             _ => {
                 ostd::warn!(
@@ -160,7 +187,10 @@ mod ioctl_defs {
             DrmModeGetPlaneRes, DrmModeGetResources,
         },
     };
-    use crate::ioctl::kms::{DrmModeGetBlob, DrmModeGetProperty, DrmModeObjectGetProps};
+    use crate::ioctl::{
+        gem::{DrmGemClose, DrmModeCreateDumb, DrmModeDestroyDumb, DrmModeMapDumb},
+        kms::{DrmModeGetBlob, DrmModeGetProperty, DrmModeObjectGetProps},
+    };
 
     pub(super) type DrmIoctlVersion =
         ioc!(DRM_IOCTL_VERSION, b'd', 0x00, InOutData<DrmVersion>);
@@ -168,6 +198,12 @@ mod ioctl_defs {
         ioc!(DRM_IOCTL_GET_UNIQUE, b'd', 0x01, InOutData<DrmUnique>);
     pub(super) type DrmIoctlGetMagic =
         ioc!(DRM_IOCTL_GET_MAGIC, b'd', 0x02, OutData<DrmAuth>);
+    pub(super) type DrmIoctlGemClose = ioc!(
+        DRM_IOCTL_GEM_CLOSE,
+        b'd',
+        0x09,
+        InData<DrmGemClose>
+    );
     pub(super) type DrmIoctlGetCap =
         ioc!(DRM_IOCTL_GET_CAP, b'd', 0x0c, InOutData<DrmGetCap>);
     pub(super) type DrmIoctlSetClientCap =
@@ -213,5 +249,23 @@ mod ioctl_defs {
         b'd',
         0xb9,
         InOutData<DrmModeObjectGetProps>
+    );
+    pub(super) type DrmIoctlModeCreateDumb = ioc!(
+        DRM_IOCTL_MODE_CREATE_DUMB,
+        b'd',
+        0xb2,
+        InOutData<DrmModeCreateDumb>
+    );
+    pub(super) type DrmIoctlModeMapDumb = ioc!(
+        DRM_IOCTL_MODE_MAP_DUMB,
+        b'd',
+        0xb3,
+        InOutData<DrmModeMapDumb>
+    );
+    pub(super) type DrmIoctlModeDestroyDumb = ioc!(
+        DRM_IOCTL_MODE_DESTROY_DUMB,
+        b'd',
+        0xb4,
+        InOutData<DrmModeDestroyDumb>
     );
 }

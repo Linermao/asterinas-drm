@@ -16,6 +16,7 @@ use device_id::{DeviceId, MajorId, MinorId};
 use crate::{
     device::{DrmDevice, DrmMaster, RegisteredDrmDevice},
     file::DrmFile,
+    gem::object::DrmGemObject,
     kms::DrmKmsDevice,
 };
 
@@ -107,6 +108,19 @@ impl DrmMinor {
         }
 
         Ok(())
+    }
+
+    pub(super) fn ensure_gem_mmap_offset(&self, object: &Arc<dyn DrmGemObject>) -> Result<u64> {
+        self.registered_device.ensure_gem_mmap_offset(object)
+    }
+
+    pub(super) fn lookup_gem_for_mmap(
+        &self,
+        start_page: u64,
+        num_pages: u64,
+    ) -> Result<Option<Arc<dyn DrmGemObject>>> {
+        self.registered_device
+            .lookup_gem_for_mmap(start_page, num_pages)
     }
 }
 

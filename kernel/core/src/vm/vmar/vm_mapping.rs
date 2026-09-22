@@ -1123,7 +1123,6 @@ impl MapHandle<'_, '_, '_> {
     /// Maps a [`UFrame`].
     ///
     /// `offset` specifies the virtual address offset (from the start of the memory region).
-    #[expect(dead_code)]
     pub fn map_frame(&mut self, offset: usize, frame: UFrame) {
         let map_size = self.vm_mapping.map_size.get();
         if offset >= map_size {

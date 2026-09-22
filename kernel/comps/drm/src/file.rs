@@ -1,13 +1,16 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use alloc::sync::{Arc, Weak};
+use alloc::{
+    boxed::Box,
+    sync::{Arc, Weak},
+};
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use aster_core::{
     current,
     events::IoEvents,
     fs::{
-        file::{PerOpenFileOps, StatusFlags},
+        file::{Mappable, MappedObject, PerOpenFileOps, StatusFlags},
         vfs::{inode::FileOps, path::Path},
     },
     prelude::*,
@@ -16,15 +19,19 @@ use aster_core::{
         signal::{PollHandle, Pollable},
     },
     util::ioctl::RawIoctl,
+    vm::vmar::MapHandle,
 };
 use atomic_integer_wrapper::define_atomic_version_of_integer_like_type;
+use hashbrown::HashMap;
 use ostd::{
-    mm::{VmReader, VmWriter},
+    mm::{PAGE_SIZE, VmReader, VmWriter},
     sync::Mutex,
 };
+use sparse_id_alloc::SparseIdAlloc;
 
 use crate::{
     device::{DrmDevice, DrmFeatures, DrmMaster},
+    gem::object::{DrmGemMappedObject, DrmGemObject, DrmInvalidMappedObject},
     has_current_sys_admin,
     kms::{DrmKmsDevice, DrmModeConfig},
     minor::{DrmMinor, DrmMinorType},
@@ -43,6 +50,9 @@ pub(super) struct DrmFile {
     /// Authentication state present only for primary-node files.
     auth: Option<DrmPrimaryAuth>,
     minor: Arc<DrmMinor>,
+
+    next_gem_handle: Mutex<SparseIdAlloc>,
+    gem_table: Mutex<HashMap<u32, Arc<dyn DrmGemObject>>>,
 }
 
 impl DrmFile {
@@ -91,6 +101,9 @@ impl DrmFile {
             client_caps: AtomicDrmClientCaps::default(),
             auth,
             minor,
+
+            next_gem_handle: Mutex::new(SparseIdAlloc::new(1, u32::MAX)),
+            gem_table: Mutex::new(HashMap::new()),
         }
     }
 
@@ -153,6 +166,59 @@ impl DrmFile {
     pub(super) fn drop_master(&self) -> Result<()> {
         self.check_master_control_permission()?;
         self.minor.drop_master(self.client_id)
+    }
+
+    pub(super) fn ensure_gem_mmap_offset(&self, object: &Arc<dyn DrmGemObject>) -> Result<u64> {
+        self.minor.ensure_gem_mmap_offset(object)
+    }
+
+    fn lookup_gem_for_mmap(
+        &self,
+        start_page: u64,
+        num_pages: u64,
+    ) -> Result<Option<Arc<dyn DrmGemObject>>> {
+        self.minor.lookup_gem_for_mmap(start_page, num_pages)
+    }
+
+    fn alloc_gem_handle(&self) -> Result<u32> {
+        let Some(handle_id) = self.next_gem_handle.lock().alloc() else {
+            return_errno_with_message!(Errno::ENOMEM, "no GEM handles are available");
+        };
+
+        Ok(handle_id)
+    }
+
+    pub(super) fn add_gem_object(&self, gem_object: Arc<dyn DrmGemObject>) -> Result<u32> {
+        let handle = self.alloc_gem_handle()?;
+        if let Err(err) = gem_object.vma_node().allow(self.client_id) {
+            self.next_gem_handle.lock().free(handle);
+            return Err(err);
+        }
+        self.gem_table.lock().insert(handle, gem_object);
+        Ok(handle)
+    }
+
+    pub(super) fn map_gem_handle(&self, handle: u32) -> Result<u64> {
+        let gem_object = self
+            .gem_table
+            .lock()
+            .get(&handle)
+            .cloned()
+            .ok_or(Errno::ENOENT)?;
+
+        self.ensure_gem_mmap_offset(&gem_object)?;
+
+        Ok(gem_object.vma_node().offset_addr())
+    }
+
+    pub(super) fn remove_gem_object(&self, handle: u32) -> Result<()> {
+        let Some(gem_object) = self.gem_table.lock().remove(&handle) else {
+            return_errno!(Errno::EINVAL);
+        };
+
+        self.next_gem_handle.lock().free(handle);
+        gem_object.vma_node().revoke(self.client_id);
+        Ok(())
     }
 
     /// Keeps tracking the ioctl caller while this file has never been master,
@@ -218,9 +284,47 @@ impl PerOpenFileOps for DrmFile {
         true
     }
 
+    fn mappable(&self) -> Result<&dyn Mappable> {
+        Ok(self as &dyn Mappable)
+    }
+
     fn ioctl(&self, _path: &Path, raw_ioctl: RawIoctl) -> Result<i32> {
         self.update_owner_process();
         self.dispatch_ioctl(raw_ioctl)
+    }
+}
+
+impl Mappable for DrmFile {
+    fn map(&self, offset: usize, _handle: MapHandle) -> Box<dyn MappedObject> {
+        debug_assert!(offset.is_multiple_of(PAGE_SIZE));
+
+        // TODO: `Mappable::map` cannot return an error or inspect the requested mapping
+        // length. Invalid offsets and permissions therefore produce a sentinel
+        // mapping whose page faults return `EFAULT`, while object bounds are
+        // checked one page at a time by `DrmGemMappedObject`. Consequently, an
+        // invalid or oversized DRM mmap may succeed initially and fail on access.
+        let Ok(start_page) = u64::try_from(offset / PAGE_SIZE) else {
+            return Box::new(DrmInvalidMappedObject);
+        };
+        let Ok(Some(gem_object)) = self.lookup_gem_for_mmap(start_page, 1) else {
+            return Box::new(DrmInvalidMappedObject);
+        };
+        let vma_node = gem_object.vma_node();
+        if !vma_node.is_allowed(self.client_id) {
+            return Box::new(DrmInvalidMappedObject);
+        }
+
+        let Some(object_page_offset) = start_page.checked_sub(vma_node.start_page()) else {
+            return Box::new(DrmInvalidMappedObject);
+        };
+        let Some(object_offset) = object_page_offset.checked_mul(PAGE_SIZE as u64) else {
+            return Box::new(DrmInvalidMappedObject);
+        };
+        let Ok(object_offset) = usize::try_from(object_offset) else {
+            return Box::new(DrmInvalidMappedObject);
+        };
+
+        Box::new(DrmGemMappedObject::new(gem_object, object_offset))
     }
 }
 
@@ -253,6 +357,15 @@ impl Pollable for DrmFile {
 
 impl Drop for DrmFile {
     fn drop(&mut self) {
+        for gem_object in self
+            .gem_table
+            .get_mut()
+            .drain()
+            .map(|(_, gem_object)| gem_object)
+        {
+            gem_object.vma_node().revoke(self.client_id);
+        }
+
         let Some(auth) = self.auth.as_ref() else {
             return;
         };

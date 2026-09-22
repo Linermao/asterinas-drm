@@ -13,7 +13,10 @@ use aster_core::prelude::*;
 use ostd::sync::Mutex;
 use sparse_id_alloc::SparseIdAlloc;
 
-use crate::kms::DrmKmsDevice;
+use crate::{
+    gem::{DrmGemOps, object::DrmGemObject, vma_manager::DrmVmaOffsetManager},
+    kms::DrmKmsDevice,
+};
 
 static DRM_DEVICE_INDEX_ALLOCATOR: Mutex<SparseIdAlloc> = Mutex::new(SparseIdAlloc::new(0, 63));
 
@@ -33,6 +36,11 @@ pub trait DrmDevice: Debug + Send + Sync {
 
     /// Returns the KMS operations implemented by this device, if any.
     fn kms_device(&self) -> Option<&dyn DrmKmsDevice> {
+        None
+    }
+
+    /// Returns the GEM operations implemented by this device, if any.
+    fn gem_ops(&self) -> Option<&dyn DrmGemOps> {
         None
     }
 }
@@ -70,6 +78,7 @@ pub(super) struct RegisteredDrmDevice {
     /// Primary files retain their own `Arc<DrmMaster>`, so clearing this
     /// pointer on `DROP_MASTER` does not destroy the former master's context.
     master: Mutex<Option<Arc<DrmMaster>>>,
+    vma_manager: Option<DrmVmaOffsetManager>,
 }
 
 impl RegisteredDrmDevice {
@@ -84,10 +93,23 @@ impl RegisteredDrmDevice {
             );
         }
 
+        let has_gem_feature = device.has_features(DrmFeatures::GEM);
+        let has_gem_ops = device.gem_ops().is_some();
+
+        if has_gem_feature != has_gem_ops {
+            return_errno_with_message!(
+                Errno::EINVAL,
+                "the DRM GEM feature and GEM operations are inconsistent"
+            );
+        }
+
+        let vma_manager = has_gem_feature.then(DrmVmaOffsetManager::default);
+
         Ok(Self {
             index: DrmDeviceIndex::alloc()?,
             device,
             master: Mutex::new(None),
+            vma_manager,
         })
     }
 
@@ -187,6 +209,27 @@ impl RegisteredDrmDevice {
         *master = None;
 
         Ok(())
+    }
+
+    fn vma_manager(&self) -> Result<&DrmVmaOffsetManager> {
+        let Some(vma_manager) = self.vma_manager.as_ref() else {
+            return_errno_with_message!(Errno::EOPNOTSUPP, "the DRM device does not support GEM");
+        };
+
+        Ok(vma_manager)
+    }
+
+    pub(super) fn ensure_gem_mmap_offset(&self, object: &Arc<dyn DrmGemObject>) -> Result<u64> {
+        self.vma_manager()?.add(object)?;
+        Ok(object.vma_node().offset_addr())
+    }
+
+    pub(super) fn lookup_gem_for_mmap(
+        &self,
+        start_page: u64,
+        num_pages: u64,
+    ) -> Result<Option<Arc<dyn DrmGemObject>>> {
+        Ok(self.vma_manager()?.lookup(start_page, num_pages))
     }
 }
 

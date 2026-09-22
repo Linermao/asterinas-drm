@@ -23,6 +23,7 @@ use core::fmt::Debug;
 use aster_core::prelude::*;
 use aster_drm::{
     device::{DrmDevice, DrmFeatures},
+    gem::{DrmGemOps, object::DrmGemObject, shmem::DrmGemShmemObject},
     kms::{
         DrmKmsDevice, DrmModeConfig,
         objects::{
@@ -118,8 +119,11 @@ impl SimpleDrmDevice {
 
         Ok(Self {
             framebuffer: framebuffer.clone(),
-            features: DrmFeatures::MODESET,
+            features: DrmFeatures::MODESET | DrmFeatures::GEM,
             mode_config,
+            // TODO: MODESET is not implemented yet. Advertise it temporarily because
+            // dumb-buffer creation requires this feature, allowing the GEM tests
+            // to run until KMS support is introduced.
         })
     }
 }
@@ -138,6 +142,10 @@ impl DrmDevice for SimpleDrmDevice {
     }
 
     fn kms_device(&self) -> Option<&dyn DrmKmsDevice> {
+        Some(self)
+    }
+
+    fn gem_ops(&self) -> Option<&dyn DrmGemOps> {
         Some(self)
     }
 }
@@ -171,5 +179,25 @@ impl DrmKmsDevice for SimpleDrmDevice {
         connector.update_probe_state(probe_state);
 
         Ok(())
+    }
+}
+
+impl DrmGemOps for SimpleDrmDevice {
+    fn create_dumb(&self, width: u32, height: u32, bpp: u32) -> Result<Arc<dyn DrmGemObject>> {
+        let bits_per_row = u64::from(width) * u64::from(bpp);
+        let Ok(pitch) = u32::try_from(bits_per_row.div_ceil(8)) else {
+            return_errno_with_message!(Errno::EINVAL, "the dumb-buffer pitch overflows");
+        };
+        let Ok(pitch_size) = usize::try_from(pitch) else {
+            return_errno_with_message!(Errno::EINVAL, "the dumb-buffer pitch is too large");
+        };
+        let Ok(height) = usize::try_from(height) else {
+            return_errno_with_message!(Errno::EINVAL, "the dumb-buffer height is too large");
+        };
+        let Some(size) = pitch_size.checked_mul(height) else {
+            return_errno_with_message!(Errno::EINVAL, "the dumb-buffer size overflows");
+        };
+
+        Ok(Arc::new(DrmGemShmemObject::new(pitch, size)?))
     }
 }
