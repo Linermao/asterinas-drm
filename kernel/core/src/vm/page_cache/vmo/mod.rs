@@ -39,7 +39,7 @@ use crate::{
 
 mod options;
 
-pub(crate) use options::VmoOptions;
+pub use options::VmoOptions;
 
 /// Page-indexed memory object used by the page cache and mapping code.
 ///
@@ -154,7 +154,7 @@ impl Debug for Vmo {
 
 bitflags! {
     /// VMO flags.
-    pub(crate) struct VmoFlags: u32 {
+    pub struct VmoFlags: u32 {
         /// Set this flag if a VMO is resizable.
         const RESIZABLE  = 1 << 0;
         /// Set this flags if a VMO is backed by physically contiguous memory
@@ -219,7 +219,7 @@ impl CommitMode {
 
 /// A mode specified when committing a new [`Vmo`] page to the map in a page table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum VmoMapMode {
+pub enum VmoMapMode {
     /// The page is private. It can be a snapshot.
     Private,
     /// The page is shared. It needs to be read.
@@ -292,7 +292,7 @@ impl Vmo {
     ///
     /// For anonymous VMOs the page is zero-filled on first access.
     /// For VMOs with a backend this may perform synchronous I/O.
-    pub(crate) fn commit_on(&self, page_idx: usize, map_mode: VmoMapMode) -> Result<()> {
+    pub fn commit_on(&self, page_idx: usize, map_mode: VmoMapMode) -> Result<()> {
         let page = self.commit_on_internal(page_idx, CommitMode::Read)?;
         map_mode.ensure(page);
         Ok(())
@@ -531,7 +531,7 @@ impl Vmo {
     const PAGE_BATCH_CAPACITY: usize = 32;
 
     /// Reads data from the VMO at `offset` into `writer`.
-    pub(crate) fn read(&self, offset: usize, writer: &mut VmWriter) -> Result<()> {
+    pub fn read(&self, offset: usize, writer: &mut VmWriter) -> Result<()> {
         let read_len = writer.avail().min(self.size().saturating_sub(offset));
         if read_len == 0 {
             return Ok(());
@@ -567,7 +567,7 @@ impl Vmo {
     }
 
     /// Writes data from `reader` into the VMO at `offset`.
-    pub(crate) fn write(&self, offset: usize, reader: &mut VmReader) -> Result<()> {
+    pub fn write(&self, offset: usize, reader: &mut VmReader) -> Result<()> {
         let write_len = reader.remain().min(self.size().saturating_sub(offset));
         if write_len == 0 {
             return Ok(());

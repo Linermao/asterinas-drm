@@ -125,8 +125,8 @@ mod tests;
 mod vmo;
 
 pub(crate) use cache_page::{CachePage, CachePageExt, CachePageMeta, LockedCachePage};
-pub use vmo::Vmo;
-pub(crate) use vmo::{VmoCommitError, VmoFlags, VmoMapMode, VmoOptions};
+pub(crate) use vmo::VmoCommitError;
+pub use vmo::{Vmo, VmoFlags, VmoMapMode, VmoOptions};
 
 /// The page cache for a file-like object.
 ///
