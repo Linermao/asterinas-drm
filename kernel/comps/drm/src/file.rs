@@ -198,13 +198,16 @@ impl DrmFile {
         Ok(handle)
     }
 
-    pub(super) fn map_gem_handle(&self, handle: u32) -> Result<u64> {
-        let gem_object = self
-            .gem_table
+    pub(super) fn lookup_gem_object(&self, handle: u32) -> Result<Arc<dyn DrmGemObject>> {
+        self.gem_table
             .lock()
             .get(&handle)
             .cloned()
-            .ok_or(Errno::ENOENT)?;
+            .ok_or_else(|| Error::with_message(Errno::ENOENT, "the GEM handle does not exist"))
+    }
+
+    pub(super) fn map_gem_handle(&self, handle: u32) -> Result<u64> {
+        let gem_object = self.lookup_gem_object(handle)?;
 
         self.ensure_gem_mmap_offset(&gem_object)?;
 

@@ -74,6 +74,14 @@ impl DrmFile {
                 self.check_ioctl_requirements(DrmIoctlAccess::empty(), DrmFeatures::MODESET)?;
                 self.drm_mode_get_blob(cmd)
             }
+            cmd @ DrmIoctlModeAddFB => {
+                self.check_ioctl_requirements(DrmIoctlAccess::empty(), DrmFeatures::MODESET)?;
+                self.drm_mode_add_fb(cmd)
+            }
+            cmd @ DrmIoctlModeRmFB => {
+                self.check_ioctl_requirements(DrmIoctlAccess::empty(), DrmFeatures::MODESET)?;
+                self.drm_mode_rm_fb(cmd)
+            }
             cmd @ DrmIoctlModeGetPlaneResources => {
                 self.check_ioctl_requirements(DrmIoctlAccess::empty(), DrmFeatures::MODESET)?;
                 self.drm_mode_get_plane_resources(cmd)
@@ -189,7 +197,7 @@ mod ioctl_defs {
     };
     use crate::ioctl::{
         gem::{DrmGemClose, DrmModeCreateDumb, DrmModeDestroyDumb, DrmModeMapDumb},
-        kms::{DrmModeGetBlob, DrmModeGetProperty, DrmModeObjectGetProps},
+        kms::{DrmModeFbCmd, DrmModeGetBlob, DrmModeGetProperty, DrmModeObjectGetProps},
     };
 
     pub(super) type DrmIoctlVersion =
@@ -235,6 +243,18 @@ mod ioctl_defs {
         b'd',
         0xac,
         InOutData<DrmModeGetBlob>
+    );
+    pub(super) type DrmIoctlModeAddFB = ioc!(
+        DRM_IOCTL_MODE_ADDFB,
+        b'd',
+        0xae,
+        InOutData<DrmModeFbCmd>
+    );
+    pub(super) type DrmIoctlModeRmFB = ioc!(
+        DRM_IOCTL_MODE_RMFB,
+        b'd',
+        0xaf,
+        InOutData<u32>
     );
     pub(super) type DrmIoctlModeGetPlaneResources = ioc!(
         DRM_IOCTL_MODE_GETPLANERESOURCES,

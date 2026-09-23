@@ -11,10 +11,11 @@ use crate::{
     file::{DrmClientCaps, DrmFile},
     kms::objects::{
         DrmKmsObject, DrmKmsObjectStore, DrmKmsObjectType, KmsObjectId,
+        framebuffer::DrmFramebuffer,
         plane::DrmPlaneType,
         property::{DRM_PROP_NAME_LEN, DrmPropertyAttachments, DrmPropertyFlags, DrmPropertyKind},
     },
-    utils::DrmModeModeInfo,
+    utils::{DrmDisplayFormat, DrmModeModeInfo},
 };
 
 impl DrmFile {
@@ -30,8 +31,6 @@ impl DrmFile {
                     object_store.collect_object_ids(DrmKmsObjectType::Crtc),
                     object_store.collect_object_ids(DrmKmsObjectType::Encoder),
                     object_store.collect_object_ids(DrmKmsObjectType::Connector),
-                    // TODO: Return registered framebuffer IDs after framebuffer objects are tracked by
-                    // `DrmModeConfig`; this list is currently always empty.
                     object_store.collect_object_ids(DrmKmsObjectType::Framebuffer),
                 )
             };
@@ -344,6 +343,97 @@ impl DrmFile {
             args_ptr.write(&args)?;
             Ok(())
         })?;
+
+        Ok(0)
+    }
+
+    pub(super) fn drm_mode_add_fb(&self, cmd: DrmIoctlModeAddFB) -> Result<i32> {
+        let mut args: DrmModeFbCmd = cmd.read()?;
+
+        let pixel_format = DrmDisplayFormat::try_from((args.bpp, args.depth))?;
+
+        let mode_config = self.mode_config().ok_or(Errno::EINVAL)?;
+        let min_size = mode_config.min_fb_size();
+        let max_size = mode_config.max_fb_size();
+        if !(min_size.width()..=max_size.width()).contains(&args.width)
+            || !(min_size.height()..=max_size.height()).contains(&args.height)
+        {
+            return_errno_with_message!(
+                Errno::EINVAL,
+                "the DRM framebuffer dimensions are outside the supported range"
+            );
+        }
+
+        let minimum_pitch = args
+            .width
+            .checked_mul(pixel_format.bytes_per_pixel() as u32)
+            .ok_or_else(|| Error::with_message(Errno::EINVAL, "the framebuffer pitch overflows"))?;
+        if args.pitch < minimum_pitch {
+            return_errno_with_message!(Errno::EINVAL, "the DRM framebuffer pitch is too small");
+        }
+
+        let required_size = u64::from(args.pitch) * u64::from(args.height);
+        let gem_object = self.lookup_gem_object(args.handle)?;
+        if required_size > gem_object.size() as u64 {
+            return_errno_with_message!(
+                Errno::EINVAL,
+                "the GEM object is too small for the DRM framebuffer"
+            );
+        }
+
+        let framebuffer = DrmFramebuffer::new(
+            args.width,
+            args.height,
+            pixel_format,
+            0,
+            args.pitch,
+            0,
+            0,
+            Some(gem_object),
+        )?;
+        let framebuffer_id = mode_config
+            .object_store()
+            .lock()
+            .add_object(DrmKmsObject::Framebuffer(framebuffer))?;
+        args.fb_id = framebuffer_id;
+
+        if let Err(error) = cmd.write(&args) {
+            mode_config
+                .object_store()
+                .lock()
+                .remove_framebuffer(framebuffer_id);
+            return Err(error);
+        }
+
+        Ok(0)
+    }
+
+    pub(super) fn drm_mode_rm_fb(&self, cmd: DrmIoctlModeRmFB) -> Result<i32> {
+        let framebuffer_id: u32 = cmd.read()?;
+
+        let mode_config = self.mode_config().ok_or(Errno::EINVAL)?;
+        let mut object_store = mode_config.object_store().lock();
+        if object_store.lookup_framebuffer(framebuffer_id).is_none() {
+            return_errno_with_message!(Errno::ENOENT, "the DRM framebuffer does not exist");
+        }
+
+        let plane_ids = object_store.collect_object_ids(DrmKmsObjectType::Plane);
+        for plane_id in plane_ids {
+            let Some(plane) = object_store.lookup_plane(plane_id) else {
+                continue;
+            };
+
+            if plane.state_snapshot().fb_id() == Some(framebuffer_id) {
+                return_errno_with_message!(
+                    Errno::EBUSY,
+                    "the DRM framebuffer is still in use by a plane"
+                );
+            }
+        }
+
+        object_store
+            .remove_framebuffer(framebuffer_id)
+            .ok_or(Errno::ENOENT)?;
 
         Ok(0)
     }
@@ -664,6 +754,21 @@ pub(super) struct DrmModeGetBlob {
     blob_id: u32,
     length: u32,
     data: u64,
+}
+
+/// `struct drm_mode_fb_cmd` in Linux.
+///
+/// Reference: <https://elixir.bootlin.com/linux/v6.17/source/include/uapi/drm/drm_mode.h#L655-L664>.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod)]
+pub(super) struct DrmModeFbCmd {
+    fb_id: u32,
+    width: u32,
+    height: u32,
+    pitch: u32,
+    bpp: u32,
+    depth: u32,
+    handle: u32,
 }
 
 /// `struct drm_mode_get_plane_res` in Linux.
