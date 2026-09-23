@@ -5,6 +5,7 @@
 set -e
 
 ./drm/device_node
+./drm/gem_create_dumb_buffer
 ./drm/get_info
 ./drm/kms_resources
 ./drm/kms_properties
