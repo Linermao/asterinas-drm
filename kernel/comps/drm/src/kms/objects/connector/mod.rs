@@ -48,6 +48,10 @@ impl DrmConnector {
         self.state.lock().clone()
     }
 
+    pub fn update_state(&self, state: DrmConnectorState) {
+        *self.state.lock() = state;
+    }
+
     pub fn probe_state_snapshot(&self) -> DrmConnectorProbeState {
         self.probe_state.lock().clone()
     }
@@ -71,6 +75,10 @@ pub struct DrmConnectorState {
 }
 
 impl DrmConnectorState {
+    pub fn new(encoder_id: Option<KmsObjectId>) -> Self {
+        Self { encoder_id }
+    }
+
     pub fn encoder_id(&self) -> Option<KmsObjectId> {
         self.encoder_id
     }

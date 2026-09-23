@@ -10,13 +10,15 @@
 //! Individual planes, CRTCs, encoders, connectors, and properties are defined
 //! in the [`objects`] module.
 
+use alloc::vec::Vec;
+
 use aster_core::prelude::*;
 use ostd::sync::Mutex;
 
 use crate::{
     device::DrmDevice,
     kms::objects::{DrmKmsObjectStore, KmsObjectId},
-    utils::DrmSize,
+    utils::{DrmDisplayMode, DrmSize},
 };
 
 pub mod objects;
@@ -31,6 +33,23 @@ pub mod objects;
 pub trait DrmKmsDevice: DrmDevice {
     fn mode_config(&self) -> &DrmModeConfig;
     fn probe_connector(&self, connector_id: KmsObjectId) -> Result<()>;
+
+    /// Applies a legacy CRTC configuration.
+    ///
+    /// `None` for `display_mode` disables the CRTC. Enabling a CRTC requires
+    /// one mode, one framebuffer, and the connector set driven by that mode.
+    /// `x` and `y` are the framebuffer-space origin of the scanout rectangle.
+    fn set_crtc(
+        &self,
+        crtc_id: KmsObjectId,
+        fb_id: KmsObjectId,
+        x: u32,
+        y: u32,
+        display_mode: Option<DrmDisplayMode>,
+        connector_ids: Vec<KmsObjectId>,
+    ) -> Result<()>;
+
+    fn dirty_fb(&self, fb_id: KmsObjectId) -> Result<()>;
 }
 
 /// Describes a DRM device's global mode-setting capabilities and KMS objects.

@@ -120,17 +120,20 @@ impl DrmFile {
                     );
                 }
 
+                let mode_config = self.mode_config().ok_or(Errno::EINVAL)?;
                 match cap {
                     DrmGetCapability::DumbBuffer => device.gem_ops().is_some() as u64,
                     DrmGetCapability::VblankHighCrtc => 1,
-                    // TODO: Once KMS is integrated, obtain the mode config from the
-                    // registered DRM device and check that it exists before reporting
-                    // mode-config-dependent capabilities below.
-                    DrmGetCapability::DumbPreferredDepth
-                    | DrmGetCapability::DumbPreferShadow
-                    | DrmGetCapability::AsyncPageFlip
-                    | DrmGetCapability::Addfb2Modifiers
-                    | DrmGetCapability::AtomicAsyncPageFlip => 0,
+                    DrmGetCapability::DumbPreferredDepth => {
+                        u64::from(mode_config.preferred_dumb_buffer_depth())
+                    }
+                    DrmGetCapability::DumbPreferShadow => mode_config.prefer_shadow_buffer() as u64,
+                    DrmGetCapability::AsyncPageFlip => {
+                        mode_config.supports_async_page_flip() as u64
+                    }
+                    DrmGetCapability::Addfb2Modifiers => mode_config.supports_fb_modifiers() as u64,
+                    // Atomic modesetting is not implemented yet.
+                    DrmGetCapability::AtomicAsyncPageFlip => 0,
                     DrmGetCapability::CursorWidth => DRM_DEFAULT_CURSOR_WIDTH,
                     DrmGetCapability::CursorHeight => DRM_DEFAULT_CURSOR_HEIGHT,
                     DrmGetCapability::PageFlipTarget => {

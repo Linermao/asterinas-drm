@@ -33,6 +33,10 @@ impl DrmEncoder {
         *self.current_crtc_id.lock()
     }
 
+    pub fn set_current_crtc_id(&self, crtc_id: Option<KmsObjectId>) {
+        *self.current_crtc_id.lock() = crtc_id;
+    }
+
     pub fn possible_crtcs(&self) -> &[KmsObjectIndex] {
         &self.possible_crtcs
     }

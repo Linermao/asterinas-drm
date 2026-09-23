@@ -58,6 +58,10 @@ impl DrmFile {
                 self.check_ioctl_requirements(DrmIoctlAccess::empty(), DrmFeatures::MODESET)?;
                 self.drm_mode_get_crtc(cmd)
             }
+            cmd @ DrmIoctlModeSetCrtc => {
+                self.check_ioctl_requirements(DrmIoctlAccess::MASTER, DrmFeatures::MODESET)?;
+                self.drm_mode_set_crtc(cmd)
+            }
             cmd @ DrmIoctlModeGetEncoder => {
                 self.check_ioctl_requirements(DrmIoctlAccess::empty(), DrmFeatures::MODESET)?;
                 self.drm_mode_get_encoder(cmd)
@@ -81,6 +85,10 @@ impl DrmFile {
             cmd @ DrmIoctlModeRmFB => {
                 self.check_ioctl_requirements(DrmIoctlAccess::empty(), DrmFeatures::MODESET)?;
                 self.drm_mode_rm_fb(cmd)
+            }
+            cmd @ DrmIoctlModeDirtyFb => {
+                self.check_ioctl_requirements(DrmIoctlAccess::MASTER, DrmFeatures::MODESET)?;
+                self.drm_mode_dirty_fb(cmd)
             }
             cmd @ DrmIoctlModeGetPlaneResources => {
                 self.check_ioctl_requirements(DrmIoctlAccess::empty(), DrmFeatures::MODESET)?;
@@ -197,7 +205,10 @@ mod ioctl_defs {
     };
     use crate::ioctl::{
         gem::{DrmGemClose, DrmModeCreateDumb, DrmModeDestroyDumb, DrmModeMapDumb},
-        kms::{DrmModeFbCmd, DrmModeGetBlob, DrmModeGetProperty, DrmModeObjectGetProps},
+        kms::{
+            DrmModeFbCmd, DrmModeFbDirtyCmd, DrmModeGetBlob, DrmModeGetProperty,
+            DrmModeObjectGetProps,
+        },
     };
 
     pub(super) type DrmIoctlVersion =
@@ -224,6 +235,12 @@ mod ioctl_defs {
         ioc!(DRM_IOCTL_MODE_GETRESOURCES, b'd', 0xa0, InOutData<DrmModeGetResources>);
     pub(super) type DrmIoctlModeGetCrtc =
         ioc!(DRM_IOCTL_MODE_GETCRTC, b'd', 0xa1, InOutData<DrmModeCrtc>);
+    pub(super) type DrmIoctlModeSetCrtc = ioc!(
+        DRM_IOCTL_MODE_SETCRTC,
+        b'd',
+        0xa2,
+        InOutData<DrmModeCrtc>
+    );
     pub(super) type DrmIoctlModeGetEncoder =
         ioc!(DRM_IOCTL_MODE_GETENCODER, b'd', 0xa6, InOutData<DrmModeGetEncoder>);
     pub(super) type DrmIoctlModeGetConnector = ioc!(
@@ -255,6 +272,12 @@ mod ioctl_defs {
         b'd',
         0xaf,
         InOutData<u32>
+    );
+    pub(super) type DrmIoctlModeDirtyFb = ioc!(
+        DRM_IOCTL_MODE_DIRTYFB,
+        b'd',
+        0xb1,
+        InOutData<DrmModeFbDirtyCmd>
     );
     pub(super) type DrmIoctlModeGetPlaneResources = ioc!(
         DRM_IOCTL_MODE_GETPLANERESOURCES,

@@ -40,6 +40,10 @@ impl DrmCrtc {
         self.state.lock().clone()
     }
 
+    pub fn update_state(&self, state: DrmCrtcState) {
+        *self.state.lock() = state;
+    }
+
     pub fn primary_plane_id(&self) -> KmsObjectId {
         self.primary_plane_id
     }
@@ -61,6 +65,15 @@ pub struct DrmCrtcState {
 }
 
 impl DrmCrtcState {
+    pub fn new(display_mode: Option<DrmDisplayMode>) -> Self {
+        let enabled = display_mode.is_some();
+        Self {
+            display_mode,
+            enable: enabled,
+            active: enabled,
+        }
+    }
+
     pub fn display_mode(&self) -> Option<DrmDisplayMode> {
         self.display_mode
     }

@@ -15,7 +15,7 @@ use crate::{
         plane::DrmPlaneType,
         property::{DRM_PROP_NAME_LEN, DrmPropertyAttachments, DrmPropertyFlags, DrmPropertyKind},
     },
-    utils::{DrmDisplayFormat, DrmModeModeInfo},
+    utils::{DrmDisplayFormat, DrmDisplayMode, DrmModeModeInfo},
 };
 
 impl DrmFile {
@@ -115,6 +115,60 @@ impl DrmFile {
         }
 
         cmd.write(&args)?;
+        Ok(0)
+    }
+
+    pub(super) fn drm_mode_set_crtc(&self, cmd: DrmIoctlModeSetCrtc) -> Result<i32> {
+        let args: DrmModeCrtc = cmd.read()?;
+        let kms_ops = self.kms_device().ok_or(Errno::EINVAL)?;
+
+        let display_mode: Option<DrmDisplayMode> = (args.mode_valid != 0)
+            .then(|| args.mode.try_into())
+            .transpose()?;
+
+        if display_mode.is_none() && args.count_connectors != 0 {
+            return_errno!(Errno::EINVAL);
+        }
+
+        if display_mode.is_some() {
+            if args.count_connectors == 0 || args.fb_id == 0 {
+                return_errno!(Errno::EINVAL);
+            }
+        }
+
+        cmd.with_data_ptr(|args_ptr| {
+            let mut connector_ids = Vec::with_capacity(args.count_connectors as usize);
+
+            if args.count_connectors != 0 {
+                if args.set_connectors_ptr == 0 {
+                    return_errno!(Errno::EINVAL);
+                }
+
+                for index in 0..args.count_connectors as usize {
+                    let address = (args.set_connectors_ptr as usize)
+                        .checked_add(
+                            index
+                                .checked_mul(size_of::<u32>())
+                                .ok_or(Errno::EOVERFLOW)?,
+                        )
+                        .ok_or(Errno::EOVERFLOW)?;
+                    let connector_id = args_ptr.vm().read_val::<u32>(address)?;
+                    connector_ids.push(connector_id);
+                }
+            }
+
+            kms_ops.set_crtc(
+                args.crtc_id,
+                args.fb_id,
+                args.x,
+                args.y,
+                display_mode,
+                connector_ids,
+            )?;
+
+            Ok(())
+        })?;
+
         Ok(0)
     }
 
@@ -434,6 +488,17 @@ impl DrmFile {
         object_store
             .remove_framebuffer(framebuffer_id)
             .ok_or(Errno::ENOENT)?;
+
+        Ok(0)
+    }
+
+    pub(super) fn drm_mode_dirty_fb(&self, cmd: DrmIoctlModeDirtyFb) -> Result<i32> {
+        // TODO: Honor dirtyfb flags, color, and clip rectangles. For now,
+        // treat every dirtyfb request as a whole-framebuffer refresh.
+        let args: DrmModeFbDirtyCmd = cmd.read()?;
+
+        let kms_ops = self.kms_device().ok_or(Errno::EINVAL)?;
+        kms_ops.dirty_fb(args.fb_id)?;
 
         Ok(0)
     }
@@ -769,6 +834,19 @@ pub(super) struct DrmModeFbCmd {
     bpp: u32,
     depth: u32,
     handle: u32,
+}
+
+/// `struct drm_mode_fb_dirty_cmd` in Linux.
+///
+/// Reference: <https://elixir.bootlin.com/linux/v6.17/source/include/uapi/drm/drm_mode.h#L744-L777>.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod)]
+pub(super) struct DrmModeFbDirtyCmd {
+    fb_id: u32,
+    flags: u32,
+    color: u32,
+    num_clips: u32,
+    clips_ptr: u64,
 }
 
 /// `struct drm_mode_get_plane_res` in Linux.

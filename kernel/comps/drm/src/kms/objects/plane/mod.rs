@@ -48,6 +48,10 @@ impl DrmPlane {
         }
     }
 
+    pub fn update_state(&self, state: DrmPlaneState) {
+        *self.state.lock() = state;
+    }
+
     pub fn possible_crtcs(&self) -> &[KmsObjectIndex] {
         &self.possible_crtcs
     }
@@ -71,6 +75,20 @@ pub struct DrmPlaneState {
 }
 
 impl DrmPlaneState {
+    pub fn new(
+        source_rect: DrmRect,
+        crtc_rect: DrmRect,
+        fb_id: Option<KmsObjectId>,
+        crtc_id: Option<KmsObjectId>,
+    ) -> Self {
+        Self {
+            source_rect,
+            crtc_rect,
+            fb_id,
+            crtc_id,
+        }
+    }
+
     pub fn source_rect(&self) -> DrmRect {
         self.source_rect
     }
