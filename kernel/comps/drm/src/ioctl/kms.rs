@@ -243,8 +243,8 @@ impl DrmFile {
         let connector_ids = cmd.with_data_ptr(|args_ptr| {
             copy_array_from_user(
                 args_ptr.vm(),
-                args.set_connectors_ptr,
-                args.count_connectors,
+                args.set_connectors_ptr as usize,
+                args.count_connectors as usize,
             )
         })?;
 
@@ -714,7 +714,11 @@ impl DrmFile {
 
         // Validate userspace access even though the refresh covers the whole framebuffer.
         cmd.with_data_ptr(|args_ptr| {
-            copy_array_from_user::<DrmClipRect>(args_ptr.vm(), args.clips_ptr, args.num_clips)
+            copy_array_from_user::<DrmClipRect>(
+                args_ptr.vm(),
+                args.clips_ptr as usize,
+                args.num_clips as usize,
+            )
                 .map(drop)
         })?;
 
@@ -934,10 +938,9 @@ fn copy_array_to_user<T: Pod>(
 
 fn copy_array_from_user<T: Pod>(
     userspace: &impl VmIo,
-    user_ptr: u64,
-    count: u32,
+    user_ptr: usize,
+    count: usize,
 ) -> Result<Vec<T>> {
-    let count = count as usize;
     if count == 0 {
         return Ok(Vec::new());
     }
@@ -946,7 +949,7 @@ fn copy_array_from_user<T: Pod>(
     }
 
     let mut values = vec![T::new_zeroed(); count];
-    userspace.read_slice(user_ptr as usize, values.as_mut_slice())?;
+    userspace.read_slice(user_ptr, values.as_mut_slice())?;
 
     Ok(values)
 }
