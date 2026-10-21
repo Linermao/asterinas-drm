@@ -28,6 +28,7 @@ use aster_drm::{
     gem::{DrmGemOps, object::DrmGemObject, shmem::DrmGemShmemBackend},
     kms::{
         DrmKmsOps, DrmModeConfig,
+        atomic::DrmAtomicOps,
         display_info::{DrmDisplayInfo, SubpixelOrder},
         display_mode::DrmDisplayMode,
         objects::{
@@ -225,6 +226,10 @@ impl DrmDevice for SimpleDrmDevice {
 
     fn as_kms_ops(&self) -> Option<&dyn DrmKmsOps> {
         Some(self)
+    }
+
+    fn as_atomic_ops(&self) -> Option<&dyn DrmAtomicOps> {
+        None
     }
 }
 

@@ -8,6 +8,7 @@ use alloc::{
 
 use aster_core::prelude::*;
 use aster_util::fixed_str::FixedCStr;
+use hashbrown::HashMap;
 use int_to_c_enum::TryFromInt;
 use ostd::mm::VmIo;
 use ostd_pod::Pod;
@@ -17,9 +18,10 @@ use crate::{
     file::{DrmClientCaps, DrmFile},
     ioctl::ioctl_defs,
     kms::{
+        atomic::{DrmAtomicRequest, DrmAtomicState, atomic_check, atomic_commit},
         display_mode::{DrmDisplayMode, DrmModeInfo},
         objects::{
-            DrmKmsObjectType, KmsObjectIndex,
+            DrmKmsObjectType, KmsObjectId, KmsObjectIndex,
             connector::{DrmConnector, DrmConnectorState},
             crtc::DrmCrtcState,
             encoder::DrmEncoder,
@@ -27,6 +29,7 @@ use crate::{
             plane::{DrmPlaneState, DrmPlaneType},
             property::{
                 DRM_PROP_NAME_LEN, DrmPropertyAttachments, DrmPropertyFlags, DrmPropertyValueType,
+                DrmStandardProperty,
             },
         },
         pixel_format::DrmPixelFormat,
@@ -66,11 +69,7 @@ impl DrmFile {
                 parse_boolean_capability(args.value)?,
             ),
             DrmSetCapability::Atomic => {
-                // TODO: Support atomic modesetting.
-                return_errno_with_message!(
-                    Errno::EOPNOTSUPP,
-                    "the DRM device lacks atomic modesetting"
-                );
+                self.set_client_caps(DrmClientCaps::ATOMIC, parse_boolean_capability(args.value)?)
             }
             DrmSetCapability::AspectRatio => self.set_client_caps(
                 DrmClientCaps::ASPECT_RATIO,
@@ -719,7 +718,7 @@ impl DrmFile {
                 args.clips_ptr as usize,
                 args.num_clips as usize,
             )
-                .map(drop)
+            .map(drop)
         })?;
 
         let kms_ops = self.device().as_kms_ops().unwrap();
@@ -880,6 +879,81 @@ impl DrmFile {
             args_ptr.write(&args)?;
             Ok(())
         })?;
+
+        Ok(0)
+    }
+
+    pub(super) fn drm_mode_atomic(&self, cmd: ioctl_defs::ModeAtomic) -> Result<i32> {
+        if !self.has_client_caps(DrmClientCaps::ATOMIC) {
+            return_errno!(Errno::EINVAL);
+        }
+
+        let args = cmd.read()?;
+        let kms_ops = self.device().as_kms_ops().unwrap();
+        let atomic_ops = self.device().as_atomic_ops().unwrap();
+
+        let mut atomic_requests = Vec::new();
+        cmd.with_data_ptr(|args_ptr| {
+            let object_prop_counts = copy_array_from_user::<u32>(
+                args_ptr.vm(),
+                args.count_props_ptr as usize,
+                args.count_objs as usize,
+            )?;
+            let object_ids = copy_array_from_user::<u32>(
+                args_ptr.vm(),
+                args.objs_ptr as usize,
+                args.count_objs as usize,
+            )?;
+
+            let mut prop_index = 0u32;
+            for (object_id, prop_count) in object_ids.iter().zip(object_prop_counts) {
+                let prop_id_ptr = (args.props_ptr as usize)
+                    .checked_add((prop_index as usize) * size_of::<u32>())
+                    .ok_or(Errno::EOVERFLOW)?;
+                let prop_ids =
+                    copy_array_from_user::<u32>(args_ptr.vm(), prop_id_ptr, prop_count as usize)?;
+
+                let prop_value_ptr = (args.prop_values_ptr as usize)
+                    .checked_add((prop_index as usize) * size_of::<u64>())
+                    .ok_or(Errno::EOVERFLOW)?;
+                let prop_values = copy_array_from_user::<u64>(
+                    args_ptr.vm(),
+                    prop_value_ptr,
+                    prop_count as usize,
+                )?;
+
+                let object_props = prop_ids.into_iter().zip(prop_values).collect::<Vec<_>>();
+                atomic_requests.push(DrmAtomicRequest::new(*object_id, object_props));
+
+                prop_index = prop_index.checked_add(prop_count).ok_or(Errno::EOVERFLOW)?;
+            }
+
+            Ok(())
+        })?;
+
+        if args.flags.contains(DrmAtomicFlags::TEST_ONLY) {
+            let object_store = kms_ops.mode_config().object_store().lock();
+            atomic_check(&object_store, &atomic_requests)?;
+            return Ok(0);
+        }
+
+        if args.flags.contains(DrmAtomicFlags::PAGE_FLIP_ASYNC) {
+            return_errno!(Errno::EOPNOTSUPP)
+        }
+
+        if args.flags.contains(DrmAtomicFlags::PAGE_FLIP_EVENT) {
+            return_errno!(Errno::EOPNOTSUPP)
+        }
+
+        if args.flags.contains(DrmAtomicFlags::NONBLOCK) {
+            // TODO:
+        } else {
+            // atomic_check()?;
+            // atomic_commit()?;
+        }
+
+        atomic_ops.atomic_commit_tail()?;
+        atomic_ops.atomic_flush()?;
 
         Ok(0)
     }
@@ -1166,4 +1240,36 @@ pub(super) struct DrmModeObjectGetProps {
     count_props: u32,
     obj_id: u32,
     obj_type: u32,
+}
+
+bitflags::bitflags! {
+    /// `macro DRM_MODE_ATOMIC_FLAGS` in Linux.
+    ///
+    /// Reference: <https://elixir.bootlin.com/linux/v6.17/source/include/uapi/drm/drm_mode.h#L1139-L1150>.
+    #[repr(transparent)]
+    #[derive(Pod)]
+    struct DrmAtomicFlags: u32 {
+        const PAGE_FLIP_EVENT    = 0x0001;
+        const PAGE_FLIP_ASYNC    = 0x0002;
+
+        const TEST_ONLY          = 0x0100;
+        const NONBLOCK           = 0x0200;
+        const ALLOW_MODESET      = 0x0400;
+    }
+}
+
+/// `struct drm_mode_atomic` in Linux.
+///
+/// Reference: <https://elixir.bootlin.com/linux/v6.17/source/include/uapi/drm/drm_mode.h#L1152-L1161>.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod)]
+pub(super) struct DrmModeAtomic {
+    flags: DrmAtomicFlags,
+    count_objs: u32,
+    objs_ptr: u64,
+    count_props_ptr: u64,
+    props_ptr: u64,
+    prop_values_ptr: u64,
+    reserved: u64,
+    user_data: u64,
 }

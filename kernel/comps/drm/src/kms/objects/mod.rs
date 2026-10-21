@@ -163,6 +163,26 @@ impl DrmKmsObjectStore {
         self.connectors.values()
     }
 
+    pub(crate) fn lookup_any_object_type(&self, id: KmsObjectId) -> Option<DrmKmsObjectType> {
+        if self.lookup_plane_by_id(id).is_some() {
+            return Some(DrmKmsObjectType::Plane);
+        }
+
+        if self.lookup_crtc_by_id(id).is_some() {
+            return Some(DrmKmsObjectType::Crtc);
+        }
+
+        if self.lookup_connector_by_id(id).is_some() {
+            return Some(DrmKmsObjectType::Connector);
+        }
+
+        if self.lookup_encoder_by_id(id).is_some() {
+            return Some(DrmKmsObjectType::Encoder);
+        }
+
+        None
+    }
+
     pub(crate) fn lookup_plane_by_id(&self, id: KmsObjectId) -> Option<&Arc<DrmPlane>> {
         self.planes.get(&id)
     }
@@ -227,6 +247,15 @@ impl DrmKmsObjectStore {
         }
 
         Ok(None)
+    }
+
+    pub(crate) fn standard_property(
+        &self,
+        property_id: KmsObjectId,
+    ) -> Option<DrmStandardProperty> {
+        self.standard_property_ids
+            .iter()
+            .find_map(|(&standard, &id)| (id == property_id).then_some(standard))
     }
 
     fn get_or_create_standard_property(

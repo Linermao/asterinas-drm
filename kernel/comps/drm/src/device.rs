@@ -16,7 +16,7 @@ use sparse_id_alloc::SparseIdAlloc;
 
 use crate::{
     gem::{DrmGemOps, mmap_offset::DrmGemMmapOffsetSpace, object::DrmGemObject},
-    kms::DrmKmsOps,
+    kms::{DrmKmsOps, atomic::DrmAtomicOps},
 };
 
 static DRM_DEVICE_INDEX_ALLOCATOR: Mutex<SparseIdAlloc> = Mutex::new(SparseIdAlloc::new(0, 63));
@@ -40,6 +40,10 @@ pub trait DrmDevice: Debug + Send + Sync {
 
     /// Returns the KMS operations implemented by this device, if any.
     fn as_kms_ops(&self) -> Option<&dyn DrmKmsOps>;
+
+    /// Returns the Atomic operations implemented by this device, if any.
+    /// TODO: fix: The atomic ops must implement kms ops.
+    fn as_atomic_ops(&self) -> Option<&dyn DrmAtomicOps>;
 }
 
 bitflags::bitflags! {

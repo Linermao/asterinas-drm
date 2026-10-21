@@ -120,6 +120,26 @@ impl DrmFile {
                 self.check_kms_ioctl_access(DrmIoctlAccess::empty())?;
                 self.drm_mode_object_get_props(cmd)
             }
+            cmd @ ModeAtomic => {
+                self.check_kms_ioctl_access(DrmIoctlAccess::MASTER)?;
+
+                if self.device().as_atomic_ops().is_none() {
+                    return_errno_with_message!(
+                        Errno::EOPNOTSUPP,
+                        "the DRM device does not support Atomic"
+                    );
+                }
+
+                self.drm_mode_atomic(cmd)
+            }
+            cmd @ ModeCreatePropBlob => {
+                self.check_kms_ioctl_access(DrmIoctlAccess::empty())?;
+                self.drm_mode_create_prop_blob(cmd)
+            }
+            cmd @ ModeDestroyPropBlob => {
+                self.check_kms_ioctl_access(DrmIoctlAccess::empty())?;
+                self.drm_mode_destroy_prop_blob(cmd)
+            }
             _ => {
                 ostd::warn!(
                     "unknown ioctl minor={:?} cmd={:#x}",
@@ -201,9 +221,10 @@ mod ioctl_defs {
         gem::{DrmGemClose, DrmModeCreateDumb, DrmModeDestroyDumb, DrmModeMapDumb},
         general::{DrmAuth, DrmGetCap, DrmUnique, DrmVersion, DrmWaitVblank},
         kms::{
-            DrmModeCrtc, DrmModeFbCmd, DrmModeFbDirtyCmd, DrmModeGetBlob, DrmModeGetConnector,
-            DrmModeGetEncoder, DrmModeGetPlane, DrmModeGetPlaneRes, DrmModeGetProperty,
-            DrmModeGetResources, DrmModeObjectGetProps, DrmSetClientCap,
+            DrmModeAtomic, DrmModeCreateBlob, DrmModeCrtc, DrmModeDestroyBlob, DrmModeFbCmd,
+            DrmModeFbDirtyCmd, DrmModeGetBlob, DrmModeGetConnector, DrmModeGetEncoder,
+            DrmModeGetPlane, DrmModeGetPlaneRes, DrmModeGetProperty, DrmModeGetResources,
+            DrmModeObjectGetProps, DrmSetClientCap,
         },
     };
 
@@ -234,4 +255,7 @@ mod ioctl_defs {
     pub(super) type ModeGetPlaneResources   = ioc!(DRM_IOCTL_MODE_GETPLANERESOURCES,    b'd', 0xb5, InOutData<DrmModeGetPlaneRes>);
     pub(super) type ModeGetPlane            = ioc!(DRM_IOCTL_MODE_GETPLANE,             b'd', 0xb6, InOutData<DrmModeGetPlane>);
     pub(super) type ModeObjectGetProps      = ioc!(DRM_IOCTL_MODE_OBJ_GETPROPERTIES,    b'd', 0xb9, InOutData<DrmModeObjectGetProps>);
+    pub(super) type ModeAtomic              = ioc!(DRM_IOCTL_MODE_ATOMIC,               b'd', 0xbc, InOutData<DrmModeAtomic>);
+    pub(super) type ModeCreatePropBlob      = ioc!(DRM_IOCTL_MODE_CREATEPROPBLOB,       b'd', 0xbd, InOutData<DrmModeCreateBlob>);
+    pub(super) type ModeDestroyPropBlob     = ioc!(DRM_IOCTL_MODE_DESTROYPROPBLOB,      b'd', 0xbe, InOutData<DrmModeDestroyBlob>);
 }

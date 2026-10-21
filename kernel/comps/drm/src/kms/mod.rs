@@ -21,6 +21,7 @@ use crate::{
     utils::{DrmRect, DrmSize},
 };
 
+pub mod atomic;
 pub mod display_info;
 pub mod display_mode;
 pub mod objects;
