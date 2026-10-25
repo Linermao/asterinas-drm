@@ -42,7 +42,7 @@ use aster_drm::{
         },
         pixel_format::DrmPixelFormat,
     },
-    utils::{DrmRect, DrmSize},
+    utils::{DrmRect, DrmSize, DrmSourceRect},
 };
 use aster_framebuffer::{
     framebuffer::{self, FrameBuffer},
@@ -140,7 +140,18 @@ impl SimpleDrmDevice {
         })
     }
 
-    fn flush_framebuffer(&self, framebuffer: &DrmFramebuffer, source_rect: DrmRect) -> Result<()> {
+    fn flush_framebuffer(
+        &self,
+        framebuffer: &DrmFramebuffer,
+        source_rect: DrmSourceRect,
+    ) -> Result<()> {
+        let source_rect = source_rect.try_to_pixel_rect().ok_or_else(|| {
+            Error::with_message(
+                Errno::EINVAL,
+                "simpledrm requires a pixel-aligned source rectangle",
+            )
+        })?;
+
         if framebuffer.pixel_format() != self.pixel_format {
             return_errno_with_message!(
                 Errno::EINVAL,
@@ -150,7 +161,7 @@ impl SimpleDrmDevice {
 
         let framebuffer_size = framebuffer.size();
         let framebuffer_rect =
-            DrmRect::new(0, 0, framebuffer_size.width(), framebuffer_size.height());
+            DrmRect::<u32>::new(0, 0, framebuffer_size.width(), framebuffer_size.height());
         if !framebuffer_rect.contains_rect(&source_rect) {
             return_errno_with_message!(
                 Errno::EINVAL,
@@ -262,7 +273,7 @@ impl DrmKmsOps for SimpleDrmDevice {
         &self,
         _crtc_index: KmsObjectIndex,
         framebuffer: Option<&DrmFramebuffer>,
-        source_rect: DrmRect,
+        source_rect: DrmSourceRect,
     ) -> Result<()> {
         // Ignores the index because simpledrm has only one CRTC.
         if let Some(framebuffer) = framebuffer {
@@ -278,7 +289,7 @@ impl DrmKmsOps for SimpleDrmDevice {
     fn refresh_dirty_fb(
         &self,
         framebuffer: &DrmFramebuffer,
-        source_rects: &[DrmRect],
+        source_rects: &[DrmSourceRect],
     ) -> Result<()> {
         for source_rect in source_rects {
             self.flush_framebuffer(framebuffer, *source_rect)?;

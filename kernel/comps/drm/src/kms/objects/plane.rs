@@ -14,7 +14,7 @@ use crate::{
         },
         pixel_format::DrmPixelFormat,
     },
-    utils::DrmRect,
+    utils::{DrmCrtcRect, DrmSourceRect},
 };
 
 /// An image layer that can be composed into a CRTC's output.
@@ -93,10 +93,9 @@ pub(super) struct DrmPlaneConfig {
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct DrmPlaneState {
-    // TODO: Represent source coordinates and dimensions as 16.16 fixed-point values.
-    source_rect: DrmRect,
+    source_rect: DrmSourceRect,
     #[expect(dead_code)]
-    crtc_rect: DrmRect,
+    crtc_rect: DrmCrtcRect,
 
     framebuffer: Weak<DrmFramebuffer>,
     crtc: Weak<DrmCrtc>,
@@ -104,8 +103,8 @@ pub(crate) struct DrmPlaneState {
 
 impl DrmPlaneState {
     pub(crate) fn new(
-        source_rect: DrmRect,
-        crtc_rect: DrmRect,
+        source_rect: DrmSourceRect,
+        crtc_rect: DrmCrtcRect,
         framebuffer: Weak<DrmFramebuffer>,
         crtc: Weak<DrmCrtc>,
     ) -> Self {
@@ -117,7 +116,7 @@ impl DrmPlaneState {
         }
     }
 
-    pub(crate) fn source_rect(&self) -> DrmRect {
+    pub(crate) fn source_rect(&self) -> DrmSourceRect {
         self.source_rect
     }
 

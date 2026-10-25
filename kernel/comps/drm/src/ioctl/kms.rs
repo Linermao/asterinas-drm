@@ -32,7 +32,7 @@ use crate::{
         },
         pixel_format::DrmPixelFormat,
     },
-    utils::{DrmRect, DrmSize},
+    utils::{DrmCrtcRect, DrmRect, DrmSize, DrmSourceRect},
 };
 
 impl DrmFile {
@@ -186,9 +186,8 @@ impl DrmFile {
 
         let primary_plane = crtc.primary_plane().upgrade().ok_or(Errno::ENOENT)?;
         let plane_state = primary_plane.state().lock();
-        // TODO: Convert source coordinates from 16.16 fixed-point once supported.
-        args.x = plane_state.source_rect().x();
-        args.y = plane_state.source_rect().y();
+        args.x = plane_state.source_rect().x().integer_part();
+        args.y = plane_state.source_rect().y().integer_part();
         args.fb_id = plane_state
             .framebuffer()
             .upgrade()
@@ -269,9 +268,22 @@ impl DrmFile {
         } else {
             Some(self.lookup_framebuffer(args.fb_id).ok_or(Errno::ENOENT)?)
         };
-        let source_rect = display_mode.map_or_else(DrmRect::default, |mode| {
-            DrmRect::new(args.x, args.y, mode.hdisplay(), mode.vdisplay())
-        });
+        let source_rect = if let Some(mode) = display_mode {
+            DrmSourceRect::try_from_pixel_rect(DrmRect::new(
+                args.x,
+                args.y,
+                mode.hdisplay(),
+                mode.vdisplay(),
+            ))
+            .ok_or_else(|| {
+                Error::with_message(
+                    Errno::EINVAL,
+                    "the CRTC source rectangle exceeds the 16.16 range",
+                )
+            })?
+        } else {
+            DrmSourceRect::default()
+        };
         let mut matched_connector_encoders: Vec<(&Arc<DrmConnector>, &Arc<DrmEncoder>)> =
             Vec::with_capacity(connector_ids.len());
 
@@ -291,9 +303,7 @@ impl DrmFile {
             }
 
             let framebuffer_size = framebuffer.size();
-            if !DrmRect::new(0, 0, framebuffer_size.width(), framebuffer_size.height())
-                .contains_rect(&source_rect)
-            {
+            if !source_rect.is_within_framebuffer(framebuffer_size) {
                 return_errno_with_message!(
                     Errno::EINVAL,
                     "the CRTC scanout rectangle exceeds the DRM framebuffer"
@@ -375,7 +385,7 @@ impl DrmFile {
             crtc.update_state(DrmCrtcState::new(display_mode));
             primary_plane.update_state(DrmPlaneState::new(
                 source_rect,
-                DrmRect::new(0, 0, display_mode.hdisplay(), display_mode.vdisplay()),
+                DrmCrtcRect::new(0, 0, display_mode.hdisplay(), display_mode.vdisplay()),
                 Arc::downgrade(framebuffer.as_ref().unwrap()),
                 crtc_ref,
             ));
@@ -720,7 +730,7 @@ impl DrmFile {
                 args.clips_ptr as usize,
                 args.num_clips as usize,
             )
-                .map(drop)
+            .map(drop)
         })?;
 
         let kms_ops = self.device().as_kms_ops().unwrap();
