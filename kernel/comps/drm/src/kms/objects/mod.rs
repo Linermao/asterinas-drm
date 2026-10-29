@@ -49,16 +49,16 @@ type DrmKmsObjectMask = BitArray<[u32; MAX_OBJECTS_PER_TYPE / u32::BITS as usize
 /// Owns a DRM device's static topology and shared object registry.
 #[derive(Debug)]
 pub struct DrmKmsObjectStore {
-    registry: Arc<Mutex<DrmObjectRegistry>>,
-    topology: DrmObjectTopology,
+    registry: Arc<Mutex<DrmKmsObjectRegistry>>,
+    topology: DrmKmsObjectTopology,
 }
 
 impl DrmKmsObjectStore {
-    fn new(registry: Arc<Mutex<DrmObjectRegistry>>, topology: DrmObjectTopology) -> Self {
+    fn new(registry: Arc<Mutex<DrmKmsObjectRegistry>>, topology: DrmKmsObjectTopology) -> Self {
         Self { registry, topology }
     }
 
-    pub(crate) fn topology(&self) -> &DrmObjectTopology {
+    pub(crate) fn topology(&self) -> &DrmKmsObjectTopology {
         &self.topology
     }
 
@@ -81,13 +81,13 @@ impl DrmKmsObjectStore {
 
 /// Device-wide ID allocation and weak indexes for dynamic objects.
 #[derive(Debug)]
-pub struct DrmObjectRegistry {
+pub struct DrmKmsObjectRegistry {
     id_allocator: SparseIdAlloc,
     framebuffers: HashMap<u32, Weak<DrmFramebuffer>>,
     property_blobs: HashMap<u32, Weak<DrmPropertyBlob>>,
 }
 
-impl Default for DrmObjectRegistry {
+impl Default for DrmKmsObjectRegistry {
     fn default() -> Self {
         Self {
             id_allocator: SparseIdAlloc::new(1, u32::MAX),
@@ -99,7 +99,7 @@ impl Default for DrmObjectRegistry {
 
 /// The static KMS objects belonging to a DRM device.
 #[derive(Debug, Default)]
-pub struct DrmObjectTopology {
+pub struct DrmKmsObjectTopology {
     planes: HashMap<u32, Arc<DrmPlane>>,
     crtcs: HashMap<u32, Arc<DrmCrtc>>,
     encoders: HashMap<u32, Arc<DrmEncoder>>,
@@ -112,7 +112,7 @@ pub struct DrmObjectTopology {
     property_blobs: HashMap<u32, Arc<DrmPropertyBlob>>,
 }
 
-impl DrmObjectTopology {
+impl DrmKmsObjectTopology {
     fn insert_plane(&mut self, plane: Arc<DrmPlane>) {
         self.planes.insert(plane.id(), plane);
     }
@@ -264,11 +264,11 @@ impl DrmObjectTopology {
 #[derive(Debug)]
 pub(crate) struct DrmKmsObjectId {
     value: u32,
-    registry: Arc<Mutex<DrmObjectRegistry>>,
+    registry: Arc<Mutex<DrmKmsObjectRegistry>>,
 }
 
 impl DrmKmsObjectId {
-    fn alloc(registry: &Arc<Mutex<DrmObjectRegistry>>) -> Result<Self> {
+    fn alloc(registry: &Arc<Mutex<DrmKmsObjectRegistry>>) -> Result<Self> {
         let value =
             registry.lock().id_allocator.alloc().ok_or_else(|| {
                 Error::with_message(Errno::ENOSPC, "all KMS object IDs are in use")

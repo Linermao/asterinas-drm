@@ -10,8 +10,8 @@ use ostd::sync::Mutex;
 
 use crate::kms::{
     objects::{
-        DrmKmsObjectId, DrmKmsObjectIndex, DrmKmsObjectMask, DrmKmsObjectStore, DrmObjectRegistry,
-        DrmObjectTopology, DrmStandardProperty, MAX_OBJECTS_PER_TYPE,
+        DrmKmsObjectId, DrmKmsObjectIndex, DrmKmsObjectMask, DrmKmsObjectRegistry,
+        DrmKmsObjectStore, DrmKmsObjectTopology, DrmStandardProperty, MAX_OBJECTS_PER_TYPE,
         connector::{DrmConnector, DrmConnectorConfig, DrmConnectorType},
         crtc::{DrmCrtc, DrmCrtcConfig},
         encoder::{DrmEncoder, DrmEncoderConfig, DrmEncoderType},
@@ -204,8 +204,8 @@ impl DrmKmsObjectStoreBuilder {
             connectors: connector_configs,
         } = self;
 
-        let registry = Arc::new(Mutex::new(DrmObjectRegistry::default()));
-        let mut topology = DrmObjectTopology::default();
+        let registry = Arc::new(Mutex::new(DrmKmsObjectRegistry::default()));
+        let mut topology = DrmKmsObjectTopology::default();
 
         let mut planes = Vec::with_capacity(plane_configs.len());
         for (plane_index, config) in plane_configs.into_iter().enumerate() {
@@ -355,8 +355,8 @@ impl CrtcSpec {
 }
 
 fn build_plane_properties(
-    registry: &Arc<Mutex<DrmObjectRegistry>>,
-    topology: &mut DrmObjectTopology,
+    registry: &Arc<Mutex<DrmKmsObjectRegistry>>,
+    topology: &mut DrmKmsObjectTopology,
     config: &DrmPlaneConfig,
 ) -> Result<DrmPropertyAttachments> {
     let id = DrmKmsObjectId::alloc(registry)?;
@@ -385,8 +385,8 @@ fn build_plane_properties(
 }
 
 fn build_crtc_properties(
-    registry: &Arc<Mutex<DrmObjectRegistry>>,
-    topology: &mut DrmObjectTopology,
+    registry: &Arc<Mutex<DrmKmsObjectRegistry>>,
+    topology: &mut DrmKmsObjectTopology,
 ) -> Result<DrmPropertyAttachments> {
     build_object_properties(
         registry,
@@ -400,15 +400,15 @@ fn build_crtc_properties(
 }
 
 fn build_connector_properties(
-    registry: &Arc<Mutex<DrmObjectRegistry>>,
-    topology: &mut DrmObjectTopology,
+    registry: &Arc<Mutex<DrmKmsObjectRegistry>>,
+    topology: &mut DrmKmsObjectTopology,
 ) -> Result<DrmPropertyAttachments> {
     build_object_properties(registry, topology, &[(DrmStandardProperty::CrtcId, 0)])
 }
 
 fn build_object_properties(
-    registry: &Arc<Mutex<DrmObjectRegistry>>,
-    topology: &mut DrmObjectTopology,
+    registry: &Arc<Mutex<DrmKmsObjectRegistry>>,
+    topology: &mut DrmKmsObjectTopology,
     property_values: &[(DrmStandardProperty, KmsObjectPropValue)],
 ) -> Result<DrmPropertyAttachments> {
     let mut object_properties = DrmPropertyAttachments::default();
