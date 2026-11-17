@@ -1,3 +1,4 @@
+// AF_UNIX SOCK_STREAM and SOCK_SEQPACKET additionally support MSG_DONTWAIT.
 struct sockaddr = {
     sa_family = AF_INET | AF_UNIX | AF_NETLINK | AF_VSOCK,
     ..

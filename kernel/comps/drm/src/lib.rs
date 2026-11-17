@@ -43,11 +43,13 @@ macro_rules! __log_prefix {
 }
 
 pub mod device;
+mod event;
 mod file;
 pub mod gem;
 mod ioctl;
 pub mod kms;
 mod minor;
+mod sysfs;
 pub mod utils;
 
 pub fn register_device(device: Arc<dyn DrmDevice>) -> Result<()> {
@@ -62,7 +64,15 @@ pub fn register_device(device: Arc<dyn DrmDevice>) -> Result<()> {
 
     let primary_minor = DrmMinor::new(registered_device, DrmMinorType::Primary);
 
-    if let Err(error) = char::register(primary_minor) {
+    if let Err(error) = char::register(primary_minor.clone()) {
+        if let Some(render_minor) = render_minor {
+            let _ = char::unregister(render_minor.id());
+        }
+        return Err(error);
+    }
+
+    if let Err(error) = sysfs::register(primary_minor.clone(), render_minor.clone()) {
+        let _ = char::unregister(primary_minor.id());
         if let Some(render_minor) = render_minor {
             let _ = char::unregister(render_minor.id());
         }

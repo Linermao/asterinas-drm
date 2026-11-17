@@ -33,8 +33,8 @@ pub(crate) struct DrmProperty {
 }
 
 impl DrmProperty {
-    pub(crate) fn id(&self) -> KmsObjectId {
-        self.id
+    pub(crate) fn id(&self) -> u32 {
+        self.id.value()
     }
 
     pub(crate) fn name(&self) -> &FixedCStr<DRM_PROP_NAME_LEN> {
@@ -132,7 +132,7 @@ impl DrmProperty {
 /// The insertion order is preserved
 /// so property IDs and values can be reported to userspace as corresponding arrays.
 ///
-/// Attachments share ownership of each property with the object store
+/// Attachments share ownership of each property with the KMS object collection,
 /// so the property remains alive for as long as it is attached to a KMS object.
 #[derive(Debug, Default)]
 pub(crate) struct DrmPropertyAttachments {
@@ -163,7 +163,7 @@ impl DrmPropertyAttachments {
         &self.attachments
     }
 
-    fn contains(&self, property_id: KmsObjectId) -> bool {
+    fn contains(&self, property_id: u32) -> bool {
         self.attachments
             .iter()
             .any(|attachment| attachment.property.id() == property_id)
@@ -192,7 +192,7 @@ impl DrmPropertyAttachment {
 /// This enum gives kernel code a stable, semantic way to refer to standard properties
 /// without comparing their device-local object IDs or UAPI names.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub(super) enum DrmStandardProperty {
+pub(crate) enum DrmStandardProperty {
     PlaneType,
     InFormats,
     SrcX,
@@ -207,6 +207,7 @@ pub(super) enum DrmStandardProperty {
     CrtcId,
     Active,
     ModeId,
+    Dpms,
 }
 
 impl DrmStandardProperty {
@@ -269,6 +270,17 @@ impl DrmStandardProperty {
             ),
             Self::Active => DrmProperty::new_bool(id, "ACTIVE", DrmPropertyFlags::ATOMIC),
             Self::ModeId => DrmProperty::new_blob(id, "MODE_ID", DrmPropertyFlags::ATOMIC),
+            Self::Dpms => DrmProperty::new_enum(
+                id,
+                "DPMS",
+                DrmPropertyFlags::empty(),
+                vec![
+                    DrmPropertyEnum::new(0, "On"),
+                    DrmPropertyEnum::new(1, "Standby"),
+                    DrmPropertyEnum::new(2, "Suspend"),
+                    DrmPropertyEnum::new(3, "Off"),
+                ],
+            ),
         }
     }
 }

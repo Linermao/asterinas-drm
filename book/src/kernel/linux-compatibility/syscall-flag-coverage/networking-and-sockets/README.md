@@ -81,7 +81,7 @@ Supported functionality in SCML:
 Unsupported flags:
 * `MSG_CONFIRM`
 * `MSG_DONTROUTE`
-* `MSG_DONTWAIT`
+* `MSG_DONTWAIT` on sockets other than UNIX stream and sequenced-packet sockets
 * `MSG_EOR`
 * `MSG_MORE`
 * `MSG_CONFIRM`
@@ -99,6 +99,11 @@ Supported functionality in SCML:
 ```c
 {{#include recvfrom_and_recvmsg.scml}}
 ```
+
+UNIX stream and sequenced-packet sockets also support `MSG_DONTWAIT` on
+receive and send operations.
+This flag prevents blocking for that call without changing `O_NONBLOCK`
+on the shared open file description.
 
 For more information,
 see [the man page](https://man7.org/linux/man-pages/man2/recvfrom.2.html).

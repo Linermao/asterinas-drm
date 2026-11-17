@@ -46,6 +46,7 @@ mod ioctl_defs {
     pub(super) type GetDeviceName = ioc!(EVIOCGNAME,    b'E', 0x06, OutData<[u8]>);
     pub(super) type GetDevicePhys = ioc!(EVIOCGPHYS,    b'E', 0x07, OutData<[u8]>);
     pub(super) type GetDeviceUniq = ioc!(EVIOCGUNIQ,    b'E', 0x08, OutData<[u8]>);
+    pub(super) type GetProperties = ioc!(EVIOCGPROP,    b'E', 0x09, OutData<[u8]>);
     pub(super) type GetKeyState   = ioc!(EVIOCGKEY,     b'E', 0x18, OutData<[u8]>);
     pub(super) type GetLedState   = ioc!(EVIOCGLED,     b'E', 0x19, OutData<[u8]>);
     pub(super) type GetSwState    = ioc!(EVIOCGSW,      b'E', 0x1B, OutData<[u8]>);
@@ -460,6 +461,13 @@ impl PerOpenFileOps for EvdevFile {
                 let event_type = cmd.discriminant();
                 cmd.base_ioctl()
                     .with_writer(|mut writer| handle_get_bit(&evdev, event_type, &mut writer))?;
+            }
+            cmd @ GetProperties => {
+                // Match the empty INPUT_PROP_* bitmap published in sysfs.
+                cmd.with_writer(|mut writer| {
+                    writer.fill_zeros(writer.avail())?;
+                    Ok(())
+                })?;
             }
             cmd @ GetKeyState => {
                 // TODO: We need to track whether the key is currently pressed and report that state

@@ -73,10 +73,13 @@ impl DrmFile {
         let value = match cap {
             DrmGetCapability::TimestampMonotonic => 1,
             DrmGetCapability::Prime => {
-                // TODO: Report PRIME import and export support after
-                // `DRM_IOCTL_PRIME_FD_TO_HANDLE` and `DRM_IOCTL_PRIME_HANDLE_TO_FD`
-                // are implemented.
-                0
+                const DRM_PRIME_CAP_IMPORT: u64 = 1 << 0;
+                const DRM_PRIME_CAP_EXPORT: u64 = 1 << 1;
+                if self.supports_prime() {
+                    DRM_PRIME_CAP_IMPORT | DRM_PRIME_CAP_EXPORT
+                } else {
+                    0
+                }
             }
             DrmGetCapability::SyncObj => device.has_features(DrmFeatures::SYNCOBJ) as u64,
             DrmGetCapability::SyncObjTimeline => {

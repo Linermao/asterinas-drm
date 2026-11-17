@@ -22,6 +22,7 @@ use crate::gem::object::DrmGemObject;
 
 pub(crate) mod mmap_offset;
 pub mod object;
+pub(crate) mod prime;
 pub mod shmem;
 
 /// Operations provided by a GEM-capable DRM driver.
@@ -33,4 +34,13 @@ pub mod shmem;
 pub trait DrmGemOps: Debug + Send + Sync {
     /// Creates a dumb GEM buffer with the requested size.
     fn create_dumb(&self, size: usize) -> Result<Arc<DrmGemObject>>;
+
+    /// Returns whether GEM objects support the minimal PRIME sharing interface.
+    ///
+    /// Objects must be CPU-coherent, support shared mappings, and have no
+    /// outstanding asynchronous device accesses. Imports are restricted to
+    /// objects exported from the same registered DRM device.
+    fn supports_prime(&self) -> bool {
+        false
+    }
 }

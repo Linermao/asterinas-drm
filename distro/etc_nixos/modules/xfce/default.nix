@@ -13,7 +13,10 @@ let
   );
 in
 {
-  imports = [ ./wallpaper.nix ];
+  imports = [
+    ./wallpaper.nix
+    ./wayland.nix
+  ];
 
   environment.systemPackages =
     (lib.optionals (

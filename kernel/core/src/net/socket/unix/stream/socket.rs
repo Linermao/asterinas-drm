@@ -484,7 +484,7 @@ impl Socket for UnixStreamSocket {
         flags: SendFlags,
     ) -> Result<usize> {
         // TODO: Deal with flags
-        if !flags.is_all_supported() {
+        if !(flags & !SendFlags::MSG_DONTWAIT).is_all_supported() {
             warn!("unsupported flags: {:?}", flags);
         }
 
@@ -510,9 +510,14 @@ impl Socket for UnixStreamSocket {
         }
         let mut auxiliary_data = AuxiliaryData::from_control(control_messages)?;
 
-        self.block_on(IoEvents::OUT, self.timeouts.send_timeout(), || {
+        // MSG_DONTWAIT is per call and must not change the shared O_NONBLOCK state.
+        if flags.contains(SendFlags::MSG_DONTWAIT) {
             self.try_send(reader, &mut auxiliary_data, flags)
-        })
+        } else {
+            self.block_on(IoEvents::OUT, self.timeouts.send_timeout(), || {
+                self.try_send(reader, &mut auxiliary_data, flags)
+            })
+        }
     }
 
     fn recvmsg(
@@ -521,14 +526,19 @@ impl Socket for UnixStreamSocket {
         flags: RecvFlags,
     ) -> Result<(RecvOutput, MessageHeader)> {
         // TODO: Deal with flags
-        if !flags.is_all_supported() {
+        if !(flags & !RecvFlags::MSG_DONTWAIT).is_all_supported() {
             warn!("unsupported flags: {:?}", flags);
         }
 
-        let (output, control_messages) =
+        // Wayland drains a blocking socket with MSG_DONTWAIT until EAGAIN.
+        // Waiting here prevents the compositor from flushing its replies.
+        let (output, control_messages) = if flags.contains(RecvFlags::MSG_DONTWAIT) {
+            self.try_recv(writer, flags)?
+        } else {
             self.block_on(IoEvents::IN, self.timeouts.recv_timeout(), || {
                 self.try_recv(writer, flags)
-            })?;
+            })?
+        };
 
         let message_header = MessageHeader::new(None, control_messages);
 

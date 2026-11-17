@@ -8,8 +8,8 @@
 //! Reference: <https://elixir.bootlin.com/linux/v6.17/source/include/uapi/linux/major.h>
 
 mod file;
+mod sysfs;
 
-use alloc::format;
 use core::{
     fmt::Debug,
     sync::atomic::{AtomicU32, Ordering},
@@ -201,7 +201,8 @@ impl Device for EvdevDevice {
     }
 
     fn devtmpfs_meta(&self) -> Option<DevtmpfsNodeMeta> {
-        Some(DevtmpfsNodeMeta::new(format!("input/event{}", self.id.minor().get())).unwrap())
+        // The input class publishes the node together with its sysfs entry.
+        None
     }
 
     fn open(&self) -> Result<Box<dyn PerOpenFileOps>> {
@@ -243,6 +244,14 @@ impl InputHandlerClass for EvdevHandlerClass {
         // Add to our registry for looking up during disconnection.
         EVDEV_DEVICES.lock().insert(minor_id, evdev.clone());
 
+        // Publish only after open() can find the device in both registries.
+        if let Err(error) = sysfs::register(evdev.clone()) {
+            EVDEV_DEVICES.lock().remove(&minor_id);
+            let _ = unregister(evdev.id());
+            ostd::warn!("failed to publish input device '{}': {:?}", dev.name(), error);
+            return Err(ConnectError::InternalError);
+        }
+
         // Return the device as a handler instance.
         Ok(evdev as _)
     }
@@ -269,7 +278,17 @@ impl InputHandlerClass for EvdevHandlerClass {
         };
 
         let evdev = devices.remove(&minor).unwrap();
+        drop(devices);
         let device_id = evdev.id();
+
+        // Remove the published node before removing its file operations.
+        if let Err(err) = sysfs::unregister(minor) {
+            ostd::warn!(
+                "failed to unpublish input device '{}': {:?}",
+                device_name,
+                err
+            );
+        }
 
         // Unregister from the char device subsystem.
         if let Err(err) = unregister(device_id) {
@@ -281,11 +300,9 @@ impl InputHandlerClass for EvdevHandlerClass {
             );
         }
 
-        // TODO: Implement device node deletion when the functionality is available.
         ostd::info!(
-            "Disconnected evdev device '{}' (minor: {}), device node /dev/input/event{} still exists",
+            "Disconnected evdev device '{}' (minor: {})",
             device_name,
-            minor.get(),
             minor.get()
         );
     }
@@ -296,6 +313,8 @@ pub(super) fn init_in_first_kthread() {
 
     static EVDEV_MAJOR: Once<MajorIdOwner> = Once::new();
     EVDEV_MAJOR.call_once(|| acquire_major(MajorId::new(EVDEV_MAJOR_ID)).unwrap());
+
+    sysfs::init();
 
     static REGISTERED_EVDDEV_CLASS: Once<RegisteredInputHandlerClass> = Once::new();
     let handler_class = Arc::new(EvdevHandlerClass);

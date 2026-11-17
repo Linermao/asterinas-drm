@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 
+pub mod dma_buf;
 pub mod file;
 mod fs_impls;
 pub(crate) mod initramfs;

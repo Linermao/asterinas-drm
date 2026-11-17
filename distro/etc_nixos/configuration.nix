@@ -23,10 +23,23 @@
     nameserver 8.8.8.8
   '';
 
-  # Uncomment the three options below to enable the X11 (X.Org) desktop (XFCE).
-  # hardware.graphics.enable = true;
-  # services.xserver.enable = true;
-  # services.xserver.desktopManager.xfce.enable = true;
+  # Keep the Xfce packages and defaults, but start Labwc instead of Xorg.
+  # Set services.xfce-wayland.enable to false to restore the X11 desktop.
+  hardware.graphics.enable = true;
+  services.xserver.enable = true;
+  services.xserver.desktopManager.xfce = {
+    enable = true;
+    enableWaylandSession = true;
+  };
+
+  services.xfce-wayland = {
+    enable = true;
+    # Use "terminal" to isolate compositor startup from the full Xfce session.
+    session = "xfce";
+    # Set to false to try DRM output without initializing libinput.
+    enableInput = true;
+    drmDevice = "/dev/dri/card0";
+  };
 
   # Uncomment the following line to enable Podman.
   # virtualisation.podman.enable = true;
@@ -36,6 +49,12 @@
   environment.systemPackages = with pkgs; [
     hello-asterinas
     gitMinimal
+    wayland-utils # wayland-info: compositor interfaces and protocol versions.
+    xdpyinfo # X11 server information when running the Xorg desktop.
+    openarena
+    supertuxkart
+    mesa-demos
+    glmark2
   ];
 
   system.nixos.distroName = "Asterinas NixOS";

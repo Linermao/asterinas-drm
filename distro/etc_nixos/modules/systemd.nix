@@ -27,9 +27,11 @@
     hashedPassword = null;
   };
 
-  systemd.targets.getty.wants =
+  # NixOS adds tty1 when no display manager is enabled. Override that default
+  # so its getty cannot cancel the custom desktop service during startup.
+  systemd.targets.getty.wants = lib.mkForce (
     # tty1: provide text login ONLY when X server is disabled.
-    # Other VTs: always provide text logins
+    # Other VTs: always provide text logins.
     (lib.optional (!config.services.xserver.enable) "autovt@tty1.service") ++ [
       "autovt@hvc0.service"
       "autovt@tty2.service"
@@ -37,7 +39,8 @@
       "autovt@tty4.service"
       "autovt@tty5.service"
       "autovt@tty6.service"
-    ];
+    ]
+  );
 
   systemd.settings.Manager = {
     LogLevel = "crit";

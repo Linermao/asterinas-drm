@@ -11,6 +11,7 @@ use aster_core::{
     current,
     events::IoEvents,
     fs::{
+        dma_buf::{self, DmaBuf, DmaBufFlags},
         file::{Mappable, MappableObject, MappedObject, PerOpenFileOps, StatusFlags},
         vfs::{inode::FileOps, path::Path},
     },
@@ -32,9 +33,10 @@ use sparse_id_alloc::SparseIdAlloc;
 
 use crate::{
     device::{DrmDevice, DrmMaster},
-    gem::object::DrmGemObject,
+    event::DrmEventReceiver,
+    gem::{object::DrmGemObject, prime::DrmPrimeBuffer},
     has_current_sys_admin,
-    kms::objects::{KmsObjectId, framebuffer::DrmFramebuffer},
+    kms::objects::{framebuffer::DrmFramebuffer, property::blob::DrmPropertyBlob},
     minor::{DrmMinor, DrmMinorType},
 };
 
@@ -55,6 +57,11 @@ pub(super) struct DrmFile {
     gem_handles: Mutex<DrmGemHandleTable>,
     /// Framebuffers created through this open file.
     framebuffers: Mutex<Vec<Arc<DrmFramebuffer>>>,
+    /// Property blobs created through this open file.
+    property_blobs: Mutex<Vec<Arc<DrmPropertyBlob>>>,
+
+    /// The per-file event receiver.
+    event_receiver: Arc<DrmEventReceiver>,
 }
 
 impl DrmFile {
@@ -94,6 +101,9 @@ impl DrmFile {
 
             gem_handles: Mutex::new(DrmGemHandleTable::new()),
             framebuffers: Mutex::new(Vec::new()),
+            property_blobs: Mutex::new(Vec::new()),
+
+            event_receiver: Arc::new(DrmEventReceiver::default()),
         }
     }
 
@@ -159,9 +169,64 @@ impl DrmFile {
     }
 
     pub(super) fn add_gem_object(&self, gem_object: Arc<DrmGemObject>) -> Result<u32> {
-        let handle = self.gem_handles.lock().insert(Arc::clone(&gem_object))?;
+        let mut gem_handles = self.gem_handles.lock();
+        let handle = gem_handles.insert(Arc::clone(&gem_object))?;
+        // Publish mmap access before another thread can close the new handle.
         gem_object.allow_mmap(self.client_id);
         Ok(handle)
+    }
+
+    pub(super) fn supports_prime(&self) -> bool {
+        self.device()
+            .as_gem_ops()
+            .is_some_and(|ops| ops.supports_prime())
+    }
+
+    pub(super) fn export_prime_buffer(&self, handle: u32, flags: DmaBufFlags) -> Result<i32> {
+        if !self.supports_prime() {
+            return_errno_with_message!(Errno::EOPNOTSUPP, "the DRM device lacks PRIME sharing");
+        }
+        let object = self.lookup_gem_object(handle)?;
+        let buffer = Arc::new(DrmPrimeBuffer::new(
+            self.minor.registered_device().clone(),
+            object,
+        ));
+        dma_buf::export(buffer, flags)
+    }
+
+    /// Imports a buffer and copies its handle out while handle changes are serialized.
+    ///
+    /// Repeated imports, including imports of this file's own exports, return
+    /// the existing handle. A failed copy-out only removes a newly created handle.
+    pub(super) fn import_prime_buffer(
+        &self,
+        buffer: &dyn DmaBuf,
+        write_handle: impl FnOnce(u32) -> Result<()>,
+    ) -> Result<()> {
+        if !self.supports_prime() {
+            return_errno_with_message!(Errno::EOPNOTSUPP, "the DRM device lacks PRIME sharing");
+        }
+        let buffer = buffer.downcast_ref::<DrmPrimeBuffer>().ok_or_else(|| {
+            Error::with_message(Errno::EINVAL, "the dma-buf was not exported by DRM")
+        })?;
+        let object = buffer.object(self.minor.registered_device())?;
+        let mut gem_handles = self.gem_handles.lock();
+        if let Some((&handle, _)) = gem_handles
+            .objects
+            .iter()
+            .find(|(_, current)| Arc::ptr_eq(current, &object))
+        {
+            return write_handle(handle);
+        }
+
+        let handle = gem_handles.insert(object.clone())?;
+        object.allow_mmap(self.client_id);
+        if let Err(error) = write_handle(handle) {
+            let _ = gem_handles.remove(handle);
+            object.revoke_mmap(self.client_id);
+            return Err(error);
+        }
+        Ok(())
     }
 
     pub(super) fn lookup_gem_object(&self, handle: u32) -> Result<Arc<DrmGemObject>> {
@@ -190,19 +255,10 @@ impl DrmFile {
     }
 
     pub(super) fn add_framebuffer(&self, framebuffer: Arc<DrmFramebuffer>) {
-        let mut framebuffers = self.framebuffers.lock();
-        framebuffers.push(framebuffer);
+        self.framebuffers.lock().push(framebuffer);
     }
 
-    pub(super) fn lookup_framebuffer(&self, id: KmsObjectId) -> Option<Arc<DrmFramebuffer>> {
-        self.framebuffers
-            .lock()
-            .iter()
-            .find(|framebuffer| framebuffer.id() == id)
-            .cloned()
-    }
-
-    pub(super) fn framebuffer_ids(&self) -> Vec<KmsObjectId> {
+    pub(super) fn framebuffer_ids(&self) -> Vec<u32> {
         self.framebuffers
             .lock()
             .iter()
@@ -210,12 +266,38 @@ impl DrmFile {
             .collect()
     }
 
-    pub(super) fn remove_framebuffer(&self, id: KmsObjectId) -> Option<Arc<DrmFramebuffer>> {
+    pub(super) fn remove_framebuffer(&self, id: u32) -> Result<Arc<DrmFramebuffer>> {
         let mut framebuffers = self.framebuffers.lock();
         let position = framebuffers
             .iter()
-            .position(|framebuffer| framebuffer.id() == id)?;
-        Some(framebuffers.swap_remove(position))
+            .position(|framebuffer| framebuffer.id() == id)
+            .ok_or_else(|| {
+                Error::with_message(
+                    Errno::ENOENT,
+                    "the DRM framebuffer is not owned by this file",
+                )
+            })?;
+
+        Ok(framebuffers.swap_remove(position))
+    }
+
+    pub(super) fn add_property_blob(&self, blob: Arc<DrmPropertyBlob>) {
+        self.property_blobs.lock().push(blob);
+    }
+
+    pub(super) fn remove_property_blob(&self, id: u32) -> Result<Arc<DrmPropertyBlob>> {
+        let mut property_blobs = self.property_blobs.lock();
+        let position = property_blobs
+            .iter()
+            .position(|blob| blob.id() == id)
+            .ok_or_else(|| {
+                Error::with_message(
+                    Errno::ENOENT,
+                    "the DRM framebuffer is not owned by this file",
+                )
+            })?;
+
+        Ok(property_blobs.swap_remove(position))
     }
 
     /// Keeps tracking the ioctl caller while this file has never been master,
@@ -270,6 +352,10 @@ impl DrmFile {
             )
         })
     }
+
+    pub(crate) fn event_receiver(&self) -> &Arc<DrmEventReceiver> {
+        &self.event_receiver
+    }
 }
 
 impl PerOpenFileOps for DrmFile {
@@ -278,7 +364,8 @@ impl PerOpenFileOps for DrmFile {
     }
 
     fn is_offset_aware(&self) -> bool {
-        true
+        // Reads events from the queue without using or advancing a file offset.
+        false
     }
 
     fn mappable(&self, request: FileMmapRequest) -> Result<MappableObject<'_>> {
@@ -316,10 +403,14 @@ impl FileOps for DrmFile {
     fn read_at(
         &self,
         _offset: usize,
-        _writer: &mut VmWriter,
-        _status_flags: StatusFlags,
+        writer: &mut VmWriter,
+        status_flags: StatusFlags,
     ) -> Result<usize> {
-        return_errno_with_message!(Errno::EINVAL, "reading from a DRM file is not supported")
+        if status_flags.contains(StatusFlags::O_NONBLOCK) {
+            self.event_receiver.try_read(writer)
+        } else {
+            self.wait_events(IoEvents::IN, None, || self.event_receiver.try_read(writer))
+        }
     }
 
     fn write_at(
@@ -333,22 +424,13 @@ impl FileOps for DrmFile {
 }
 
 impl Pollable for DrmFile {
-    fn poll(&self, mask: IoEvents, _poller: Option<&mut PollHandle>) -> IoEvents {
-        let events = IoEvents::IN | IoEvents::OUT;
-        events & mask
+    fn poll(&self, mask: IoEvents, poller: Option<&mut PollHandle>) -> IoEvents {
+        self.event_receiver.poll(mask, poller)
     }
 }
 
 impl Drop for DrmFile {
     fn drop(&mut self) {
-        let device = self.minor.device().clone();
-        if let Some(kms_ops) = device.as_kms_ops() {
-            let mut object_store = kms_ops.mode_config().object_store().lock();
-            for framebuffer in self.framebuffers.get_mut().drain(..) {
-                object_store.free_object_id(framebuffer.id());
-            }
-        }
-
         for gem_object in self.gem_handles.get_mut().drain() {
             gem_object.revoke_mmap(self.client_id);
         }

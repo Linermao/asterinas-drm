@@ -1149,8 +1149,19 @@ impl MapHandle<'_, '_, '_> {
             .cursor_mut(&preempt_guard, &map_range)
             .unwrap();
         if cursor.query().unwrap().1.is_some() {
-            // We assume this is a race condition because the page fault has already been handled.
-            // Therefore, no action is required.
+            // Fork currently write-protects RAM PTEs, including shared device
+            // mappings backed by UFrame. Restore this mapping's permissions
+            // without copying the device's frame. Also invalidate a stale TLB
+            // entry if another thread has already handled the fault.
+            cursor.protect_next(PAGE_SIZE, |flags, _cache| {
+                let state = *flags & (PageFlags::ACCESSED | PageFlags::DIRTY);
+                *flags = page_prop.flags | state;
+            });
+            cursor
+                .flusher()
+                .issue_tlb_flush(TlbFlushOp::for_range(map_range));
+            cursor.flusher().dispatch_tlb_flush();
+            cursor.flusher().sync_tlb_flush();
             return;
         }
         cursor.map(frame, page_prop);

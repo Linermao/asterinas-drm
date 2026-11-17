@@ -3,6 +3,7 @@
 use alloc::{
     boxed::Box,
     format,
+    string::String,
     sync::{Arc, Weak},
 };
 
@@ -63,6 +64,19 @@ impl DrmMinor {
 
     pub(super) fn device(&self) -> &Arc<dyn DrmDevice> {
         self.registered_device.device()
+    }
+
+    pub(super) fn registered_device(&self) -> &Arc<RegisteredDrmDevice> {
+        &self.registered_device
+    }
+
+    /// Returns the device node's name within `/dev/dri` and the DRM sysfs class.
+    pub(super) fn name(&self) -> String {
+        let index = self.registered_device.index();
+        match self.type_ {
+            DrmMinorType::Primary => format!("card{}", index),
+            DrmMinorType::Render => format!("renderD{}", index + RENDER_MINOR_BASE),
+        }
     }
 
     /// Opens a client through this minor and returns its master context, if applicable.
@@ -138,15 +152,8 @@ impl Device for DrmMinor {
     }
 
     fn devtmpfs_meta(&self) -> Option<DevtmpfsNodeMeta> {
-        let index = self.registered_device.index();
-        match self.type_ {
-            DrmMinorType::Primary => {
-                Some(DevtmpfsNodeMeta::new(format!("dri/card{}", index)).unwrap())
-            }
-            DrmMinorType::Render => Some(
-                DevtmpfsNodeMeta::new(format!("dri/renderD{}", index + RENDER_MINOR_BASE)).unwrap(),
-            ),
-        }
+        // The device model publishes the devtmpfs node together with sysfs.
+        None
     }
 
     fn open(&self) -> Result<Box<dyn PerOpenFileOps>> {

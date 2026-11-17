@@ -144,6 +144,42 @@ Supported functionality in SCML:
 {{#include ioctl.scml}}
 ```
 
+`DRM_IOCTL_MODE_ADDFB2` supports the advertised single-plane pixel formats
+with an implicit linear layout (`flags = 0` and zero modifiers).
+The first GEM handle, pitch, and offset describe the framebuffer storage.
+Multi-plane formats, interlaced framebuffers, and explicit modifiers are not supported.
+
+Legacy `DRM_IOCTL_MODE_PAGE_FLIP` supports synchronous flips and optional
+`DRM_MODE_PAGE_FLIP_EVENT` notifications. Async and target-sequence flags are
+not supported. Simpledrm copies the image into the firmware framebuffer and
+reports completion at the next software vblank; it does not provide hardware
+vertical synchronization. DRM file reads return complete events, and polling
+reports readability only when an event is queued.
+
+Connectors expose the legacy `DPMS` enum through `MODE_SETPROPERTY` and
+`MODE_OBJ_SETPROPERTY`. Simpledrm blanks the framebuffer for the non-On states
+because firmware display power control is unavailable.
+`MODE_CLOSEFB` releases the calling file's ownership while active planes keep
+the framebuffer alive. `WAIT_VBLANK` supports synchronous waits and event
+notifications, but not signal delivery.
+`MODE_CURSOR` and `MODE_CURSOR2` accept hiding or moving an absent hardware
+cursor; installing a cursor buffer is not supported.
+
+DRM PRIME supports exporting CPU-coherent GEM buffers with
+`DRM_IOCTL_PRIME_HANDLE_TO_FD` and importing them on the same DRM device with
+`DRM_IOCTL_PRIME_FD_TO_HANDLE`.
+Exports accept `DRM_CLOEXEC` and `DRM_RDWR`.
+Repeated imports into one DRM file return the existing handle.
+The dma-buf descriptors support shared memory mappings,
+size discovery through `lseek`,
+and `DMA_BUF_IOCTL_SYNC` with read/write and start/end flags.
+Cross-device DMA attachments and asynchronous fences are not supported.
+
+Evdev devices publish input-class and character-device sysfs links.
+Each event node's input parent exports its identity and capability bitmaps in
+`uevent` for daemonless device discovery. `EVIOCGPROP` reports an empty
+`INPUT_PROP_*` bitmap, matching the current input-device abstraction.
+
 For more information,
 see [the man page](https://man7.org/linux/man-pages/man2/ioctl.2.html).
 
