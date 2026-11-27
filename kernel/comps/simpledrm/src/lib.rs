@@ -41,7 +41,7 @@ use aster_drm::{
         pixel_format::DrmPixelFormat,
         software_vblank::DrmSoftwareVblank,
     },
-    utils::{DrmRect, DrmSize},
+    utils::{DrmRect, DrmSize, DrmSourceRect},
 };
 use aster_framebuffer::{
     framebuffer::{self, FrameBuffer},
@@ -137,7 +137,24 @@ impl SimpleDrmDevice {
         })
     }
 
-    fn flush_framebuffer(&self, framebuffer: &DrmFramebuffer, source_rect: DrmRect) -> Result<()> {
+    fn flush_framebuffer(
+        &self,
+        framebuffer: &DrmFramebuffer,
+        source_rect: DrmSourceRect,
+    ) -> Result<()> {
+        let (Some(x), Some(y), Some(width), Some(height)) = (
+            source_rect.x().try_to_pixels(),
+            source_rect.y().try_to_pixels(),
+            source_rect.width().try_to_pixels(),
+            source_rect.height().try_to_pixels(),
+        ) else {
+            return Err(errno!(
+                EINVAL,
+                "simpledrm requires a pixel-aligned source rectangle"
+            ));
+        };
+        let source_rect = DrmRect::new(x, y, width, height);
+
         if framebuffer.pixel_format() != self.pixel_format {
             return Err(errno!(
                 EINVAL,
@@ -260,7 +277,7 @@ impl DrmKmsOps for SimpleDrmDevice {
         &self,
         _crtc_index: KmsObjectIndex,
         framebuffer: Option<&DrmFramebuffer>,
-        source_rect: DrmRect,
+        source_rect: DrmSourceRect,
     ) -> Result<()> {
         // simpledrm has a single CRTC backed by the boot framebuffer, so the CRTC index is unused.
         // With no framebuffer, there is nothing to copy to the firmware framebuffer.
@@ -275,7 +292,7 @@ impl DrmKmsOps for SimpleDrmDevice {
     fn refresh_dirty_fb(
         &self,
         framebuffer: &DrmFramebuffer,
-        source_rects: &[DrmRect],
+        source_rects: &[DrmSourceRect],
     ) -> Result<()> {
         for source_rect in source_rects {
             self.flush_framebuffer(framebuffer, *source_rect)?;

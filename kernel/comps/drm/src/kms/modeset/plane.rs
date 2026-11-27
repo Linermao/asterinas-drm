@@ -4,15 +4,14 @@ use alloc::sync::{Arc, Weak};
 
 use crate::{
     kms::objects::{crtc::DrmCrtc, framebuffer::DrmFramebuffer},
-    utils::DrmRect,
+    utils::{DrmCrtcRect, DrmSourceRect},
 };
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct DrmPlaneState {
-    // TODO: Represent source coordinates and dimensions as 16.16 fixed-point values.
-    source_rect: DrmRect,
+    source_rect: DrmSourceRect,
     #[expect(dead_code)]
-    crtc_rect: DrmRect,
+    crtc_rect: DrmCrtcRect,
 
     /// Keeps the bound framebuffer alive independently of its creating file.
     framebuffer: Option<Arc<DrmFramebuffer>>,
@@ -21,8 +20,8 @@ pub(crate) struct DrmPlaneState {
 
 impl DrmPlaneState {
     pub(crate) fn new(
-        source_rect: DrmRect,
-        crtc_rect: DrmRect,
+        source_rect: DrmSourceRect,
+        crtc_rect: DrmCrtcRect,
         framebuffer: Option<Arc<DrmFramebuffer>>,
         crtc: Weak<DrmCrtc>,
     ) -> Self {
@@ -34,7 +33,7 @@ impl DrmPlaneState {
         }
     }
 
-    pub(crate) fn source_rect(&self) -> DrmRect {
+    pub(crate) fn source_rect(&self) -> DrmSourceRect {
         self.source_rect
     }
 

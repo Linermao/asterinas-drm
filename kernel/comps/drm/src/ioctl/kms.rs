@@ -34,7 +34,7 @@ use crate::{
         },
         pixel_format::DrmPixelFormat,
     },
-    utils::{DrmRect, DrmSize},
+    utils::{DrmCrtcRect, DrmRect, DrmSize, DrmSourceRect, DrmU16F16},
 };
 
 impl DrmFile {
@@ -323,14 +323,13 @@ impl DrmFile {
         };
 
         let plane_state = modeset_state.plane_state(primary_plane.index());
-        // TODO: Convert source coordinates from 16.16 fixed-point once supported.
-        args.x = plane_state.source_rect().x();
-        args.y = plane_state.source_rect().y();
+        let source_rect = plane_state.source_rect();
+        args.x = source_rect.x().integer_part();
+        args.y = source_rect.y().integer_part();
 
-        let fb_id = plane_state
+        args.fb_id = plane_state
             .framebuffer()
             .map_or(0, |framebuffer| framebuffer.id());
-        args.fb_id = fb_id;
         drop(modeset_state);
 
         cmd.write(&args)?;
@@ -408,9 +407,17 @@ impl DrmFile {
                     .ok_or(Errno::ENOENT)?,
             )
         };
-        let source_rect = display_mode.map_or_else(DrmRect::default, |mode| {
-            DrmRect::new(args.x, args.y, mode.hdisplay(), mode.vdisplay())
-        });
+
+        let source_rect = if let Some(mode) = display_mode {
+            DrmSourceRect::new(
+                DrmU16F16::try_from_pixels(args.x)?,
+                DrmU16F16::try_from_pixels(args.y)?,
+                DrmU16F16::try_from_pixels(mode.hdisplay())?,
+                DrmU16F16::try_from_pixels(mode.vdisplay())?,
+            )
+        } else {
+            DrmSourceRect::default()
+        };
         let mut matched_connector_encoders: Vec<(&Arc<DrmConnector>, &Arc<DrmEncoder>)> =
             Vec::with_capacity(connector_ids.len());
 
@@ -430,9 +437,12 @@ impl DrmFile {
             }
 
             let framebuffer_size = framebuffer.size();
-            if !DrmRect::new(0, 0, framebuffer_size.width(), framebuffer_size.height())
-                .contains_rect(&source_rect)
-            {
+            if !source_rect.is_within_pixel_rect(DrmRect::new(
+                0,
+                0,
+                framebuffer_size.width(),
+                framebuffer_size.height(),
+            )) {
                 return Err(errno!(
                     EINVAL,
                     "the CRTC scanout rectangle exceeds the DRM framebuffer"
@@ -537,7 +547,7 @@ impl DrmFile {
                 primary_plane.index(),
                 DrmPlaneState::new(
                     source_rect,
-                    DrmRect::new(0, 0, display_mode.hdisplay(), display_mode.vdisplay()),
+                    DrmCrtcRect::new(0, 0, display_mode.hdisplay(), display_mode.vdisplay()),
                     framebuffer,
                     crtc_ref,
                 ),
@@ -865,7 +875,7 @@ impl DrmFile {
                 args.clips_ptr as usize,
                 args.num_clips as usize,
             )
-                .map(drop)
+            .map(drop)
         })?;
 
         let framebuffer = dynamic_objects

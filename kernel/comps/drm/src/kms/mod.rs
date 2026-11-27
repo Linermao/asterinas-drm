@@ -21,7 +21,7 @@ use crate::{
             framebuffer::DrmFramebuffer,
         },
     },
-    utils::{DrmRect, DrmSize},
+    utils::{DrmSize, DrmSourceRect},
 };
 
 pub mod display_info;
@@ -58,7 +58,7 @@ pub trait DrmKmsOps: DrmDevice {
         &self,
         crtc_index: KmsObjectIndex,
         framebuffer: Option<&DrmFramebuffer>,
-        source_rect: DrmRect,
+        source_rect: DrmSourceRect,
     ) -> Result<()>;
 
     /// Refreshes the regions of a framebuffer currently scanned out by planes.
@@ -67,7 +67,7 @@ pub trait DrmKmsOps: DrmDevice {
     fn refresh_dirty_fb(
         &self,
         framebuffer: &DrmFramebuffer,
-        source_rects: &[DrmRect],
+        source_rects: &[DrmSourceRect],
     ) -> Result<()>;
 
     /// Enables vblank notifications for the CRTC.
