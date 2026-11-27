@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use crate::kms::display_mode::DrmDisplayMode;
+use alloc::sync::Arc;
+
+use crate::kms::{display_mode::DrmDisplayMode, objects::property::blob::DrmPropertyBlob};
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct DrmCrtcState {
@@ -9,9 +11,10 @@ pub(crate) struct DrmCrtcState {
 }
 
 impl DrmCrtcState {
-    pub(crate) fn new(display_mode: DrmDisplayMode) -> Self {
+    pub(crate) fn new(mode_blob: Arc<DrmPropertyBlob>, display_mode: DrmDisplayMode) -> Self {
         Self {
             enable_state: CrtcEnableState::Enabled {
+                mode_blob,
                 display_mode,
                 is_active: true,
             },
@@ -32,6 +35,7 @@ enum CrtcEnableState {
     #[default]
     Disabled,
     Enabled {
+        mode_blob: Arc<DrmPropertyBlob>,
         display_mode: DrmDisplayMode,
         #[expect(unused)]
         is_active: bool,

@@ -7,6 +7,7 @@ use aster_util::fixed_str::FixedCStr;
 use int_to_c_enum::TryFromInt;
 use ostd::mm::VmIo;
 use ostd_pod::Pod;
+use zerocopy::IntoBytes;
 
 use crate::{
     device::DrmFeatures,
@@ -542,7 +543,15 @@ impl DrmFile {
                 }
             }
 
-            modeset_state.set_crtc_state(crtc.index(), DrmCrtcState::new(display_mode));
+            let blob_id = object_store.alloc_object_id()?;
+            let mode_blob = Arc::new(DrmPropertyBlob::new_dynamic(
+                blob_id,
+                args.mode.as_bytes().into(),
+                dynamic_objects,
+            ));
+            dynamic_objects.lock().add_property_blob(&mode_blob);
+
+            modeset_state.set_crtc_state(crtc.index(), DrmCrtcState::new(mode_blob, display_mode));
             modeset_state.set_plane_state(
                 primary_plane.index(),
                 DrmPlaneState::new(
