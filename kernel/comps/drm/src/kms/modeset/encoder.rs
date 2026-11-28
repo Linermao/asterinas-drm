@@ -4,7 +4,7 @@ use alloc::sync::Weak;
 
 use crate::kms::objects::crtc::DrmCrtc;
 
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub(crate) struct DrmEncoderState {
     current_crtc: Weak<DrmCrtc>,
 }

@@ -12,7 +12,7 @@ use crate::kms::{
 ///
 /// Supported CRTCs are represented by their per-type object indices in a bitmask.
 #[derive(Debug)]
-pub(crate) struct DrmPlane {
+pub struct DrmPlane {
     id: OwnedKmsObjectId,
     index: KmsObjectIndex,
     config: DrmPlaneConfig,
@@ -38,7 +38,7 @@ impl DrmPlane {
         self.id.value()
     }
 
-    pub(crate) fn index(&self) -> KmsObjectIndex {
+    pub fn index(&self) -> KmsObjectIndex {
         self.index
     }
 

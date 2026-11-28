@@ -39,7 +39,7 @@ impl DrmCrtc {
         self.id.value()
     }
 
-    pub(crate) fn index(&self) -> KmsObjectIndex {
+    pub fn index(&self) -> KmsObjectIndex {
         self.index
     }
 
@@ -47,7 +47,7 @@ impl DrmCrtc {
         self.config.gamma_size
     }
 
-    pub(crate) fn primary_plane(&self) -> &Weak<DrmPlane> {
+    pub fn primary_plane(&self) -> &Weak<DrmPlane> {
         &self.config.primary_plane
     }
 

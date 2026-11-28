@@ -17,6 +17,7 @@ use crate::kms::{
     objects::{KmsObjectIndex, KmsStaticObjects},
 };
 
+pub mod atomic;
 pub(crate) mod connector;
 pub(crate) mod crtc;
 pub(crate) mod encoder;
@@ -28,7 +29,7 @@ pub(crate) mod plane;
 /// in the collection used to construct this state.
 /// An index outside the corresponding state array causes a panic.
 #[derive(Debug)]
-pub(crate) struct KmsModesetState {
+pub struct KmsModesetState {
     plane_state: Box<[DrmPlaneState]>,
     crtc_state: Box<[DrmCrtcState]>,
     encoder_state: Box<[DrmEncoderState]>,
@@ -52,11 +53,11 @@ impl KmsModesetState {
         }
     }
 
-    pub(crate) fn plane_state(&self, index: KmsObjectIndex) -> &DrmPlaneState {
+    pub fn plane_state(&self, index: KmsObjectIndex) -> &DrmPlaneState {
         &self.plane_state[index.get()]
     }
 
-    pub(crate) fn crtc_state(&self, index: KmsObjectIndex) -> &DrmCrtcState {
+    pub fn crtc_state(&self, index: KmsObjectIndex) -> &DrmCrtcState {
         &self.crtc_state[index.get()]
     }
 

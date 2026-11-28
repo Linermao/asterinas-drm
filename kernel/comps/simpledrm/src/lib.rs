@@ -22,14 +22,20 @@ use core::{fmt::Debug, num::NonZeroU32};
 
 use aster_core::prelude::*;
 use aster_drm::{
-    device::{DrmDevice, DrmFeatures},
-    gem::{DrmGemOps, object::DrmGemObject, shmem::DrmGemShmemBackend},
-    kms::{
+    device::{DrmDevice, DrmFeatures}, gem::{DrmGemOps, object::DrmGemObject, shmem::DrmGemShmemBackend}, kms::{
         DrmKms, DrmKmsOps, KmsModeConfig,
         display_info::{DrmDisplayInfo, SubpixelOrder},
         display_mode::DrmDisplayMode,
+        modeset::{
+            KmsModesetState,
+            atomic::{
+                DrmAtomicOps, DrmAtomicState, DrmPlaneCheckLimits, atomic_helper_check,
+                atomic_helper_check_crtc_mode_size, atomic_helper_check_crtc_primary_plane,
+                atomic_helper_check_plane, atomic_helper_commit,
+            },
+        },
         objects::{
-            KmsObjectIndex,
+            KmsObjectIndex, KmsObjectStore,
             builder::KmsObjectStoreBuilder,
             connector::{
                 DrmConnector, DrmConnectorProbeState, DrmConnectorStatus, DrmConnectorType,
@@ -40,8 +46,7 @@ use aster_drm::{
         },
         pixel_format::DrmPixelFormat,
         software_vblank::DrmSoftwareVblank,
-    },
-    utils::{DrmRect, DrmSize, DrmSourceRect},
+    }, utils::{DrmCrtcRect, DrmRect, DrmSize, DrmSourceRect},
 };
 use aster_framebuffer::{
     framebuffer::{self, FrameBuffer},
@@ -253,6 +258,10 @@ impl DrmKmsOps for SimpleDrmDevice {
         &self.kms
     }
 
+    fn as_atomic_ops(&self) -> Option<&dyn DrmAtomicOps> {
+        Some(self)
+    }
+
     fn probe_connector(&self, _connector: &DrmConnector) -> Result<DrmConnectorProbeState> {
         const SIMPLEDRM_VREFRESH_HZ: u32 = 60;
         const SIMPLEDRM_ASSUMED_DPI: u32 = 96;
@@ -315,5 +324,72 @@ impl DrmKmsOps for SimpleDrmDevice {
             return;
         }
         self.software_vblank.disable();
+    }
+}
+
+impl DrmAtomicOps for SimpleDrmDevice {
+    fn atomic_check(
+        &self,
+        modeset_state: &KmsModesetState,
+        object_store: &KmsObjectStore,
+        atomic_state: &mut DrmAtomicState,
+    ) -> Result<()> {
+        atomic_helper_check(modeset_state, object_store, atomic_state)?;
+        atomic_helper_check_crtc_mode_size(
+            modeset_state,
+            object_store,
+            atomic_state,
+            DrmSize::new(
+                u32::try_from(self.boot_framebuffer.width())?,
+                u32::try_from(self.boot_framebuffer.height())?,
+            ),
+        )?;
+        atomic_helper_check_plane(
+            modeset_state,
+            object_store,
+            atomic_state,
+            DrmPlaneCheckLimits::new(1 << 16, 1 << 16, false, false),
+        )?;
+        atomic_helper_check_crtc_primary_plane(modeset_state, object_store, atomic_state)?;
+
+        Ok(())
+    }
+
+    fn atomic_commit(
+        &self,
+        modeset_state: &mut KmsModesetState,
+        object_store: &KmsObjectStore,
+        atomic_state: &DrmAtomicState,
+    ) -> Result<()> {
+        atomic_helper_commit(modeset_state, object_store, atomic_state)?;
+        Ok(())
+    }
+
+    fn atomic_commit_tail(&self, modeset_state: &KmsModesetState) -> Result<()> {
+        // TODO?
+        let objects = self.kms.object_store().static_objects();
+
+        for crtc in objects.crtcs() {
+            let crtc_state = modeset_state.crtc_state(crtc.index());
+
+            if !crtc_state.is_active() {
+                continue;
+            }
+
+            // Static topology keeps the primary plane alive.
+            let primary_plane = crtc.primary_plane().upgrade().unwrap();
+            let plane_state = modeset_state.plane_state(primary_plane.index());
+
+            let Some(framebuffer) = plane_state.framebuffer() else {
+                continue;
+            };
+
+            // TODO:
+            // The check phase guarantees that visible planes cover the display.
+            // A plane not covering it here is invisible.
+            self.flush_framebuffer(framebuffer.as_ref(), plane_state.source_rect())?;
+        }
+
+        Ok(())
     }
 }

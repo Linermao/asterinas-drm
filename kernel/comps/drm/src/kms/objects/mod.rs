@@ -143,7 +143,7 @@ impl KmsStaticObjects {
         self.planes.values()
     }
 
-    pub(crate) fn crtcs(&self) -> impl Iterator<Item = &Arc<DrmCrtc>> {
+    pub fn crtcs(&self) -> impl Iterator<Item = &Arc<DrmCrtc>> {
         self.crtcs.values()
     }
 
@@ -157,6 +157,10 @@ impl KmsStaticObjects {
 
     pub(crate) fn lookup_plane_by_id(&self, id: KmsObjectId) -> Option<&Arc<DrmPlane>> {
         self.planes.get(&id)
+    }
+
+    pub(crate) fn lookup_plane_by_index(&self, index: KmsObjectIndex) -> Option<&Arc<DrmPlane>> {
+        self.planes().find(|plane| plane.index() == index)
     }
 
     pub(crate) fn lookup_crtc_by_id(&self, id: KmsObjectId) -> Option<&Arc<DrmCrtc>> {
@@ -219,6 +223,12 @@ impl KmsStaticObjects {
         }
 
         Ok(None)
+    }
+
+    pub(crate) fn standard_property_from_id(&self, prop_id: u32) -> Option<DrmStandardProperty> {
+        self.standard_property_ids
+            .iter()
+            .find_map(|(standard, id)| (*id == prop_id).then_some(*standard))
     }
 
     fn lookup_standard_property(&self, standard: DrmStandardProperty) -> Option<&Arc<DrmProperty>> {

@@ -14,7 +14,7 @@ use ostd::sync::Mutex;
 use crate::{
     device::DrmDevice,
     kms::{
-        modeset::KmsModesetState,
+        modeset::{KmsModesetState, atomic::DrmAtomicOps},
         objects::{
             KmsObjectIndex, KmsObjectStore,
             connector::{DrmConnector, DrmConnectorProbeState},
@@ -39,6 +39,9 @@ pub mod software_vblank;
 /// hardware-facing operations such as connector probing.
 pub trait DrmKmsOps: DrmDevice {
     fn kms(&self) -> &DrmKms;
+
+    /// Returns the Atomic operations implemented by this device, if any.
+    fn as_atomic_ops(&self) -> Option<&dyn DrmAtomicOps>;
 
     /// Probes a connector and returns its refreshed probe-derived state.
     ///

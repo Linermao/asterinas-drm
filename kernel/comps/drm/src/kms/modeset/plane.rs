@@ -8,9 +8,8 @@ use crate::{
 };
 
 #[derive(Clone, Debug, Default)]
-pub(crate) struct DrmPlaneState {
+pub struct DrmPlaneState {
     source_rect: DrmSourceRect,
-    #[expect(dead_code)]
     crtc_rect: DrmCrtcRect,
 
     /// Keeps the bound framebuffer alive independently of its creating file.
@@ -33,11 +32,15 @@ impl DrmPlaneState {
         }
     }
 
-    pub(crate) fn source_rect(&self) -> DrmSourceRect {
+    pub fn source_rect(&self) -> DrmSourceRect {
         self.source_rect
     }
 
-    pub(crate) fn framebuffer(&self) -> Option<&Arc<DrmFramebuffer>> {
+    pub fn crtc_rect(&self) -> DrmCrtcRect {
+        self.crtc_rect
+    }
+
+    pub fn framebuffer(&self) -> Option<&Arc<DrmFramebuffer>> {
         self.framebuffer.as_ref()
     }
 

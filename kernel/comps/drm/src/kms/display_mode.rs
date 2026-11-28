@@ -4,8 +4,9 @@ use alloc::format;
 
 use aster_core::prelude::*;
 use aster_util::fixed_str::FixedCStr;
+use ostd::mm::VmReader;
 
-use crate::utils::DrmSize;
+use crate::{kms::objects::property::blob::DrmPropertyBlob, utils::DrmSize};
 
 const DRM_DISPLAY_MODE_NAME_LEN: usize = 32;
 
@@ -101,6 +102,41 @@ impl DrmDisplayMode {
 
     pub fn vdisplay(&self) -> u32 {
         self.vertical.active
+    }
+
+    /// Compares modes using Linux's `drm_mode_equal()` rules.
+    ///
+    /// Names and origin flags do not affect modesetting. Pixel clocks are
+    /// compared as integer picosecond periods, as in Linux's `KHZ2PICOS`.
+    pub(crate) fn is_equivalent(&self, other: &Self) -> bool {
+        let clocks_equal = if self.pixel_clock_khz != 0 && other.pixel_clock_khz != 0 {
+            1_000_000_000 / self.pixel_clock_khz == 1_000_000_000 / other.pixel_clock_khz
+        } else {
+            self.pixel_clock_khz == other.pixel_clock_khz
+        };
+
+        clocks_equal
+            && self.horizontal == other.horizontal
+            && self.vertical == other.vertical
+            && self.hskew == other.hskew
+            && self.vscan == other.vscan
+            && self.flags == other.flags
+    }
+}
+
+impl TryFrom<&DrmPropertyBlob> for DrmDisplayMode {
+    type Error = Error;
+
+    fn try_from(blob: &DrmPropertyBlob) -> Result<Self> {
+        if blob.len() != size_of::<DrmModeInfo>() {
+            return Err(errno!(EINVAL, "the mode blob length is invalid"));
+        }
+
+        let mode_info = VmReader::from(blob.data())
+            .read_val::<DrmModeInfo>()
+            .map_err(|_| errno!(EINVAL, "the mode blob cannot be read"))?;
+
+        Self::try_from(mode_info)
     }
 }
 
@@ -252,6 +288,19 @@ impl TryFrom<DrmModeInfo> for DrmDisplayMode {
     type Error = Error;
 
     fn try_from(mode_info: DrmModeInfo) -> Result<Self> {
+        if mode_info.clock > i32::MAX as u32 || mode_info.vrefresh > i32::MAX as u32 {
+            return Err(errno!(
+                ERANGE,
+                "the display mode clock or refresh rate exceeds the signed range"
+            ));
+        }
+
+        if mode_info.clock == 0 {
+            return Err(errno!(
+                EINVAL,
+                "the display mode pixel clock must be nonzero"
+            ));
+        }
         let horizontal = DrmModeTiming::new(
             u32::from(mode_info.hdisplay),
             u32::from(mode_info.hsync_start),

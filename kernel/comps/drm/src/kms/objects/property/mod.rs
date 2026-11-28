@@ -11,7 +11,7 @@ pub(crate) mod blob;
 pub(crate) mod in_formats;
 
 pub(crate) const DRM_PROP_NAME_LEN: usize = 32;
-pub(super) type KmsObjectPropValue = u64;
+pub(crate) type KmsObjectPropValue = u64;
 
 /// A DRM property definition attached to a KMS object.
 ///
@@ -39,6 +39,10 @@ impl DrmProperty {
 
     pub(crate) fn name(&self) -> &FixedCStr<DRM_PROP_NAME_LEN> {
         &self.name
+    }
+
+    pub(crate) fn is_immutable(&self) -> bool {
+        self.is_immutable
     }
 
     pub(crate) fn flags(&self) -> DrmPropertyFlags {
@@ -198,7 +202,7 @@ impl DrmPropertyAttachment {
 /// This enum gives kernel code a stable, semantic way to refer to standard properties
 /// without comparing their device-local object IDs or UAPI names.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub(super) enum DrmStandardProperty {
+pub(crate) enum DrmStandardProperty {
     PlaneType,
     InFormats,
     SrcX,
